@@ -37,11 +37,6 @@ struct PortfolioConfig {
  */
 class PortfolioManager {
 public:
-    /**
-     * @brief Constructor
-     * @param config Portfolio configuration
-     * @param id Optional identifier for this manager
-     */
     explicit PortfolioManager(PortfolioConfig config, std::string id = "PORTFOLIO_MANAGER")
         : config_(std::move(config)),
         id_(std::move(id)) {

@@ -20,9 +20,13 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/bin/Debug")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release")
 
 # Find packages
+#set(GTest_DIR "C:/vcpkg/installed/x64-windows/share/gtest")
 find_package(GTest CONFIG REQUIRED)
+#set(nlohmann_json_DIR "C:/vcpkg/installed/x64-windows/share/nlohmann_json")
 find_package(nlohmann_json CONFIG REQUIRED)
+#set(Arrow_DIR "C:/vcpkg/installed/x64-windows/share/arrow")
 find_package(Arrow REQUIRED)
+#set(libpqxx_DIR "C:/vcpkg/installed/x64-windows/share/libpqxx")
 find_package(libpqxx CONFIG REQUIRED)
 
 # Add source files for the library
@@ -33,15 +37,12 @@ set(TRADE_NGIN_SOURCES
     src/core/config_version.cpp 
     src/data/postgres_database.cpp
     src/data/market_data_bus.cpp
-    src/data/conversion_utils.cpp
     src/order/order_manager.cpp
     src/risk/risk_manager.cpp
     src/optimization/dynamic_optimizer.cpp
     src/execution/execution_engine.cpp
     src/portfolio/portfolio_manager.cpp
     src/backtest/transaction_cost_analysis.cpp
-    src/backtest/engine.cpp
-    src/backtest/slippage_model.cpp
     src/strategy/base_strategy.cpp
     src/strategy/trend_following.cpp
 )
