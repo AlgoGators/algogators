@@ -31,6 +31,9 @@ int main() {
         logger_config.destination = LogDestination::BOTH;
         logger_config.log_directory = "logs";
         logger_config.filename_prefix = "bt_portfolio";
+        
+        // Determine config file name (default to config.json)
+        std::string config_filename = "./config.json";
         logger.initialize(logger_config);
 
         std::atomic_thread_fence(std::memory_order_seq_cst);
@@ -47,7 +50,7 @@ int main() {
 
         // Setup database connection pool
         INFO("Initializing database connection pool...");
-        auto credentials = std::make_shared<trade_ngin::CredentialStore>("./config.json");
+        auto credentials = std::make_shared<trade_ngin::CredentialStore>(config_filename);
 
         auto username_result = credentials->get<std::string>("database", "username");
         if (username_result.is_error()) {
@@ -140,7 +143,33 @@ int main() {
         // Configure backtest parameters
         INFO("Loading configuration...");
 
+        // Load portfolio configuration from config.json FIRST (before creating engine)
+        std::ifstream config_file(config_filename);
+        if (!config_file.is_open()) {
+            ERROR("Failed to open config.json");
+            return 1;
+        }
+        nlohmann::json config_json;
+        try {
+            config_file >> config_json;
+        } catch (const std::exception& e) {
+            ERROR("Failed to parse config.json: " + std::string(e.what()));
+            return 1;
+        }
+
+        // Read portfolio_id from config (default to BASE_PORTFOLIO)
+        std::string portfolio_id = "BASE_PORTFOLIO";
+        if (config_json.contains("portfolio_id")) {
+            portfolio_id = config_json["portfolio_id"].get<std::string>();
+        } else if (config_json.contains("portfolio") && config_json["portfolio"].contains("portfolio_id")) {
+            portfolio_id = config_json["portfolio"]["portfolio_id"].get<std::string>();
+        }
+        INFO("Using portfolio_id: " + portfolio_id);
+
         trade_ngin::backtest::BacktestConfig config;
+        
+        // Set portfolio_id in backtest config BEFORE creating engine
+        config.portfolio_id = portfolio_id;
 
         // Convert timestamps to proper format
         auto now = std::chrono::system_clock::now();
@@ -193,6 +222,10 @@ int main() {
         config.portfolio_config.initial_capital = 500000.0;  // $500k
         config.portfolio_config.use_risk_management = true;
         config.portfolio_config.use_optimization = true;
+        
+        // Set strategy_config.initial_capital to match portfolio_config.initial_capital to avoid confusion
+        // (This is stored in run_metadata for reference, but portfolio_config.initial_capital is what's actually used)
+        config.strategy_config.initial_capital = config.portfolio_config.initial_capital;
 
         std::cout << "Retrieved " << config.strategy_config.symbols.size() << " symbols"
                   << std::endl;
@@ -251,20 +284,6 @@ int main() {
         portfolio_config.use_risk_management = true;
         portfolio_config.opt_config = config.portfolio_config.opt_config;
         portfolio_config.risk_config = config.portfolio_config.risk_config;
-
-        // Load portfolio configuration from config.json
-        std::ifstream config_file("./config.json");
-        if (!config_file.is_open()) {
-            ERROR("Failed to open config.json");
-            return 1;
-        }
-        nlohmann::json config_json;
-        try {
-            config_file >> config_json;
-        } catch (const std::exception& e) {
-            ERROR("Failed to parse config.json: " + std::string(e.what()));
-            return 1;
-        }
 
         // Load strategies from config
         std::vector<std::shared_ptr<trade_ngin::StrategyInterface>> strategies;
