@@ -657,6 +657,7 @@ int main(int argc, char* argv[]) {
         INFO("Creating LiveTradingCoordinator for centralized component management");
         LiveTradingConfig coordinator_config;
         coordinator_config.strategy_id = combined_strategy_id;  // From config (Phase 1)
+        coordinator_config.portfolio_id = portfolio_id;         // From config.json
         coordinator_config.schema = "trading";
         coordinator_config.initial_capital = initial_capital;
         coordinator_config.store_results = true;
@@ -811,6 +812,7 @@ int main(int argc, char* argv[]) {
                         db->store_signals(signals_map,
                                           combined_strategy_id,  // Combined strategy_id for tier 2
                                           strategy_name,  // Individual strategy_name for tier 3
+                                          portfolio_id,   // Portfolio identifier
                                           now, "trading.signals");
 
                     if (save_result.is_error()) {
@@ -843,8 +845,9 @@ int main(int argc, char* argv[]) {
         // Load previous day positions for PnL calculation
         INFO("Loading previous day positions for PnL calculation...");
         auto previous_date = now - std::chrono::hours(24);
-        auto previous_positions_result = db->load_positions_by_date(
-            combined_strategy_id, "", previous_date, "trading.positions");
+        auto previous_positions_result =
+            db->load_positions_by_date(combined_strategy_id, "", coordinator_config.portfolio_id,
+                                       previous_date, "trading.positions");
         std::unordered_map<std::string, Position> previous_positions;
 
         if (previous_positions_result.is_ok()) {
@@ -930,6 +933,7 @@ int main(int argc, char* argv[]) {
                 auto prev_strategy_positions_result =
                     db->load_positions_by_date(combined_strategy_id,  // Combined strategy_id
                                                strategy_name,         // Individual strategy_name
+                                               coordinator_config.portfolio_id,  // Portfolio ID
                                                previous_date, "trading.positions");
 
                 if (prev_strategy_positions_result.is_error()) {
@@ -993,6 +997,7 @@ int main(int argc, char* argv[]) {
                             db->store_positions(result.finalized_positions,
                                                 combined_strategy_id,  // Combined strategy_id
                                                 strategy_name,         // Individual strategy_name
+                                                portfolio_id,          // Portfolio identifier
                                                 "trading.positions");
 
                         if (update_result.is_error()) {
@@ -1069,6 +1074,7 @@ int main(int argc, char* argv[]) {
             auto prev_result =
                 db->load_positions_by_date(combined_strategy_id,  // Combined strategy_id
                                            strategy_name,         // Individual strategy_name
+                                           coordinator_config.portfolio_id,  // Portfolio ID
                                            previous_date, "trading.positions");
 
             if (prev_result.is_ok()) {
@@ -1173,6 +1179,7 @@ int main(int argc, char* argv[]) {
                     db->store_executions(executions,
                                          combined_strategy_id,  // Combined strategy_id for tier 2
                                          strategy_name,  // Individual strategy_name for tier 3
+                                         portfolio_id,   // Portfolio identifier
                                          "trading.executions");
 
                 if (save_result.is_error()) {
@@ -1355,6 +1362,7 @@ int main(int argc, char* argv[]) {
                     db->store_positions(strategy_positions_vec,
                                         combined_strategy_id,  // Combined strategy_id for tier 2
                                         strategy_name,  // Individual strategy_name for tier 3
+                                        portfolio_id,   // Portfolio identifier
                                         "trading.positions");
 
                 if (save_result.is_error()) {
@@ -1463,8 +1471,8 @@ int main(int argc, char* argv[]) {
             try {
                 INFO("Using LiveDataLoader to query yesterday's metrics for date: " +
                      yesterday_date_ss.str());
-                auto live_results =
-                    data_loader->load_live_results(combined_strategy_id, previous_date);
+                auto live_results = data_loader->load_live_results(
+                    combined_strategy_id, coordinator_config.portfolio_id, previous_date);
 
                 if (live_results.is_ok()) {
                     auto& row = live_results.value();
@@ -1517,7 +1525,8 @@ int main(int argc, char* argv[]) {
                 auto db_ptr = std::dynamic_pointer_cast<PostgresDatabase>(db);
                 if (db_ptr) {
                     auto prev_agg = db_ptr->get_previous_live_aggregates(
-                        combined_strategy_id, previous_date, "trading.live_results");
+                        combined_strategy_id, coordinator_config.portfolio_id, previous_date,
+                        "trading.live_results");
                     if (prev_agg.is_ok()) {
                         std::tie(day_before_yesterday_portfolio_value,
                                  day_before_aggregate_yesterday_total_pnl,
@@ -1633,8 +1642,8 @@ int main(int argc, char* argv[]) {
 
             // Load existing values from database using LiveDataLoader - DO NOT RECALCULATE
             try {
-                auto margin_metrics =
-                    data_loader->load_margin_metrics(combined_strategy_id, previous_date);
+                auto margin_metrics = data_loader->load_margin_metrics(
+                    combined_strategy_id, coordinator_config.portfolio_id, previous_date);
                 if (margin_metrics.is_ok() && margin_metrics.value().valid) {
                     auto& metrics = margin_metrics.value();
                     yesterday_portfolio_leverage = metrics.portfolio_leverage;
@@ -1675,7 +1684,8 @@ int main(int argc, char* argv[]) {
                 "         COALESCE(total_realized_pnl, 0.0) as total_realized_pnl_prev "
                 "  FROM trading.live_results "
                 "  WHERE strategy_id = '" +
-                combined_strategy_id + "' AND DATE(date) < '" + yesterday_date_ss.str() +
+                combined_strategy_id + "' AND portfolio_id = '" + coordinator_config.portfolio_id +
+                "' AND DATE(date) < '" + yesterday_date_ss.str() +
                 "' "
                 "  ORDER BY date DESC LIMIT 1"
                 ") "
@@ -1725,7 +1735,8 @@ int main(int argc, char* argv[]) {
                 std::to_string(aggregate_yesterday_total_pnl) +
                 " - COALESCE(daily_commissions, 0.0)) - COALESCE(margin_posted, 0.0) "
                 "WHERE strategy_id = '" +
-                combined_strategy_id + "' AND DATE(date) = '" + yesterday_date_ss.str() + "'";
+                combined_strategy_id + "' AND portfolio_id = '" + coordinator_config.portfolio_id +
+                "' AND DATE(date) = '" + yesterday_date_ss.str() + "'";
 
             INFO("Executing UPDATE query for Day T-1 live_results...");
             INFO("UPDATE will set current_portfolio_value for date: " + yesterday_date_ss.str());
@@ -1754,7 +1765,8 @@ int main(int argc, char* argv[]) {
             std::string get_equity_query =
                 "SELECT current_portfolio_value FROM trading.live_results "
                 "WHERE strategy_id = '" +
-                combined_strategy_id + "' AND DATE(date) = '" + yesterday_date_ss.str() + "'";
+                combined_strategy_id + "' AND portfolio_id = '" + coordinator_config.portfolio_id +
+                "' AND DATE(date) = '" + yesterday_date_ss.str() + "'";
 
             INFO("Querying for portfolio value with date: " + yesterday_date_ss.str());
 
@@ -1811,7 +1823,8 @@ int main(int argc, char* argv[]) {
                             std::string debug_eq_query =
                                 "SELECT timestamp, equity FROM trading.equity_curve "
                                 "WHERE strategy_id = '" +
-                                combined_strategy_id +
+                                combined_strategy_id + "' AND portfolio_id = '" +
+                                coordinator_config.portfolio_id +
                                 "' "
                                 "AND DATE(timestamp) = '" +
                                 yesterday_date_ss.str() +
@@ -1841,7 +1854,7 @@ int main(int argc, char* argv[]) {
 
                             // Create a temporary LiveResultsManager for Day T-1 equity update
                             auto yesterday_manager = std::make_unique<LiveResultsManager>(
-                                db, true, combined_strategy_id);
+                                db, true, combined_strategy_id, coordinator_config.portfolio_id);
                             yesterday_manager->set_equity(portfolio_value);
 
                             auto update_equity_result =
@@ -1889,7 +1902,9 @@ int main(int argc, char* argv[]) {
                     "portfolio_leverage, equity_to_margin_ratio "
                     "FROM trading.live_results "
                     "WHERE strategy_id = '" +
-                    combined_strategy_id + "' AND DATE(date) = '" + yesterday_date_ss.str() + "'";
+                    combined_strategy_id + "' AND portfolio_id = '" +
+                    coordinator_config.portfolio_id + "' AND DATE(date) = '" +
+                    yesterday_date_ss.str() + "'";
 
                 INFO("Loading yesterday's metrics from database with query: " + metrics_query);
                 auto metrics_result = db->execute_query(metrics_query);
@@ -1985,8 +2000,9 @@ int main(int argc, char* argv[]) {
         try {
             auto db_ptr = std::dynamic_pointer_cast<PostgresDatabase>(db);
             if (db_ptr) {
-                auto prev_agg = db_ptr->get_previous_live_aggregates(combined_strategy_id, now,
-                                                                     "trading.live_results");
+                auto prev_agg = db_ptr->get_previous_live_aggregates(
+                    combined_strategy_id, coordinator_config.portfolio_id, now,
+                    "trading.live_results");
                 if (prev_agg.is_ok()) {
                     std::tie(previous_portfolio_value, previous_total_pnl,
                              previous_total_commissions) = prev_agg.value();
@@ -2296,7 +2312,8 @@ int main(int argc, char* argv[]) {
         // Query daily commissions per symbol using LiveDataLoader
         std::unordered_map<std::string, double> symbol_commissions;
         try {
-            auto commission_result = data_loader->load_commissions_by_symbol(now);
+            auto commission_result =
+                data_loader->load_commissions_by_symbol(coordinator_config.portfolio_id, now);
             if (commission_result.is_ok()) {
                 symbol_commissions = commission_result.value();
                 INFO("Loaded commissions for " + std::to_string(symbol_commissions.size()) +
@@ -2428,7 +2445,8 @@ int main(int argc, char* argv[]) {
                         "daily_unrealized_pnl, last_update "
                         "FROM trading.positions "
                         "WHERE strategy_id = '" +
-                        combined_strategy_id +
+                        combined_strategy_id + "' AND portfolio_id = '" +
+                        coordinator_config.portfolio_id +
                         "' AND DATE(last_update) = "
                         "'" +
                         yesterday_date_for_email + "'";
@@ -2490,7 +2508,9 @@ int main(int argc, char* argv[]) {
                             "daily_pnl, daily_commissions "
                             "FROM trading.live_results "
                             "WHERE strategy_id = '" +
-                            combined_strategy_id + "' AND date = '" + yesterday_date_for_email +
+                            combined_strategy_id + "' AND portfolio_id = '" +
+                            coordinator_config.portfolio_id + "' AND date = '" +
+                            yesterday_date_for_email +
                             "' "
                             "ORDER BY date DESC LIMIT 1";
 
