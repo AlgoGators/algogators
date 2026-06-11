@@ -114,8 +114,9 @@ main, header, footer { position: relative; z-index: 1; }
 
 .tri {
   display: inline-block; width: .55em; height: .55em;
-  background: var(--orange);
-  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 10 10' xmlns='http://www.w3.org/2000/svg'%3E%3Cpolygon points='5,0.75 9.25,9.25 0.75,9.25' fill='none' stroke='%23FF5C00' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-size: contain;
+  background-repeat: no-repeat;
 }
 
 /* ════════════════════════════ LAYOUT ════════════════════════════ */
@@ -338,6 +339,38 @@ body.menu-open .nav-burger span { background: #fff; }
   100% { transform: scaleY(0); transform-origin: bottom; }
 }
 
+/* ── hero: terminal treatment ── */
+.hero-term { justify-content: flex-start; }
+.hero-term .t-bar {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 18px; flex-wrap: wrap;
+  padding: 13px clamp(20px, 4vw, 48px);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono); font-size: 11px; font-weight: 500;
+  letter-spacing: .18em; text-transform: uppercase; color: var(--muted);
+}
+.hero-term .t-bar .idx { color: var(--orange); margin-right: .75em; }
+.hero-term .t-bar .t-live { color: var(--orange); animation: blink 1.6s infinite; }
+.hero-term .t-bar .t-live.closed { color: var(--muted); animation: none; }
+.hero-term-body {
+  flex: 1; display: flex; flex-direction: column; justify-content: center;
+}
+.t-type {
+  font-family: var(--font-mono); font-size: clamp(12px, 1.4vw, 14px);
+  font-weight: 500; letter-spacing: .08em; color: var(--muted);
+  white-space: nowrap; overflow: hidden;
+  width: 0; max-width: 100%; border-right: .6em solid var(--orange);
+  margin-bottom: clamp(20px, 3vh, 34px);
+  animation: t-typing 2.2s .4s steps(48) forwards, t-caret .8s step-end infinite;
+}
+.t-type b { color: var(--orange); font-weight: 600; }
+@keyframes t-typing { to { width: 48ch } }
+@keyframes t-caret { 0%, 100% { border-color: var(--orange) } 50% { border-color: transparent } }
+@keyframes blink { 0%, 100% { opacity: 1 } 50% { opacity: .25 } }
+@media (max-width: 640px) {
+  .hero-term .t-bar .t-loc { display: none; }
+}
+
 /* ════════════════════════════ TICKER ════════════════════════════ */
 
 .ticker {
@@ -357,8 +390,9 @@ body.menu-open .nav-burger span { background: #fff; }
 }
 .ticker-track span::after {
   content: ''; width: 8px; height: 8px; margin-left: 60px;
-  background: var(--orange);
-  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 10 10' xmlns='http://www.w3.org/2000/svg'%3E%3Cpolygon points='5,0.75 9.25,9.25 0.75,9.25' fill='none' stroke='%23FF5C00' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-size: contain;
+  background-repeat: no-repeat;
 }
 .ticker-track span b { color: var(--orange); font-weight: 600; }
 @keyframes ticker-scroll { to { transform: translateX(-50%); } }
@@ -450,8 +484,10 @@ body.menu-open .nav-burger span { background: #fff; }
 }
 .pillar li::before {
   content: ''; position: absolute; left: 0; top: 7px;
-  width: 8px; height: 8px; background: var(--orange);
-  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  width: 8px; height: 8px;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 10 10' xmlns='http://www.w3.org/2000/svg'%3E%3Cpolygon points='5,0.75 9.25,9.25 0.75,9.25' fill='none' stroke='%23FF5C00' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-size: contain;
+  background-repeat: no-repeat;
 }
 .pillar:hover h3 { color: #fff; }
 .pillar:hover li { color: var(--muted-d); }
@@ -693,8 +729,10 @@ form.sent + .form-success { display: block; }
 }
 .panel-dark li::before {
   content: ''; position: absolute; left: 0; top: 7px;
-  width: 9px; height: 9px; background: var(--orange);
-  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  width: 9px; height: 9px;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 10 10' xmlns='http://www.w3.org/2000/svg'%3E%3Cpolygon points='5,0.75 9.25,9.25 0.75,9.25' fill='none' stroke='%23FF5C00' stroke-width='1.5'/%3E%3C/svg%3E");
+  background-size: contain;
+  background-repeat: no-repeat;
 }
 
 .rings {

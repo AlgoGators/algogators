@@ -68,6 +68,25 @@
     });
   }
 
+  /* ── hero terminal clock + market-hours indicator ── */
+  const clock = document.querySelector('[data-clock]');
+  const market = document.querySelector('[data-market]');
+  if (clock) {
+    const tickClock = () => {
+      const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+      clock.textContent = et.toLocaleTimeString('en-US', { hour12: false }) + ' ET';
+      if (market) {
+        // NYSE regular session: Mon–Fri 9:30–16:00 ET (holidays not accounted for)
+        const mins = et.getHours() * 60 + et.getMinutes();
+        const open = et.getDay() >= 1 && et.getDay() <= 5 && mins >= 570 && mins < 960;
+        market.textContent = open ? '● Markets Open' : '○ Markets Closed';
+        market.classList.toggle('closed', !open);
+      }
+    };
+    tickClock();
+    setInterval(tickClock, 1000);
+  }
+
   /* ── footer year ── */
   document.querySelectorAll('[data-year]').forEach((el) => {
     el.textContent = new Date().getFullYear();
