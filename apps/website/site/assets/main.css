@@ -690,8 +690,7 @@ form.sent + .form-success { display: block; }
   filter: grayscale(1) brightness(.62) contrast(1.1);
   transition: filter .7s var(--ease-out), transform .7s var(--ease-out);
 }
-.process-row:hover .process-img img { filter: grayscale(0) brightness(.8); transform: scale(1.04); }
-.process-img::after {
+.process-row:hover .process-img img { filter: grayscale(0) brightness(.8); transform: scale(1.04); }.process-img::after {
   content: ''; position: absolute; inset: 0;
   background: linear-gradient(125deg, rgba(255,92,0,.28), transparent 55%);
   mix-blend-mode: multiply; pointer-events: none;
