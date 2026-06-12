@@ -777,6 +777,7 @@ form.sent + .form-success { display: block; }
   text-transform: uppercase; letter-spacing: -.02em;
   color: transparent; -webkit-text-stroke: 1.5px rgba(255,255,255,.16);
   white-space: nowrap; user-select: none;
+  padding-left: clamp(20px, 4vw, 48px);
   margin-bottom: clamp(40px, 6vw, 80px);
   transition: -webkit-text-stroke-color .5s;
 }
