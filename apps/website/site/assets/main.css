@@ -919,6 +919,7 @@ form.sent + .form-success { display: block; }
 @media (max-width: 600px) {
   .group-photo-info { flex-direction: column; align-items: flex-start; gap: 20px; }
   .group-photo-stats { gap: 24px; }
+  .dept-head h2 { white-space: normal; }
 }
 
 /* two-column helper */
