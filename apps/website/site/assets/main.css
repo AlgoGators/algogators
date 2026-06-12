@@ -27,7 +27,7 @@
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; overflow-x: hidden; }
 
 body {
   font-family: var(--font-body);
@@ -122,7 +122,7 @@ main, header, footer { position: relative; z-index: 1; }
 /* ════════════════════════════ LAYOUT ════════════════════════════ */
 
 .wrap   { max-width: 1280px; margin: 0 auto; padding: 0 clamp(20px, 4vw, 48px); }
-.section { padding: clamp(72px, 10vw, 130px) 0; position: relative; }
+.section { padding: clamp(72px, 10vw, 130px) 0; position: relative; overflow: hidden; }
 .section.dark {
   background: var(--ink);
   color: var(--muted-d);
