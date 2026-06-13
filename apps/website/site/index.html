@@ -241,24 +241,24 @@
         <h3 class="display" style="font-size:clamp(24px,2.8vw,34px);margin-bottom:8px">Interested in learning more?</h3>
         <p class="label" style="color:var(--orange);margin-bottom:40px">Reach out with any questions</p>
 
-        <form id="contactForm" style="display:flex;flex-direction:column;gap:30px" novalidate>
+        <form id="contactForm" data-formspree-id="xgobpyzw" style="display:flex;flex-direction:column;gap:30px" novalidate>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:28px">
             <div class="field">
               <label for="fn">First Name <span class="req">*</span></label>
-              <input id="fn" type="text" autocomplete="given-name" required />
+              <input id="fn" name="first_name" type="text" autocomplete="given-name" required />
             </div>
             <div class="field">
               <label for="ln">Last Name</label>
-              <input id="ln" type="text" autocomplete="family-name" />
+              <input id="ln" name="last_name" type="text" autocomplete="family-name" />
             </div>
           </div>
           <div class="field">
             <label for="em">Email <span class="req">*</span></label>
-            <input id="em" type="email" autocomplete="email" required />
+            <input id="em" name="email" type="email" autocomplete="email" required />
           </div>
           <div class="field">
             <label for="msg">Message <span class="req">*</span></label>
-            <textarea id="msg" rows="4" required></textarea>
+            <textarea id="msg" name="message" rows="4" required></textarea>
           </div>
           <div>
             <button class="btn btn-solid" type="submit">Send Message <span class="arr">→</span></button>

@@ -59,12 +59,36 @@
   }, { threshold: 0.5 });
   document.querySelectorAll('[data-count]').forEach((el) => counter.observe(el));
 
-  /* ── contact form (static site: show confirmation state) ── */
+  /* ── contact form → Formspree ── */
   const form = document.getElementById('contactForm');
   if (form) {
-    form.addEventListener('submit', (e) => {
+    form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      form.classList.add('sent');
+      const id = form.dataset.formspreeId;
+      if (!id || id === 'YOUR_FORM_ID') {
+        console.warn('Formspree ID not set — update data-formspree-id on #contactForm');
+        form.classList.add('sent');
+        return;
+      }
+      const btn = form.querySelector('[type="submit"]');
+      btn.disabled = true;
+      try {
+        const res = await fetch(`https://formspree.io/f/${id}`, {
+          method: 'POST',
+          headers: { 'Accept': 'application/json' },
+          body: new FormData(form),
+        });
+        if (res.ok) {
+          form.classList.add('sent');
+          form.reset();
+        } else {
+          btn.disabled = false;
+          alert('Something went wrong — please try again.');
+        }
+      } catch {
+        btn.disabled = false;
+        alert('Network error — please try again.');
+      }
     });
   }
 
