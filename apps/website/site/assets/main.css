@@ -365,10 +365,10 @@ body.menu-open .nav-burger span { background: #fff; }
   white-space: nowrap; overflow: hidden;
   width: 0; max-width: 100%; border-right: .6em solid var(--orange);
   margin-bottom: clamp(20px, 3vh, 34px);
-  animation: t-typing 2.2s .4s steps(48) forwards, t-caret .8s step-end infinite;
+  animation: t-typing 2.2s .4s steps(49) forwards, t-caret .8s step-end infinite;
 }
 .t-type b { color: var(--orange); font-weight: 600; }
-@keyframes t-typing { to { width: 48ch } }
+@keyframes t-typing { to { width: 49.5ch } }
 @keyframes t-caret { 0%, 100% { border-color: var(--orange) } 50% { border-color: transparent } }
 @keyframes blink { 0%, 100% { opacity: 1 } 50% { opacity: .25 } }
 @media (max-width: 640px) {
