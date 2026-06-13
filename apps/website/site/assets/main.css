@@ -159,6 +159,7 @@ main, header, footer { position: relative; z-index: 1; }
 .site-nav.on-dark:not(.scrolled) .brand-name,
 .site-nav.on-dark:not(.scrolled) .nav-links a { color: #fff; }
 .site-nav.on-dark:not(.scrolled) .nav-burger span { background: #fff; }
+.site-nav.on-dark:not(.scrolled) .brand-logo-img { filter: brightness(0) invert(1); }
 
 .nav-inner {
   max-width: 1280px; margin: 0 auto; height: 100%;
