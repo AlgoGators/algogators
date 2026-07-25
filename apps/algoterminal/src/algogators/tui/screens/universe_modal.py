@@ -7,8 +7,11 @@ from textual.containers import Grid, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select
 
+from algogators.data.altdata.registry import SOURCE_DESCRIPTIONS
 from algogators.data.provider import AssetClass
 from algogators.data.universe import Universe, UniverseStore
+
+_SOURCES = list(SOURCE_DESCRIPTIONS)
 
 
 class UniverseModal(ModalScreen[Universe | None]):
@@ -53,6 +56,12 @@ class UniverseModal(ModalScreen[Universe | None]):
                 value=u.asset_class if u else AssetClass.EQUITY,
                 id="asset_class",
             )
+            yield Label("Source (data provider)")
+            yield Select(
+                [(s, s) for s in _SOURCES],
+                value=u.source if u else "market",
+                id="source",
+            )
             yield Label("Description")
             yield Input(value=u.description if u else "", placeholder="Optional", id="description")
             with Grid(id="universe-buttons"):
@@ -67,6 +76,7 @@ class UniverseModal(ModalScreen[Universe | None]):
         name = self.query_one("#name", Input).value.strip()
         symbols_raw = self.query_one("#symbols", Input).value.strip()
         asset_class = self.query_one("#asset_class", Select).value
+        source = self.query_one("#source", Select).value
         description = self.query_one("#description", Input).value.strip()
 
         if not (name and symbols_raw):
@@ -78,6 +88,7 @@ class UniverseModal(ModalScreen[Universe | None]):
             asset_class=asset_class,
             symbols=[s.strip() for s in symbols_raw.split(",") if s.strip()],
             description=description,
+            source=source,
         )
         UniverseStore().save(universe)
         self.dismiss(universe)

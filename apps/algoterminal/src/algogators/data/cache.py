@@ -18,7 +18,7 @@ from algogators.config import CACHE_DIR, ensure_dirs
 
 
 def _safe_symbol(symbol: str) -> str:
-    return symbol.replace("/", "-").replace("=", "-").replace("^", "")
+    return symbol.replace("/", "-").replace("=", "-").replace("^", "").replace(":", "-")
 
 
 def _cache_path(provider_name: str, symbol: str) -> Path:
