@@ -19,7 +19,7 @@ from algogators.analytics.correlation import correlation_matrix, rolling_correla
 from algogators.analytics.relative_performance import relative_performance
 from algogators.analytics.spread import ratio_series, spread_series
 from algogators.charts.heatmap import correlation_heatmap
-from algogators.charts.terminal_charts import line_chart, multi_line_chart
+from algogators.charts.mpl_charts import line_chart, multi_line_chart
 from algogators.data import default_provider
 from algogators.data.provider import AssetClass, DataProvider
 from algogators.data.universe import UniverseStore
@@ -147,12 +147,12 @@ class ComparePane(Vertical):
         data = {label_a: series_a, label_b: series_b}
 
         table_renderable = None
-        chart_str = None
+        chart_render = None
 
         if analysis == "correlation-matrix":
             table_renderable = correlation_heatmap(correlation_matrix(data))
         elif analysis == "rolling-correlation":
-            chart_str = line_chart(rolling_correlation(data, label_a, label_b), title=f"Rolling corr: {label_a} vs {label_b}")
+            chart_render = (line_chart, (rolling_correlation(data, label_a, label_b),), {"title": f"Rolling corr: {label_a} vs {label_b}"})
         elif analysis == "cointegration":
             result = engle_granger_test(data, label_a, label_b)
             from rich.table import Table
@@ -165,20 +165,21 @@ class ComparePane(Vertical):
             t.add_row("cointegrated (5%)", str(result.is_cointegrated()))
             table_renderable = t
         elif analysis == "relative-performance":
-            chart_str = multi_line_chart(relative_performance(data), title="Relative Performance (rebased=100)")
+            chart_render = (multi_line_chart, (relative_performance(data),), {"title": "Relative Performance (rebased=100)"})
         elif analysis == "spread":
-            chart_str = line_chart(spread_series(data, label_a, label_b), title=f"Spread: {label_a} - {label_b}")
+            chart_render = (line_chart, (spread_series(data, label_a, label_b),), {"title": f"Spread: {label_a} - {label_b}"})
         elif analysis == "ratio":
-            chart_str = line_chart(ratio_series(data, label_a, label_b), title=f"Ratio: {label_a} / {label_b}")
+            chart_render = (line_chart, (ratio_series(data, label_a, label_b),), {"title": f"Ratio: {label_a} / {label_b}"})
 
-        self.app.call_from_thread(self._render_result, table_renderable, chart_str)
+        self.app.call_from_thread(self._render_result, table_renderable, chart_render)
 
-    def _render_result(self, table_renderable, chart_str: str | None) -> None:
+    def _render_result(self, table_renderable, chart_render) -> None:
         table = self.query_one("#compare-table", Static)
         chart = self.query_one("#compare-chart", PlotView)
         table.update(table_renderable if table_renderable is not None else "")
-        if chart_str:
-            chart.show_chart(chart_str)
+        if chart_render:
+            render, args, kwargs = chart_render
+            chart.show_chart(render, *args, **kwargs)
         else:
             chart.show_message("")
         self.notify("Done.")

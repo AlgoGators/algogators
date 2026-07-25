@@ -27,6 +27,11 @@ PALETTE = [ORANGE, CREAM, AMBER, GREEN, RED, GREY]
 def _reset(width: int, height: int) -> None:
     plt.clear_data()
     plt.clear_figure()
+    # plotext clamps plotsize() to the OS-detected terminal size by default,
+    # which can silently shrink charts to a stale/fallback size (e.g. inside
+    # a Textual pane narrower or wider than the real terminal). We always
+    # want the exact size the widget asked for.
+    plt.limit_size(False, False)
     plt.plotsize(width, height)
     plt.canvas_color(CANVAS)
     plt.axes_color(AXES)
@@ -37,7 +42,7 @@ def line_chart(series: pd.Series, title: str = "", width: int = 90, height: int 
     _reset(width, height)
     dates = [d.strftime("%Y-%m-%d") for d in series.index]
     plt.date_form("Y-m-d")
-    plt.plot(dates, series.values.tolist(), marker="braille", color=color)
+    plt.plot(dates, series.values.tolist(), marker="fhd", color=color)
     plt.title(title or series.name or "")
     return plt.build()
 
@@ -47,7 +52,7 @@ def multi_line_chart(frame: pd.DataFrame, title: str = "", width: int = 90, heig
     dates = [d.strftime("%Y-%m-%d") for d in frame.index]
     plt.date_form("Y-m-d")
     for i, col in enumerate(frame.columns):
-        plt.plot(dates, frame[col].values.tolist(), marker="braille", label=str(col), color=PALETTE[i % len(PALETTE)])
+        plt.plot(dates, frame[col].values.tolist(), marker="fhd", label=str(col), color=PALETTE[i % len(PALETTE)])
     plt.title(title)
     return plt.build()
 
@@ -63,7 +68,7 @@ def drawdown_chart(equity: pd.Series, title: str = "Drawdown", width: int = 90, 
     _reset(width, height)
     dates = [d.strftime("%Y-%m-%d") for d in drawdown.index]
     plt.date_form("Y-m-d")
-    plt.plot(dates, drawdown.values.tolist(), marker="braille", fillx=True, color=RED)
+    plt.plot(dates, drawdown.values.tolist(), marker="fhd", fillx=True, color=RED)
     plt.title(title)
     return plt.build()
 
@@ -84,6 +89,6 @@ def step_chart(series: pd.Series, title: str = "", width: int = 90, height: int 
     _reset(width, height)
     dates = [d.strftime("%Y-%m-%d") for d in series.index]
     plt.date_form("Y-m-d")
-    plt.plot(dates, series.values.tolist(), marker="braille", fillx=True, color=color)
+    plt.plot(dates, series.values.tolist(), marker="fhd", fillx=True, color=color)
     plt.title(title or series.name or "")
     return plt.build()

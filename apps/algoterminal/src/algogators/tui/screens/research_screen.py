@@ -11,7 +11,7 @@ from textual.widgets import Button, DataTable, Markdown, Select, Static, TabbedC
 
 from algogators.analytics.stats import drawdown_periods, monthly_returns_table, rolling_sharpe
 from algogators.charts.heatmap import drawdown_periods_table, monthly_returns_heatmap
-from algogators.charts.terminal_charts import (
+from algogators.charts.mpl_charts import (
     drawdown_chart,
     equity_curve_chart,
     histogram_chart,
@@ -166,8 +166,8 @@ class ResearchPane(Horizontal):
         exposure_chart = self.query_one("#exposure-chart", PlotView)
         dd_periods_widget = self.query_one("#dd-periods-table", Static)
 
-        equity_chart.show_chart(equity_curve_chart(result.equity_curve, title=f"{title} — Equity"))
-        dd_chart.show_chart(drawdown_chart(result.equity_curve))
+        equity_chart.show_chart(equity_curve_chart, result.equity_curve, title=f"{title} — Equity")
+        dd_chart.show_chart(drawdown_chart, result.equity_curve)
 
         returns = result.returns.dropna()
         if len(returns) >= 21:
@@ -177,17 +177,17 @@ class ResearchPane(Horizontal):
 
         sharpe = rolling_sharpe(returns)
         if not sharpe.empty:
-            sharpe_chart.show_chart(line_chart(sharpe, title="Rolling Sharpe (63d)"))
+            sharpe_chart.show_chart(line_chart, sharpe, title="Rolling Sharpe (63d)")
         else:
             sharpe_chart.show_message("Not enough history for a rolling Sharpe yet.")
 
         nonzero_returns = returns[returns != 0]
         if not nonzero_returns.empty:
-            dist_chart.show_chart(histogram_chart(nonzero_returns * 100, title="Daily Return Distribution (%)"))
+            dist_chart.show_chart(histogram_chart, nonzero_returns * 100, title="Daily Return Distribution (%)")
         else:
             dist_chart.show_message("No non-zero returns to plot yet.")
 
-        exposure_chart.show_chart(step_chart(result.positions, title="Position Exposure"))
+        exposure_chart.show_chart(step_chart, result.positions, title="Position Exposure")
         dd_periods_widget.update(drawdown_periods_table(drawdown_periods(result.equity_curve)))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
