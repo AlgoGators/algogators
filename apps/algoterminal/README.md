@@ -18,13 +18,17 @@ background, a hot-orange accent, and a terminal-native, monospace-forward look.
 ## What it does
 
 - **Data layer** — a unified `DataProvider` interface across equities, futures,
-  FX, crypto, and custom baskets. Ships with two free, public sources
-  (yfinance, Stooq) composed into a fallback chain, concurrent multi-symbol
-  fetching, an incremental local parquet cache (only missing date ranges are
-  re-fetched), and cached instrument metadata (name/sector/exchange). Named
-  "universes" (reusable instrument baskets) are defined once and referenced
-  everywhere else. More free/public sources can be added the same way over
-  time — this layer is not a placeholder for AlgoGators' internal feed.
+  FX, crypto, custom baskets, and non-price alt-data. Ships with 28 built-in
+  "universes" (reusable instrument baskets) out of the box, spanning market
+  data via yfinance/Stooq (indices, sector ETFs, rates, credit, volatility,
+  metals, shipping/freight equities, and more) as well as real alt-data
+  integrations with **NASA POWER** (satellite weather/solar by location),
+  **USGS** (earthquake activity by region), **FRED**, and the **World Bank**
+  (macroeconomic indicators) — all free, keyless public APIs. Concurrent
+  multi-symbol fetching, an incremental local parquet cache (only missing
+  date ranges are re-fetched), and cached instrument/source metadata are
+  built in. More free/public sources can be added the same way over time —
+  this layer is not a placeholder for AlgoGators' internal feed.
 - **Comparison engine** — compare anything against anything: a backtested
   strategy's equity curve, a raw instrument, or a mix of the two. Correlation
   matrices, rolling correlation, Engle-Granger cointegration, relative

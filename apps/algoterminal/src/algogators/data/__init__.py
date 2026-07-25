@@ -1,3 +1,4 @@
+from algogators.data.altdata.registry import SOURCE_DESCRIPTIONS, describe_symbol, provider_for_source
 from algogators.data.composite_provider import CompositeProvider
 from algogators.data.metadata import InstrumentInfo, get_instrument_info
 from algogators.data.provider import AssetClass, DataProvider, DataQualityReport
@@ -21,7 +22,10 @@ __all__ = [
     "DataProvider",
     "DataQualityReport",
     "InstrumentInfo",
+    "SOURCE_DESCRIPTIONS",
+    "describe_symbol",
     "get_instrument_info",
+    "provider_for_source",
     "StooqProvider",
     "Universe",
     "UniverseStore",

@@ -26,6 +26,7 @@ class AssetClass(str, Enum):
     FX = "fx"
     CRYPTO = "crypto"
     CUSTOM = "custom"
+    ALT_DATA = "alt_data"
 
 
 @dataclass

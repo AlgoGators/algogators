@@ -11,7 +11,7 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal, VerticalScroll
 from textual.widgets import Button, DataTable, Static
 
-from algogators.data import cache, default_provider
+from algogators.data import SOURCE_DESCRIPTIONS, cache, describe_symbol, provider_for_source
 from algogators.data.metadata import get_instrument_info, peek_metadata
 from algogators.data.universe import Universe, UniverseStore
 from algogators.tui.screens.universe_modal import UniverseModal
@@ -42,7 +42,7 @@ class DataPane(Horizontal):
 
     def on_mount(self) -> None:
         table = self.query_one("#universe-table", DataTable)
-        table.add_columns("Name", "Asset Class", "Symbols", "Description")
+        table.add_columns("Name", "Asset Class", "Source", "Symbols", "Description")
         cache_table = self.query_one("#cache-table", DataTable)
         cache_table.add_columns("Provider", "Symbol", "Rows", "Start", "End", "Size (KB)")
         self.refresh_universes()
@@ -53,7 +53,7 @@ class DataPane(Horizontal):
         table = self.query_one("#universe-table", DataTable)
         table.clear()
         for u in self._universes:
-            table.add_row(u.name, u.asset_class.value, str(len(u.symbols)), u.description or "")
+            table.add_row(u.name, u.asset_class.value, u.source, str(len(u.symbols)), u.description or "")
 
     def refresh_cache_table(self) -> None:
         cache_table = self.query_one("#cache-table", DataTable)
@@ -83,16 +83,28 @@ class DataPane(Horizontal):
             detail.update("No universe selected.")
             return
 
+        source_desc = SOURCE_DESCRIPTIONS.get(u.source, "")
         cached_by_symbol = {e.symbol: e for e in cache.list_cached()}
-        lines = [f"[bold {ORANGE}]{u.name}[/] ({u.asset_class.value}) — {u.description or 'no description'}", ""]
+        lines = [
+            f"[bold {ORANGE}]{u.name}[/] ({u.asset_class.value}) — {u.description or 'no description'}",
+        ]
+        if source_desc:
+            lines.append(f"[dim]{source_desc}[/dim]")
+        lines.append("")
+
         for sym in u.symbols:
-            info = peek_metadata(sym)
-            name = f" — {info.name}" if info and info.name else ""
-            entry = cached_by_symbol.get(sym.replace("/", "-").replace("=", "-").replace("^", ""))
-            if entry:
-                lines.append(f"  {sym}{name}: {entry.rows} rows, {entry.start} -> {entry.end} [{entry.provider}]")
+            if u.source == "market":
+                info = peek_metadata(sym)
+                label = f" — {info.name}" if info and info.name else ""
             else:
-                lines.append(f"  {sym}{name}: [dim]not cached yet[/dim]")
+                blurb = describe_symbol(u.source, sym)
+                label = f" — {blurb}" if blurb else ""
+            safe_sym = sym.replace("/", "-").replace("=", "-").replace("^", "").replace(":", "-")
+            entry = cached_by_symbol.get(safe_sym)
+            if entry:
+                lines.append(f"  {sym}{label}: {entry.rows} rows, {entry.start} -> {entry.end} [{entry.provider}]")
+            else:
+                lines.append(f"  {sym}{label}: [dim]not cached yet[/dim]")
         detail.update("\n".join(lines))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -144,7 +156,7 @@ class DataPane(Horizontal):
 
     @work(exclusive=True, thread=True)
     def _refresh_worker(self, universe: Universe) -> None:
-        provider = default_provider()
+        provider = provider_for_source(universe.source)
         data = provider.fetch_many(universe.symbols, universe.asset_class)
         ok = sum(1 for df in data.values() if not df.empty)
         self.app.call_from_thread(self._after_refresh, universe.name, ok, len(universe.symbols))
@@ -157,6 +169,13 @@ class DataPane(Horizontal):
     def _fetch_metadata_selected(self) -> None:
         if self._selected is None:
             self.notify("Select a universe first.", severity="warning")
+            return
+        if self._selected.source != "market":
+            self.notify(
+                "Fetch Info only applies to market universes — alt-data symbol "
+                "descriptions are already shown above.",
+                severity="information",
+            )
             return
         self.notify(f"Fetching instrument info for {self._selected.name}...")
         self._fetch_metadata_worker(self._selected)
