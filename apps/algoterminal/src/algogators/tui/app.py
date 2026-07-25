@@ -13,6 +13,7 @@ from textual.widgets import Footer, Header, Input, Static, TabbedContent, TabPan
 from algogators.config import ensure_dirs
 from algogators.tui.screens.compare_screen import ComparePane
 from algogators.tui.screens.data_screen import DataPane
+from algogators.tui.screens.design_screen import DesignPane
 from algogators.tui.screens.hypothesis_modal import HypothesisModal
 from algogators.tui.screens.research_screen import ResearchPane
 from algogators.tui.screens.splash_screen import SplashScreen
@@ -96,6 +97,38 @@ class AlgoGatorsApp(App):
         height: auto;
         padding: 1 0;
     }
+    #design-records-col {
+        width: 40%;
+        border-right: solid $primary;
+    }
+    #design-detail {
+        height: auto;
+        padding: 1 0;
+    }
+    #design-code-col {
+        width: 1fr;
+        padding: 0 1;
+    }
+    #design-prompt-row {
+        height: auto;
+        padding-top: 1;
+    }
+    #design-prompt-row Input {
+        width: 1fr;
+        margin-right: 1;
+    }
+    #design-status {
+        height: auto;
+        padding: 0 0 1 0;
+    }
+    #design-code {
+        height: 1fr;
+        border: solid $primary;
+    }
+    #design-code-buttons {
+        height: auto;
+        padding: 1 0;
+    }
     """
 
     BINDINGS = [
@@ -119,6 +152,8 @@ class AlgoGatorsApp(App):
                 yield DataPane()
             with TabPane("Compare", id="tab-compare"):
                 yield ComparePane()
+            with TabPane("Design", id="tab-design"):
+                yield DesignPane()
         yield Footer()
 
     def on_mount(self) -> None:
