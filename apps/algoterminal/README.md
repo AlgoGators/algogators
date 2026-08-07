@@ -1,4 +1,4 @@
-# AlgoGators CLI
+# AlgoTerminal
 
 A terminal research workbench for the AlgoGators Quantitative Research (QR) team.
 
@@ -50,8 +50,8 @@ curl -fsSL <url-to-this-repo>/install.sh | sh
 ```
 
 This installs [pipx](https://pypa.github.io/pipx/) if it isn't already
-present, then installs `algogators-cli` as an isolated, globally-available
-`algogators` command.
+present, then installs `algoterminal-cli` as an isolated, globally-available
+`algoterminal` command.
 
 To install from a local checkout instead:
 
@@ -76,7 +76,7 @@ Requires Python 3.11+.
 Launch the full-screen workbench:
 
 ```sh
-algogators
+algoterminal
 ```
 
 A brief branded splash appears, then the app opens on three tabs — **Research**,
@@ -112,31 +112,31 @@ to that window.
 Every stage is also available as a scriptable subcommand:
 
 ```sh
-algogators universe list
-algogators universe show g10-fx
-algogators universe create my-basket --symbols AAPL,MSFT,GOOGL --asset-class equity
-algogators universe add-symbol my-basket TSLA
-algogators universe remove-symbol my-basket TSLA
-algogators universe delete my-basket
+algoterminal universe list
+algoterminal universe show g10-fx
+algoterminal universe create my-basket --symbols AAPL,MSFT,GOOGL --asset-class equity
+algoterminal universe add-symbol my-basket TSLA
+algoterminal universe remove-symbol my-basket TSLA
+algoterminal universe delete my-basket
 
-algogators hypothesis                       # interactive wizard
-algogators data <slug> [--version VERSION]
-algogators backtest <slug> [--version VERSION]
-algogators writeup <slug> [--version VERSION]
+algoterminal hypothesis                       # interactive wizard
+algoterminal data <slug> [--version VERSION]
+algoterminal backtest <slug> [--version VERSION]
+algoterminal writeup <slug> [--version VERSION]
 
-algogators compare matrix g10-fx
-algogators compare relative spx-tech
-algogators compare cointegration EURUSD=X GBPUSD=X
+algoterminal compare matrix g10-fx
+algoterminal compare relative spx-tech
+algoterminal compare cointegration EURUSD=X GBPUSD=X
 
-algogators cache status                     # what's cached locally
-algogators cache clear --symbol AAPL        # or --provider, or both, or neither (clears everything)
+algoterminal cache status                     # what's cached locally
+algoterminal cache clear --symbol AAPL        # or --provider, or both, or neither (clears everything)
 ```
 
-Research records live under `~/.algogators/research/<slug>/<version>/` and
+Research records live under `~/.algoterminal/research/<slug>/<version>/` and
 contain `hypothesis.yaml`, `data_quality.yaml`, `strategy.py` (your scaffolded
 strategy — edit this yourself), `backtest_results.json`, `equity_curve.parquet`,
-and `writeup.md`. Universes live under `~/.algogators/universes/`, and the data
-cache under `~/.algogators/cache/`.
+and `writeup.md`. Universes live under `~/.algoterminal/universes/`, and the data
+cache under `~/.algoterminal/cache/`.
 
 ## The research cycle, end to end
 
@@ -164,8 +164,8 @@ walkthrough of all five stages using real (delayed, free) data.
 ## Architecture
 
 ```
-src/algogators/
-  theme.py       AlgoGators brand theme (colors, Textual Theme, splash banner)
+src/algoterminal/
+  theme.py       AlgoTerminal brand theme (colors, Textual Theme, splash banner)
   console.py     Shared branded Rich console for CLI output
   data/          DataProvider interface + yfinance/Stooq/composite impls, cache, universes, metadata
   analytics/     correlation, cointegration, relative performance, spread/ratio, backtest stats
