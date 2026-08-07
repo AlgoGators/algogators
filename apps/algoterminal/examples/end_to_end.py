@@ -14,18 +14,18 @@ scaffolded strategy.py themselves — nothing here is AI-generated.
 
 from __future__ import annotations
 
-from algogators.charts.terminal_charts import drawdown_chart, equity_curve_chart
-from algogators.console import console
-from algogators.data import default_provider
-from algogators.data.provider import AssetClass
-from algogators.data.universe import Universe, UniverseStore
-from algogators.research.backtest import run_backtest, save_backtest_result
-from algogators.research.data_stage import pull_and_validate, save_quality_reports
-from algogators.research.methodology import load_strategy_module, scaffold_strategy
-from algogators.research.models import Hypothesis
-from algogators.research.storage import create_record
-from algogators.research.writeup import generate_writeup
-from algogators.tui.widgets.stats_table import build_stats_table
+from algoterminal.charts.terminal_charts import drawdown_chart, equity_curve_chart
+from algoterminal.console import console
+from algoterminal.data import default_provider
+from algoterminal.data.provider import AssetClass
+from algoterminal.data.universe import Universe, UniverseStore
+from algoterminal.research.backtest import run_backtest, save_backtest_result
+from algoterminal.research.data_stage import pull_and_validate, save_quality_reports
+from algoterminal.research.methodology import load_strategy_module, scaffold_strategy
+from algoterminal.research.models import Hypothesis
+from algoterminal.research.storage import create_record
+from algoterminal.research.writeup import generate_writeup
+from algoterminal.tui.widgets.stats_table import build_stats_table
 
 SMA_CROSSOVER_STRATEGY = '''"""SMA crossover strategy — filled in by hand for the end-to-end example."""
 

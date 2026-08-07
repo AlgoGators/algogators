@@ -1,15 +1,15 @@
 #!/bin/sh
-# Install AlgoGators CLI.
+# Install AlgoTerminal.
 #
 #   curl -fsSL https://raw.githubusercontent.com/<org>/<repo>/main/install.sh | sh
 #
-# Installs pipx if missing, then installs AlgoGators CLI as an isolated,
-# globally-available `algogators` command.
+# Installs pipx if missing, then installs AlgoTerminal as an isolated,
+# globally-available `algoterminal` command.
 
 set -e
 
-REPO_URL="${ALGOGATORS_REPO_URL:-}"
-PACKAGE_SPEC="${ALGOGATORS_PACKAGE_SPEC:-algogators-cli}"
+REPO_URL="${ALGOTERMINAL_REPO_URL:-}"
+PACKAGE_SPEC="${ALGOTERMINAL_PACKAGE_SPEC:-algoterminal-cli}"
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$1"; }
 warn()  { printf '\033[1;33m==>\033[0m %s\n' "$1"; }
@@ -33,7 +33,7 @@ if ! command_exists pipx; then
   warn "pipx was just installed. You may need to restart your shell for PATH changes to take effect."
 fi
 
-info "Installing AlgoGators CLI..."
+info "Installing AlgoTerminal..."
 if [ -n "$REPO_URL" ]; then
   pipx install --force "git+${REPO_URL}"
 elif [ -f "./pyproject.toml" ]; then
@@ -42,4 +42,4 @@ else
   pipx install --force "$PACKAGE_SPEC"
 fi
 
-info "Done. Run 'algogators' to launch the research workbench."
+info "Done. Run 'algoterminal' to launch the research workbench."
