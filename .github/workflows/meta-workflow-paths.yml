@@ -1,0 +1,58 @@
+name: meta · workflow paths
+
+# The guard that makes path-filtered CI safe.
+#
+# Every service's quality workflow only runs when files it "owns" change. That
+# is only correct while the path lists stay true — a renamed directory or a new
+# dependency on platform/contracts silently removes a service from CI, and
+# nothing goes red to tell you. This checks the lists against reality on every
+# PR that touches them.
+#
+# Deliberately NOT path-filtered on the service directories themselves: a PR
+# that adds services/new-thing/ must be checked even though no workflow file
+# changed, because the missing workflow is exactly the failure.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: meta-paths-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: workflow paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --locked --all-groups
+      - name: Check workflow path filters
+        run: uv run python platform/ci/check_workflow_paths.py
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Lint workflow syntax
+        # Catches the errors GitHub only reports at run time: bad `needs`
+        # references, undefined matrix keys, malformed expressions.
+        run: |
+          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color -shellcheck=

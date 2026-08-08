@@ -1,0 +1,110 @@
+# Root of the uv workspace. This project is never published and never imported —
+# it exists to own the single lockfile and the shared tool configuration that
+# every Python member inherits.
+#
+# One `uv.lock` for all members is the point: it makes "does data-ngin's pyarrow
+# work with algosystem's" a resolve-time error instead of a production surprise.
+
+[project]
+name = "algogators-workspace"
+version = "0.0.0"
+description = "AlgoGators monorepo workspace root (not published)"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+research-core = { workspace = true }
+
+[tool.uv.workspace]
+# Members are listed explicitly rather than globbed. Add each Python member here
+# as it is migrated in; `platform/ci/check_workflow_paths.py` verifies that every
+# member directory has matching workflow callers.
+members = [
+    "libs/algosystem",
+    "libs/research-core",
+    "services/data-ngin",
+    "services/research-api",
+    "apps/algoterminal",
+]
+
+[dependency-groups]
+# Tooling available at the workspace root via `uv run`. Services declare their
+# own runtime dependencies; these are the things CI and `just` need.
+dev = [
+    "ruff>=0.14",
+    "mypy>=1.18",
+    "pytest>=8.3",
+    "pytest-cov>=6.0",
+    "pyyaml>=6.0",
+    "tomli>=2.0; python_version < '3.11'",
+    "types-PyYAML>=6.0",
+    # `just` from PyPI. Pinning it here rather than installing it with a
+    # marketplace action means the task runner's version is in uv.lock like
+    # everything else, and CI cannot drift from a developer's machine.
+    "rust-just>=1.36",
+]
+
+# ---------------------------------------------------------------------------
+# Shared tool configuration.
+#
+# ruff walks up the tree to find the nearest config, so members inherit this
+# automatically and need no ruff config of their own. mypy does NOT walk up,
+# which is why the root `justfile` invokes it from here with an explicit path
+# rather than cd-ing into the service.
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+extend-exclude = ["platform/contracts/codegen/generated", "**/build", "**/dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF"]
+ignore = [
+    "E501",   # line length is enforced by the formatter, not the linter
+    "N803",   # quant code uses single-capital argument names (X, Y) by convention
+    "N806",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+check_untyped_defs = true
+# Not enabled globally. Libraries opt in via `strict-types: true` on their
+# quality workflow, which makes the root justfile pass --strict.
+strict = false
+
+[[tool.mypy.overrides]]
+# Third-party packages in this stack that ship no type information.
+module = [
+    "databento.*",
+    "yfinance.*",
+    "quantstats.*",
+    "weasyprint.*",
+    "pyarrow.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers --strict-config"
+testpaths = ["tests"]
+markers = [
+    "slow: takes more than a second; excluded from the fast PR gate",
+    "integration: needs a live dependency (database, broker, market data feed)",
+]
+
+[tool.coverage.run]
+branch = true
+omit = ["*/tests/*", "*/__main__.py"]
+
+[tool.coverage.report]
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError"]

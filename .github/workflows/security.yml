@@ -1,0 +1,139 @@
+name: security
+
+# Repo-wide, not per-service. Security scanning does not respect directory
+# boundaries — a vulnerable transitive dependency in one service is a repo
+# problem — so this is one of the few workflows without path filters.
+#
+# Every job is gated on actually finding code of the relevant kind, so the
+# workflow stays green on a repo that has not had its services migrated in yet
+# and lights up automatically as each one lands.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Monday 07:00 UTC. Scheduled runs catch advisories published against code
+    # that has not changed, which is most of them.
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    name: detect languages
+    runs-on: ubuntu-latest
+    outputs:
+      languages: ${{ steps.detect.outputs.languages }}
+      any: ${{ steps.detect.outputs.any }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+          langs=()
+          find_src() { find libs apps services -type f -name "$1" -not -path '*/node_modules/*' 2>/dev/null | head -1; }
+          [ -n "$(find_src '*.py')" ] && langs+=('"python"')
+          [ -n "$(find_src '*.ts')$(find_src '*.tsx')$(find_src '*.js')$(find_src '*.jsx')" ] && langs+=('"javascript-typescript"')
+          [ -n "$(find_src '*.cpp')$(find_src '*.hpp')$(find_src '*.cc')" ] && langs+=('"c-cpp"')
+          json="[$(IFS=,; echo "${langs[*]:-}")]"
+          echo "languages=$json" >> "$GITHUB_OUTPUT"
+          echo "any=$([ "$json" = '[]' ] && echo false || echo true)" >> "$GITHUB_OUTPUT"
+          echo "Detected: $json"
+
+  codeql:
+    name: codeql (${{ matrix.language }})
+    needs: detect
+    if: needs.detect.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(needs.detect.outputs.languages) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-and-quality
+      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:${{ matrix.language }}
+
+  dependency-review:
+    name: dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
+          # Copyleft licenses are incompatible with how this code is distributed.
+          deny-licenses: GPL-3.0, AGPL-3.0, SSPL-1.0
+
+  scorecard:
+    name: scorecard
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ossf/scorecard-action@v2
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          publish_results: false
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: scorecard.sarif
+
+  sbom:
+    name: sbom
+    needs: detect
+    if: ${{ github.event_name == 'push' && needs.detect.outputs.any == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: anchore/sbom-action@v0
+        with:
+          format: cyclonedx-json
+          artifact-name: algogators-sbom.cyclonedx.json
+          output-file: algogators-sbom.cyclonedx.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: algogators-sbom.cyclonedx.json
+          retention-days: 90

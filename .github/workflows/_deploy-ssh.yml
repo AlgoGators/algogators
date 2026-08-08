@@ -1,0 +1,120 @@
+name: deploy / ssh
+
+# Reusable. Called by a service's `<kind>-<name>.publish.yml` after the image is
+# published, to roll a single-box (EC2 + Docker Compose) deployment.
+#
+# This is the successor to the AlgoLens `git pull && npm ci && build` deploy.
+# The difference that matters: the box no longer builds anything. It pulls an
+# image by DIGEST that CI already built and tested, so what runs in production
+# is bit-identical to what the quality gate passed — and rolling back is
+# re-running this workflow with the previous digest instead of hoping a git
+# checkout reproduces.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: GitHub Environment holding the host secrets and any required reviewers.
+        type: string
+        required: true
+      image:
+        description: Image name without registry, e.g. algogators/data-ngin
+        type: string
+        required: true
+      digest:
+        description: Image digest from _publish-container.yml, e.g. sha256:abc...
+        type: string
+        required: true
+      remote-path:
+        description: Directory on the host holding the compose file.
+        type: string
+        required: true
+      compose-file:
+        type: string
+        default: docker-compose.prod.yml
+      service-name:
+        description: Compose service to restart. Empty restarts the whole stack.
+        type: string
+        default: ''
+      health-url:
+        description: Polled after the roll. Empty skips the check.
+        type: string
+        default: ''
+      timeout-minutes:
+        type: number
+        default: 20
+    secrets:
+      SSH_HOST:
+        required: true
+      SSH_USER:
+        required: true
+      SSH_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Roll
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          command_timeout: 20m
+          envs: IMAGE_REF,REMOTE_PATH,COMPOSE_FILE,SERVICE_NAME,GHCR_ACTOR,GHCR_TOKEN
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd "$REMOTE_PATH"
+
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_ACTOR" --password-stdin
+
+            # Record what is running now, so a rollback does not need archaeology.
+            docker compose -f "$COMPOSE_FILE" config --images > .previous-images || true
+
+            echo "Deploying $IMAGE_REF"
+            export IMAGE_REF
+            docker compose -f "$COMPOSE_FILE" pull ${SERVICE_NAME:-}
+            docker compose -f "$COMPOSE_FILE" up -d --wait --remove-orphans ${SERVICE_NAME:-}
+
+            docker image prune -f --filter 'until=168h'
+        env:
+          IMAGE_REF: ghcr.io/${{ inputs.image }}@${{ inputs.digest }}
+          REMOTE_PATH: ${{ inputs.remote-path }}
+          COMPOSE_FILE: ${{ inputs.compose-file }}
+          SERVICE_NAME: ${{ inputs.service-name }}
+          GHCR_ACTOR: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Health check
+        if: ${{ inputs.health-url != '' }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "${{ inputs.health-url }}" || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "healthy after ${attempt} attempt(s)"
+              exit 0
+            fi
+            echo "attempt ${attempt}: HTTP ${code}"
+            sleep 5
+          done
+          echo "::error::${{ inputs.health-url }} never returned 200 — deploy is live but unhealthy"
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Deployed to ${{ inputs.environment }}"
+            echo "- image: \`ghcr.io/${{ inputs.image }}@${{ inputs.digest }}\`"
+            echo "- host path: \`${{ inputs.remote-path }}\`"
+            echo "- rollback: re-run this workflow with the previous digest"
+          } >> "$GITHUB_STEP_SUMMARY"

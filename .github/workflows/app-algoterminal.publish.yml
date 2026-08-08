@@ -1,0 +1,35 @@
+name: algoterminal · publish
+
+on:
+  push:
+    tags: ['algoterminal/v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-python.yml
+    with:
+      path: apps/algoterminal
+      runners: '["ubuntu-latest","windows-latest"]'
+      coverage-min: 65
+      build-check: true
+    secrets: inherit
+
+  publish:
+    needs: quality
+    uses: ./.github/workflows/_publish-pypi.yml
+    with:
+      path: apps/algoterminal
+      environment: pypi
+      dry-run: ${{ inputs.dry-run || false }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write

@@ -1,0 +1,77 @@
+# Ownership is what replaces the repo boundary you lose by merging repos.
+#
+# Rules are last-match-wins, so order matters: the broad platform rules come
+# first and the specific per-service rules override them.
+#
+# The teams below must exist under the AlgoGators org before GitHub will honour
+# these lines — an unresolvable team is silently ignored, which looks exactly
+# like working ownership until someone merges without review. Verify with:
+#     gh api /repos/AlgoGators/algogators/codeowners/errors
+
+# ---------------------------------------------------------------------------
+# Default: nothing is unowned.
+# ---------------------------------------------------------------------------
+*                                   @AlgoGators/platform
+
+# ---------------------------------------------------------------------------
+# CI machinery. The reusable workflows and the path linter are load-bearing for
+# every service, so they stay with platform even though service teams own the
+# callers that invoke them.
+# ---------------------------------------------------------------------------
+/.github/workflows/_*.yml           @AlgoGators/platform
+/.github/workflows/security.yml     @AlgoGators/platform
+/.github/workflows/meta-*.yml       @AlgoGators/platform
+/.github/CODEOWNERS                 @AlgoGators/platform
+/platform/ci/                       @AlgoGators/platform
+
+# ---------------------------------------------------------------------------
+# Shared definitions. A contract change breaks producers and consumers at once,
+# so it needs review from the people on both sides of it.
+# ---------------------------------------------------------------------------
+/platform/contracts/                @AlgoGators/platform @AlgoGators/data @AlgoGators/execution
+/platform/configs/                  @AlgoGators/platform @AlgoGators/execution
+
+# ---------------------------------------------------------------------------
+# Toolchain roots. Changing these changes every member's build.
+# ---------------------------------------------------------------------------
+/pyproject.toml                     @AlgoGators/platform
+/uv.lock                            @AlgoGators/platform
+/pnpm-workspace.yaml                @AlgoGators/platform
+/CMakePresets.json                  @AlgoGators/platform
+/vcpkg.json                         @AlgoGators/platform
+/justfile                           @AlgoGators/platform
+
+# ---------------------------------------------------------------------------
+# Per-service. Each team owns its directory AND the workflow files that gate it,
+# so a service can tune its own coverage floor without a platform review — but
+# cannot edit the reusable everyone else depends on.
+#
+# Uncomment each block as the service is migrated in.
+# ---------------------------------------------------------------------------
+
+/libs/algosystem/                    @AlgoGators/research
+/.github/workflows/lib-algosystem.*  @AlgoGators/research
+/libs/research-core/                 @AlgoGators/research
+/.github/workflows/lib-research-core.* @AlgoGators/research
+
+/services/data-ngin/                 @AlgoGators/data
+/.github/workflows/svc-data-ngin.*   @AlgoGators/data
+
+/services/trade-ngin/                @AlgoGators/execution
+/.github/workflows/svc-trade-ngin.*  @AlgoGators/execution
+/services/research-api/              @AlgoGators/research
+/.github/workflows/svc-research-api.* @AlgoGators/research
+
+/apps/algolens-web/                  @AlgoGators/frontend
+/.github/workflows/app-algolens-*    @AlgoGators/frontend
+
+/apps/algoterminal/                  @AlgoGators/platform
+/.github/workflows/app-algoterminal.* @AlgoGators/platform
+
+# ---------------------------------------------------------------------------
+# Infrastructure and secrets-adjacent config always needs platform review,
+# regardless of which service it belongs to. Last match wins, so this is last.
+# ---------------------------------------------------------------------------
+/infra/                             @AlgoGators/platform
+**/Dockerfile                       @AlgoGators/platform
+**/docker-compose*.yml              @AlgoGators/platform

@@ -1,0 +1,19 @@
+name: algolens web · quality (skip)
+
+on:
+  pull_request:
+    paths-ignore:
+      - 'apps/algolens-web/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - '.github/workflows/_quality-node.yml'
+      - '.github/workflows/app-algolens-web.quality.yml'
+
+permissions: {}
+
+jobs:
+  gate:
+    name: app-algolens-web quality
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "apps/algolens-web untouched; skipping member CI"

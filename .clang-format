@@ -1,0 +1,27 @@
+# Shared across every C++ member. One style, enforced in CI, so formatting never
+# shows up in a code review again.
+---
+Language: Cpp
+BasedOnStyle: Google
+Standard: c++20
+ColumnLimit: 100
+IndentWidth: 4
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: Inline
+DerivePointerAlignment: false
+PointerAlignment: Left
+IncludeBlocks: Regroup
+IncludeCategories:
+  # Own headers first, then generated contract bindings, then third-party, then std.
+  - Regex: '^"trade_ngin/'
+    Priority: 1
+  - Regex: '^"algogators/contracts/'
+    Priority: 2
+  - Regex: '^<(arrow|nlohmann|pqxx|spdlog|gtest)/'
+    Priority: 3
+  - Regex: '^<.*\.h>'
+    Priority: 4
+  - Regex: '^<.*>'
+    Priority: 5
+  - Regex: '.*'
+    Priority: 6

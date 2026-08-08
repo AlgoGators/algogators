@@ -1,0 +1,51 @@
+name: research-api · publish
+
+on:
+  push:
+    tags: ['research-api/v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: true
+      deploy:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-python.yml
+    with:
+      path: services/research-api
+      coverage-min: 60
+    secrets: inherit
+
+  image:
+    needs: quality
+    uses: ./.github/workflows/_publish-container.yml
+    with:
+      path: services/research-api
+      image: algogators/research-api
+      environment: ghcr
+      push: ${{ !(inputs.dry-run || false) }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    secrets: inherit
+
+  deploy:
+    if: ${{ !inputs.dry-run && (github.event_name == 'push' || inputs.deploy) }}
+    needs: image
+    uses: ./.github/workflows/_deploy-ssh.yml
+    with:
+      environment: research-api-production
+      image: algogators/research-api
+      digest: ${{ needs.image.outputs.digest }}
+      remote-path: /opt/algogators/research-api
+      service-name: research-api
+    secrets: inherit

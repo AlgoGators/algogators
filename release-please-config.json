@@ -1,0 +1,36 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "separate-pull-requests": true,
+  "include-component-in-tag": true,
+  "tag-separator": "/",
+  "packages": {
+    "libs/algosystem": {
+      "release-type": "python",
+      "package-name": "algosystem"
+    },
+    "libs/research-core": {
+      "release-type": "python",
+      "package-name": "research-core"
+    },
+    "services/data-ngin": {
+      "release-type": "simple",
+      "package-name": "data-ngin"
+    },
+    "services/trade-ngin": {
+      "release-type": "simple",
+      "package-name": "trade-ngin"
+    },
+    "services/research-api": {
+      "release-type": "python",
+      "package-name": "research-api"
+    },
+    "apps/algolens-web": {
+      "release-type": "node",
+      "package-name": "@algogators/algolens-web"
+    },
+    "apps/algoterminal": {
+      "release-type": "python",
+      "package-name": "algoterminal"
+    }
+  }
+}

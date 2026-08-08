@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "algogators",
+  "version-string": "0.0.0",
+  "description": "Manifest-mode dependency set for the C++ members (trade-ngin and anything that links it)",
+  "dependencies": [
+    "gtest",
+    "nlohmann-json",
+    "arrow",
+    "libpqxx",
+    "spdlog"
+  ]
+}

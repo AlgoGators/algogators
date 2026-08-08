@@ -1,0 +1,14 @@
+{
+  "name": "@algogators/monorepo",
+  "private": true,
+  "description": "AlgoGators monorepo root — never published; owns the pnpm workspace and shared JS tooling",
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "lint": "pnpm -r --if-present run lint",
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "test": "pnpm -r --if-present run test"
+  }
+}

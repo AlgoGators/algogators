@@ -1,0 +1,51 @@
+name: data-ngin · publish
+
+on:
+  push:
+    tags: ['data-ngin/v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: true
+      deploy:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-python.yml
+    with:
+      path: services/data-ngin
+      coverage-min: 70
+    secrets: inherit
+
+  image:
+    needs: quality
+    uses: ./.github/workflows/_publish-container.yml
+    with:
+      path: services/data-ngin
+      image: algogators/data-ngin
+      environment: ghcr
+      push: ${{ !(inputs.dry-run || false) }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    secrets: inherit
+
+  deploy:
+    if: ${{ !inputs.dry-run && (github.event_name == 'push' || inputs.deploy) }}
+    needs: image
+    uses: ./.github/workflows/_deploy-ssh.yml
+    with:
+      environment: data-ngin-production
+      image: algogators/data-ngin
+      digest: ${{ needs.image.outputs.digest }}
+      remote-path: /opt/algogators/data-ngin
+      service-name: data-ngin
+    secrets: inherit

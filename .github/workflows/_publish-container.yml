@@ -1,0 +1,122 @@
+name: publish / container
+
+# Reusable. Called by a service's `svc-<name>.publish.yml`.
+#
+# Emits a digest, and the deploy workflow consumes the DIGEST, not the tag.
+# `:latest` on a trading service is how you end up unable to answer "what was
+# actually running when that fill went wrong" — a digest is immutable.
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: Build context, e.g. services/data-ngin
+        type: string
+        required: true
+      image:
+        description: Image name without registry, e.g. algogators/data-ngin
+        type: string
+        required: true
+      dockerfile:
+        type: string
+        default: Dockerfile
+      platforms:
+        type: string
+        default: linux/amd64
+      environment:
+        type: string
+        default: ''
+      push:
+        description: Set false on pull requests to build without publishing.
+        type: boolean
+        default: true
+    outputs:
+      digest:
+        description: Immutable image digest — pass this to the deploy workflow.
+        value: ${{ jobs.build.outputs.digest }}
+      tags:
+        value: ${{ jobs.build.outputs.tags }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build and push
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ inputs.push }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ inputs.image }}
+          # Tag from the service-scoped tag `<name>/vX.Y.Z`, so a data-ngin
+          # release never tags the trade-ngin image.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+            type=ref,event=branch
+          labels: |
+            org.opencontainers.image.title=${{ inputs.image }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.path }}
+          file: ${{ inputs.path }}/${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          push: ${{ inputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ inputs.image }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.image }}
+          provenance: true
+          sbom: true
+
+      - name: Attest build provenance
+        if: ${{ inputs.push }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/${{ inputs.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        if: ${{ inputs.push }}
+        run: |
+          {
+            echo "### ghcr.io/${{ inputs.image }}"
+            echo '```'
+            echo "digest: ${{ steps.build.outputs.digest }}"
+            echo "tags:"
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,20 @@
+name: algoterminal · quality (skip)
+
+on:
+  pull_request:
+    paths-ignore:
+      - 'apps/algoterminal/**'
+      - 'libs/research-core/**'
+      - 'uv.lock'
+      - 'pyproject.toml'
+      - '.github/workflows/_quality-python.yml'
+      - '.github/workflows/app-algoterminal.quality.yml'
+
+permissions: {}
+
+jobs:
+  gate:
+    name: app-algoterminal quality
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "apps/algoterminal untouched; skipping member CI"

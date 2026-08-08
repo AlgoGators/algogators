@@ -1,0 +1,53 @@
+name: data-ngin · quality
+
+on:
+  pull_request:
+    paths:
+      - 'services/data-ngin/**'
+      - 'uv.lock'
+      - 'pyproject.toml'
+      - '.github/workflows/_quality-python.yml'
+      - '.github/workflows/svc-data-ngin.quality.yml'
+      - 'platform/contracts/**'
+  push:
+    branches: [main]
+    paths:
+      - 'services/data-ngin/**'
+      - 'uv.lock'
+      - 'pyproject.toml'
+      - '.github/workflows/_quality-python.yml'
+      - '.github/workflows/svc-data-ngin.quality.yml'
+      - 'platform/contracts/**'
+  workflow_dispatch:
+
+concurrency:
+  group: svc-data-ngin-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-python.yml
+    with:
+      path: services/data-ngin
+      python-versions: '["3.11"]'
+      runners: '["ubuntu-latest"]'
+      coverage-min: 70
+      strict-types: false
+      build-check: false
+    secrets: inherit
+
+  gate:
+    name: svc-data-ngin quality
+    if: always()
+    needs: [quality]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report result
+        run: |
+          if [ "${{ needs.quality.result }}" != "success" ]; then
+            echo "::error::quality result was ${{ needs.quality.result }}"
+            exit 1
+          fi

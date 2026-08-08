@@ -1,0 +1,53 @@
+name: algoterminal · quality
+
+on:
+  pull_request:
+    paths:
+      - 'apps/algoterminal/**'
+      - 'libs/research-core/**'
+      - 'uv.lock'
+      - 'pyproject.toml'
+      - '.github/workflows/_quality-python.yml'
+      - '.github/workflows/app-algoterminal.quality.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/algoterminal/**'
+      - 'libs/research-core/**'
+      - 'uv.lock'
+      - 'pyproject.toml'
+      - '.github/workflows/_quality-python.yml'
+      - '.github/workflows/app-algoterminal.quality.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: app-algoterminal-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-python.yml
+    with:
+      path: apps/algoterminal
+      python-versions: '["3.11"]'
+      runners: '["ubuntu-latest","windows-latest"]'
+      coverage-min: 65
+      strict-types: false
+      build-check: true
+    secrets: inherit
+
+  gate:
+    name: app-algoterminal quality
+    if: always()
+    needs: [quality]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report result
+        run: |
+          if [ "${{ needs.quality.result }}" != "success" ]; then
+            echo "::error::quality result was ${{ needs.quality.result }}"
+            exit 1
+          fi

@@ -1,0 +1,19 @@
+name: research-core · quality (skip)
+
+on:
+  pull_request:
+    paths-ignore:
+      - 'libs/research-core/**'
+      - 'uv.lock'
+      - 'pyproject.toml'
+      - '.github/workflows/_quality-python.yml'
+      - '.github/workflows/lib-research-core.quality.yml'
+
+permissions: {}
+
+jobs:
+  gate:
+    name: lib-research-core quality
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "libs/research-core untouched; skipping member CI"

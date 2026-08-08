@@ -1,0 +1,53 @@
+name: trade-ngin · publish
+
+on:
+  push:
+    tags: ['trade-ngin/v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: true
+      deploy:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-cpp.yml
+    with:
+      path: services/trade-ngin
+      builds: '[{"preset":"ci-gcc13","os":"ubuntu-latest"},{"preset":"ci-clang18","os":"ubuntu-latest"},{"preset":"ci-msvc","os":"windows-latest"}]'
+      sanitizers: '["ci-asan","ci-ubsan"]'
+      run-clang-tidy: true
+    secrets: inherit
+
+  image:
+    needs: quality
+    uses: ./.github/workflows/_publish-container.yml
+    with:
+      path: services/trade-ngin
+      image: algogators/trade-ngin
+      environment: ghcr
+      push: ${{ !(inputs.dry-run || false) }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    secrets: inherit
+
+  deploy:
+    if: ${{ !inputs.dry-run && (github.event_name == 'push' || inputs.deploy) }}
+    needs: image
+    uses: ./.github/workflows/_deploy-ssh.yml
+    with:
+      environment: trade-ngin-production
+      image: algogators/trade-ngin
+      digest: ${{ needs.image.outputs.digest }}
+      remote-path: /opt/algogators/trade-ngin
+      service-name: trade-ngin
+    secrets: inherit

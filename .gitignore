@@ -1,0 +1,78 @@
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# uv.lock IS committed — it is the whole point of the workspace.
+# Per-service poetry.lock files are not; they are removed at migration time.
+
+# ---------------------------------------------------------------------------
+# Node
+# ---------------------------------------------------------------------------
+node_modules/
+.pnpm-store/
+*.tsbuildinfo
+.vite/
+
+# ---------------------------------------------------------------------------
+# C++
+# ---------------------------------------------------------------------------
+build/
+cmake-build-*/
+compile_commands.json
+vcpkg_installed/
+CMakeUserPresets.json
+
+# ---------------------------------------------------------------------------
+# Secrets and local config — never commit these
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+!**/testdata/*.pem
+credentials.json
+config.local.*
+
+# ---------------------------------------------------------------------------
+# Data. A quant monorepo dies of bloat if this list is not aggressive.
+# Real datasets belong in S3 or the warehouse, referenced by URI. Small,
+# deterministic fixtures under a tests/fixtures/ directory are exempt below.
+# ---------------------------------------------------------------------------
+*.parquet
+*.feather
+*.h5
+*.db
+*.sqlite3
+data/
+raw_data/
+datacache/
+cache/
+logs/
+*.log
+!**/tests/fixtures/**
+
+# ---------------------------------------------------------------------------
+# Editors / OS
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.shared.json

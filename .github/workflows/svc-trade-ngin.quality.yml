@@ -1,0 +1,51 @@
+name: trade-ngin · quality
+
+on:
+  pull_request:
+    paths:
+      - 'services/trade-ngin/**'
+      - 'vcpkg.json'
+      - 'CMakePresets.json'
+      - '.github/workflows/_quality-cpp.yml'
+      - '.github/workflows/svc-trade-ngin.quality.yml'
+      - 'platform/contracts/**'
+  push:
+    branches: [main]
+    paths:
+      - 'services/trade-ngin/**'
+      - 'vcpkg.json'
+      - 'CMakePresets.json'
+      - '.github/workflows/_quality-cpp.yml'
+      - '.github/workflows/svc-trade-ngin.quality.yml'
+      - 'platform/contracts/**'
+  workflow_dispatch:
+
+concurrency:
+  group: svc-trade-ngin-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-cpp.yml
+    with:
+      path: services/trade-ngin
+      builds: '[{"preset":"ci-gcc13","os":"ubuntu-latest"},{"preset":"ci-clang18","os":"ubuntu-latest"},{"preset":"ci-msvc","os":"windows-latest"}]'
+      sanitizers: '["ci-asan","ci-ubsan"]'
+      run-clang-tidy: true
+    secrets: inherit
+
+  gate:
+    name: svc-trade-ngin quality
+    if: always()
+    needs: [quality]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report result
+        run: |
+          if [ "${{ needs.quality.result }}" != "success" ]; then
+            echo "::error::quality result was ${{ needs.quality.result }}"
+            exit 1
+          fi

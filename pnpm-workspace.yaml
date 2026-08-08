@@ -1,0 +1,8 @@
+# JavaScript/TypeScript members. pnpm is used over npm for the shared store and
+# because `workspace:*` protocol makes intra-repo dependencies explicit — a web
+# app depending on a shared UI lib resolves to the local copy, never the registry.
+#
+# Populated as apps are migrated in:
+#   - apps/algolens-web   (Vite + React 18, from the AlgoLens repo)
+packages:
+  - apps/algolens-web

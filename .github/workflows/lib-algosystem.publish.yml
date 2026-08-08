@@ -1,0 +1,37 @@
+name: algosystem · publish
+
+on:
+  push:
+    tags: ['algosystem/v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-python.yml
+    with:
+      path: libs/algosystem
+      python-versions: '["3.9","3.11","3.13"]'
+      runners: '["ubuntu-latest","macos-latest","windows-latest"]'
+      coverage-min: 85
+      strict-types: true
+      build-check: true
+    secrets: inherit
+
+  publish:
+    needs: quality
+    uses: ./.github/workflows/_publish-pypi.yml
+    with:
+      path: libs/algosystem
+      environment: pypi
+      dry-run: ${{ inputs.dry-run || false }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write

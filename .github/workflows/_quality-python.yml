@@ -1,0 +1,107 @@
+name: quality / python
+
+# Reusable. Called by every Python member's `<kind>-<name>.quality.yml`.
+#
+# This file owns the environment and nothing else: checkout, toolchain, cache,
+# matrix, artifacts. WHAT gets run is `just lint|typecheck|test <path>`, which
+# resolves to the root justfile's defaults unless the service overrides a recipe
+# in its own justfile. Adding a `needs-postgres:` input here would be the wrong
+# fix for a one-service problem — bring the database up inside that service's
+# `test` recipe instead.
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: Repo-relative path to the member, e.g. libs/algosystem
+        type: string
+        required: true
+      python-versions:
+        description: JSON array of interpreter versions to matrix over
+        type: string
+        default: '["3.11"]'
+      runners:
+        description: JSON array of runner labels to matrix over
+        type: string
+        default: '["ubuntu-latest"]'
+      coverage-min:
+        description: Coverage floor, as a percentage. Exposed to just as $COVERAGE_MIN.
+        type: number
+        default: 0
+      strict-types:
+        description: Run mypy --strict. Libraries yes, research services no.
+        type: boolean
+        default: false
+      build-check:
+        description: Build the distribution and validate its metadata. Publishable members only.
+        type: boolean
+        default: false
+      timeout-minutes:
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: py${{ matrix.python }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.runners) }}
+        python: ${{ fromJSON(inputs.python-versions) }}
+    env:
+      # Consumed by the root justfile's default recipes.
+      COVERAGE_MIN: ${{ inputs.coverage-min }}
+      MYPY_STRICT: ${{ inputs.strict-types }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python ${{ matrix.python }}
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: ${{ matrix.python }}
+
+      - name: Install workspace
+        # --locked fails if uv.lock is stale rather than silently re-resolving,
+        # so a forgotten `uv lock` is caught here instead of in production.
+        # `just` itself comes from the lockfile (rust-just in the dev group).
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Lint
+        run: uv run just lint "${{ inputs.path }}"
+
+      - name: Typecheck
+        run: uv run just typecheck "${{ inputs.path }}"
+
+      - name: Test
+        run: uv run just test "${{ inputs.path }}"
+
+      - name: Build distribution
+        if: ${{ inputs.build-check }}
+        run: |
+          uv build "${{ inputs.path }}" --out-dir dist
+          uvx twine check dist/*
+
+      - name: Slug
+        id: slug
+        if: always()
+        shell: bash
+        # Artifact names may not contain "/", and inputs.path always does.
+        run: echo "value=$(echo '${{ inputs.path }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ steps.slug.outputs.value }}-py${{ matrix.python }}-${{ matrix.os }}
+          path: ${{ inputs.path }}/coverage.xml
+          if-no-files-found: ignore
+          retention-days: 14
