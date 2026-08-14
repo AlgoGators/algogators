@@ -32,7 +32,7 @@ jobs:
       path: apps/algolens-web
       node-versions: '["20"]'
       runners: '["ubuntu-latest"]'
-      coverage-min: 50
+      coverage-min: 80
       bundle-budget-kb: 500
       e2e: false
     secrets: inherit

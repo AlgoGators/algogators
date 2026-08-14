@@ -32,7 +32,7 @@ jobs:
       path: services/data-ngin
       python-versions: '["3.11"]'
       runners: '["ubuntu-latest"]'
-      coverage-min: 70
+      coverage-min: 80
       strict-types: false
       build-check: false
     secrets: inherit
