@@ -34,7 +34,7 @@ class FakeConnect:
     def __init__(self, result=None, error=None):
         self.result = result if result is not None else MagicMock(name="connection")
         self.error = error
-        self.kwargs = None
+        self.kwargs: dict[str, object] | None = None
 
     def __call__(self, **kwargs):
         self.kwargs = kwargs
@@ -101,6 +101,7 @@ def test_get_db_connection_defaults_port_to_5432(monkeypatch, db_env):
 
     postgres.get_db_connection()
 
+    assert fake.kwargs is not None
     assert fake.kwargs["port"] == "5432"
 
 
@@ -190,9 +191,7 @@ def test_execute_query_select_fetches_all_rows(fake_conn):
 def test_execute_query_select_fetch_one(fake_conn):
     _cursor(fake_conn).fetchone.return_value = {"id": 1}
 
-    result = postgres.execute_query(
-        "SELECT * FROM auth.users WHERE id = %s", (1,), fetch_one=True
-    )
+    result = postgres.execute_query("SELECT * FROM auth.users WHERE id = %s", (1,), fetch_one=True)
 
     assert result == {"id": 1}
     _cursor(fake_conn).execute.assert_called_once_with(
