@@ -174,9 +174,7 @@ def test_returns_helper_preserves_existing_name():
     returns = _returns(named)
 
     assert returns.name == "alpha"
-    pd.testing.assert_series_equal(
-        returns, named.equity_curve.returns(), check_names=False
-    )
+    pd.testing.assert_series_equal(returns, named.equity_curve.returns(), check_names=False)
 
 
 def test_benchmark_returns_helper_handles_missing_and_named_curves():

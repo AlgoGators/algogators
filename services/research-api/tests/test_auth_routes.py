@@ -8,10 +8,9 @@ into their use cases per-request.
 from unittest.mock import MagicMock
 
 import pytest
-from flask_jwt_extended import create_access_token
-
 import research_api.adapters.http.auth as auth_mod
 import research_api.app as app_module
+from flask_jwt_extended import create_access_token
 
 
 def _user_row(**overrides):
@@ -81,9 +80,7 @@ def test_login_unexpected_error_returns_masked_500(client, monkeypatch):
 
     monkeypatch.setattr(auth_mod, "execute_query", boom)
 
-    resp = client.post(
-        "/auth/login", json={"email": "member@example.com", "password": "a" * 12}
-    )
+    resp = client.post("/auth/login", json={"email": "member@example.com", "password": "a" * 12})
 
     assert resp.status_code == 500
     body = resp.get_json()
@@ -117,9 +114,7 @@ def test_verify_unknown_user_returns_404(client, monkeypatch, dev_mode_off):
     assert resp.get_json()["error"] == "User not found"
 
 
-def test_verify_short_circuits_to_dev_user_when_identity_matches(
-    client, monkeypatch, dev_mode_on
-):
+def test_verify_short_circuits_to_dev_user_when_identity_matches(client, monkeypatch, dev_mode_on):
     def fail_if_called(*args, **kwargs):
         raise AssertionError("dev-mode verify must not touch the database")
 
@@ -135,9 +130,7 @@ def test_verify_short_circuits_to_dev_user_when_identity_matches(
     assert user["role"] == "admin"
 
 
-def test_verify_falls_through_to_db_when_dev_identity_mismatch(
-    client, monkeypatch, dev_mode_on
-):
+def test_verify_falls_through_to_db_when_dev_identity_mismatch(client, monkeypatch, dev_mode_on):
     monkeypatch.setattr(auth_mod, "execute_query", lambda *a, **k: _user_row(id=31))
     _set_session_cookie(client, 31)
 

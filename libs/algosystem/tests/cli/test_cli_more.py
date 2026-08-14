@@ -253,9 +253,7 @@ class TestBacktestCommand:
         assert result.exit_code == 1
         assert "input file is empty" in result.output
 
-    def test_undetectable_dates_become_click_error(
-        self, runner: CliRunner, tmp_path: Path
-    ) -> None:
+    def test_undetectable_dates_become_click_error(self, runner: CliRunner, tmp_path: Path) -> None:
         path = tmp_path / "nodate.csv"
         path.write_text("name,city\nalice,gainesville\nbob,orlando\n")
 
@@ -382,9 +380,7 @@ class _FakeValidateAlgo:
         type(self).calls["detect"] = kwargs
         return _FakeOverfitResults()
 
-    def validation_report(
-        self, results: object, output: object, open_browser: bool = False
-    ) -> str:
+    def validation_report(self, results: object, output: object, open_browser: bool = False) -> str:
         type(self).calls["report"] = {"output": Path(str(output)), "open_browser": open_browser}
         Path(str(output)).write_text("<html></html>")
         return str(output)
@@ -467,9 +463,7 @@ class TestValidateCommand:
         assert result.exit_code == 1
         assert "use --price-column" in result.output
 
-    def test_empty_date_range_becomes_click_error(
-        self, runner: CliRunner, price_csv: Path
-    ) -> None:
+    def test_empty_date_range_becomes_click_error(self, runner: CliRunner, price_csv: Path) -> None:
         result = runner.invoke(cli, ["validate", str(price_csv), "--start", "2030-01-01"])
 
         assert result.exit_code == 1
@@ -649,9 +643,7 @@ class TestDbCommands:
 
 
 class TestDbInit:
-    def test_init_creates_schema(
-        self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_init_creates_schema(self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch) -> None:
         import sqlalchemy
         from algosystem.backtesting.infrastructure import persistence
 
@@ -659,9 +651,7 @@ class TestDbInit:
         config = SimpleNamespace(
             url=lambda: "postgresql://unit/test", pool_size=3, schema="unit_test_schema"
         )
-        monkeypatch.setattr(
-            persistence, "DatabaseConfig", SimpleNamespace(from_env=lambda: config)
-        )
+        monkeypatch.setattr(persistence, "DatabaseConfig", SimpleNamespace(from_env=lambda: config))
 
         def fake_create_engine(url: str, pool_size: int = 5) -> str:
             created["engine"] = (url, pool_size)

@@ -12,10 +12,9 @@ from datetime import timedelta
 from unittest.mock import MagicMock
 
 import pytest
-from flask_jwt_extended import create_access_token
-
 import research_api.app as app_module
 import research_api.infrastructure.config.app_factory as app_factory
+from flask_jwt_extended import create_access_token
 
 FACTORY_LOGGER = "research_api.infrastructure.config.app_factory"
 
