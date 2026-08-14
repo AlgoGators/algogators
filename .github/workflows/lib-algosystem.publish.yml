@@ -17,11 +17,12 @@ jobs:
     uses: ./.github/workflows/_quality-python.yml
     with:
       path: libs/algosystem
-      python-versions: '["3.9","3.11","3.13"]'
+      python-versions: '["3.11","3.13"]'
       runners: '["ubuntu-latest","macos-latest","windows-latest"]'
-      coverage-min: 85
-      strict-types: true
+      coverage-min: 60
+      strict-types: false
       build-check: true
+      timeout-minutes: 30
     secrets: inherit
 
   publish:

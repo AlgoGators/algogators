@@ -1,10 +1,20 @@
 [project]
 name = "research-api"
-version = "0.0.0"
+version = "0.1.0"
 description = "Shared research backend API for AlgoLens and AlgoTerminal"
 requires-python = ">=3.11"
 readme = "README.md"
-dependencies = ["research-core"]
+dependencies = [
+    "research-core",
+    "flask>=3.1.3",
+    "flask-cors>=6.0.5",
+    "flask-jwt-extended>=4.7.4",
+    "flask-limiter>=4.1.1",
+    "psycopg2-binary>=2.9.12",
+    "werkzeug>=3.1.8",
+    "python-dotenv>=1.2.2",
+    "gunicorn>=23.0",
+]
 
 [build-system]
 requires = ["hatchling"]

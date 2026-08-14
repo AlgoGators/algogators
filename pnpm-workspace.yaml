@@ -6,3 +6,4 @@
 #   - apps/algolens-web   (Vite + React 18, from the AlgoLens repo)
 packages:
   - apps/algolens-web
+  - apps/website

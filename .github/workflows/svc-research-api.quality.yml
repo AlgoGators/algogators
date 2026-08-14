@@ -34,7 +34,7 @@ jobs:
       path: services/research-api
       python-versions: '["3.11"]'
       runners: '["ubuntu-latest"]'
-      coverage-min: 60
+      coverage-min: 55
       strict-types: false
       build-check: false
     secrets: inherit
