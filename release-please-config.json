@@ -31,6 +31,10 @@
     "apps/algoterminal": {
       "release-type": "python",
       "package-name": "algoterminal"
+    },
+    "apps/website": {
+      "release-type": "node",
+      "package-name": "@algogators/website"
     }
   }
 }

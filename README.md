@@ -3,10 +3,18 @@
 Monorepo scaffold for AlgoGators services, libraries, apps, shared contracts,
 and CI machinery.
 
-No external repository code has been imported yet. The member directories under
-`libs/`, `services/`, and `apps/` are lightweight placeholders so workflow
-ownership, path filters, release tags, and build boundaries can be reviewed
-before the migrations start.
+Imported members and their source repositories:
+
+| member | source |
+|---|---|
+| `libs/algosystem` | `AlgoGators/algosystem` (main) |
+| `services/data-ngin` | `AlgoGators/data-ngin` (declarative-ddd-refactor) |
+| `services/research-api` | `AlgoGators/algolens` — `algolens-api`, package renamed `research_api` |
+| `apps/algolens-web` | `AlgoGators/algolens` — `algolens-frontend` |
+| `apps/website` | `AlgoGators/AlgoGatorsWebsite` (static site) |
+
+Still placeholders: `libs/research-core`, `apps/algoterminal`,
+`services/trade-ngin`.
 
 ## Layout
 
