@@ -941,7 +941,6 @@ dependencies = [
     { name = "strawberry-graphql", extra = ["fastapi"] },
     { name = "tzdata" },
     { name = "uvicorn" },
-    { name = "yfinance" },
 ]
 
 [package.metadata]
@@ -960,7 +959,6 @@ requires-dist = [
     { name = "strawberry-graphql", extras = ["fastapi"], specifier = ">=0.253.0" },
     { name = "tzdata", specifier = ">=2024.2" },
     { name = "uvicorn", specifier = ">=0.34.0" },
-    { name = "yfinance", specifier = ">=0.2.48,<0.3" },
 ]
 
 [[package]]
