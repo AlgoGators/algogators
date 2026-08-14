@@ -77,3 +77,6 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.shared.json
+
+# vitest coverage reports
+coverage/
