@@ -34,6 +34,8 @@ jobs:
       builds: '[{"preset":"ci-gcc13","os":"ubuntu-latest"}]'
       sanitizers: '[]'
       run-clang-tidy: false
+      # 3,900+ pre-existing violations; reformat once the feature branches land.
+      run-clang-format: false
     secrets: inherit
 
   gate:

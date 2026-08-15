@@ -53,6 +53,13 @@ find_package(GTest CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 #set(Arrow_DIR "C:/vcpkg/installed/x64-windows/share/arrow")
 find_package(Arrow REQUIRED)
+# vcpkg's default linux triplet builds Arrow static; Windows/mac dev setups
+# may have the shared target instead. Link whichever exists.
+if(TARGET Arrow::arrow_shared)
+    set(TRADE_NGIN_ARROW Arrow::arrow_shared)
+else()
+    set(TRADE_NGIN_ARROW Arrow::arrow_static)
+endif()
 find_package(libpqxx CONFIG REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(NLopt REQUIRED)
@@ -159,7 +166,7 @@ target_link_libraries(trade_ngin
     PUBLIC
         nlohmann_json::nlohmann_json
         libpqxx::pqxx
-        Arrow::arrow_shared
+        ${TRADE_NGIN_ARROW}
         CURL::libcurl
         Eigen3::Eigen
         NLopt::nlopt
