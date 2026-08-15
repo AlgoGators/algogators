@@ -8,6 +8,9 @@
     "nlohmann-json",
     "arrow",
     "libpqxx",
-    "spdlog"
+    "spdlog",
+    "eigen3",
+    "nlopt",
+    "curl"
   ]
 }

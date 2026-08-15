@@ -8,7 +8,6 @@ on:
       - 'CMakePresets.json'
       - '.github/workflows/_quality-cpp.yml'
       - '.github/workflows/svc-trade-ngin.quality.yml'
-      - 'platform/contracts/**'
 
 permissions: {}
 
