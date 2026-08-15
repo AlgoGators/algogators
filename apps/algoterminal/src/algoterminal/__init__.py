@@ -1,9 +1,5 @@
-"""Placeholder package for algoterminal."""
+"""AlgoTerminal — a deterministic, terminal-based research workbench for the
+AlgoGators Quantitative Research team.
+"""
 
-
-def app_name() -> str:
-    return "algoterminal"
-
-
-def main() -> None:
-    print(app_name())
+__version__ = "0.1.0"

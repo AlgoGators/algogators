@@ -81,6 +81,9 @@ ignore = [
 "**/tests/**" = ["S101", "SIM115"]
 # Sphinx requires a module-level `copyright` variable in conf.py.
 "**/docs/conf.py" = ["A001"]
+# Textual compose() methods nest `with` blocks to mirror the widget tree;
+# collapsing them destroys the layout's readability.
+"**/tui/**" = ["SIM117"]
 
 [tool.mypy]
 # 3.12 because current numpy stubs use PEP 695 `type` statements, which mypy
@@ -115,6 +118,9 @@ module = [
     # SQLAlchemy 1.4 (pinned by data-ngin) predates py.typed.
     "sqlalchemy.*",
     "matplotlib.*",
+    # algoterminal's terminal plotting and cointegration deps.
+    "plotext.*",
+    "statsmodels.*",
 ]
 ignore_missing_imports = true
 
