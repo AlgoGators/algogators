@@ -251,12 +251,6 @@ requires-dist = [
 name = "algoterminal"
 version = "0.0.0"
 source = { editable = "apps/algoterminal" }
-dependencies = [
-    { name = "research-core" },
-]
-
-[package.metadata]
-requires-dist = [{ name = "research-core", editable = "libs/research-core" }]
 
 [[package]]
 name = "annotated-doc"

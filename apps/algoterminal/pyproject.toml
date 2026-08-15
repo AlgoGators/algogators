@@ -4,7 +4,7 @@ version = "0.0.0"
 description = "AlgoGators terminal UI"
 requires-python = ">=3.11"
 readme = "README.md"
-dependencies = ["research-core"]
+dependencies = []
 
 [project.scripts]
 algoterminal = "algoterminal:main"
