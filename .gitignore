@@ -60,7 +60,7 @@ config.local.*
 *.h5
 *.db
 *.sqlite3
-data/
+/data/
 raw_data/
 datacache/
 cache/
