@@ -1,13 +1,9 @@
-"""Application-layer exceptions."""
+"""Application-layer exceptions.
 
+The taxonomy lives in research-core; this module re-exports it so existing
+``research_api.application.shared.errors`` imports keep working unchanged.
+"""
 
-class ApplicationError(Exception):
-    """Base application exception."""
+from research_core.errors import ApplicationError, NotFoundError, ValidationError
 
-
-class NotFoundError(ApplicationError):
-    """Requested resource was not found."""
-
-
-class ValidationError(ApplicationError):
-    """Request data failed application validation."""
+__all__ = ["ApplicationError", "NotFoundError", "ValidationError"]

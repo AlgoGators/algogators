@@ -1,9 +1,20 @@
+import os
 import re
 import unittest
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository
+
+# _get_pool routes the DB_* variables through platform_db.DatabaseConfig, which
+# validates them -- pool tests must therefore run with a complete set.
+DB_ENV = {
+    "DB_HOST": "db.internal.example.com",
+    "DB_PORT": "6543",
+    "DB_NAME": "futures_data_db",
+    "DB_USER": "app_user",
+    "DB_PASSWORD": "s3cret",
+}
 
 
 class TestOhlcvRepositoryWrites(unittest.TestCase):
@@ -156,6 +167,7 @@ class TestOhlcvRepositoryConnectionPool(unittest.TestCase):
         self.addCleanup(OhlcvRepository.reset_pool_for_testing)
         OhlcvRepository.reset_pool_for_testing()
 
+    @patch.dict("os.environ", DB_ENV)
     @patch(
         "data_ngin.infrastructure.repository.ohlcv_repository.psycopg2_pool.ThreadedConnectionPool"
     )
@@ -166,6 +178,7 @@ class TestOhlcvRepositoryConnectionPool(unittest.TestCase):
         mock_pool_cls.assert_called_once()
         self.assertIs(pool_a, pool_b)
 
+    @patch.dict("os.environ", DB_ENV)
     @patch(
         "data_ngin.infrastructure.repository.ohlcv_repository.psycopg2_pool.ThreadedConnectionPool"
     )
@@ -176,7 +189,7 @@ class TestOhlcvRepositoryConnectionPool(unittest.TestCase):
 
         self.assertEqual(mock_pool_cls.call_count, 2)
 
-    @patch.dict("os.environ", {"DB_POOL_MIN_CONN": "2", "DB_POOL_MAX_CONN": "20"})
+    @patch.dict("os.environ", dict(DB_ENV, DB_POOL_MIN_CONN="2", DB_POOL_MAX_CONN="20"))
     @patch(
         "data_ngin.infrastructure.repository.ohlcv_repository.psycopg2_pool.ThreadedConnectionPool"
     )
@@ -185,6 +198,37 @@ class TestOhlcvRepositoryConnectionPool(unittest.TestCase):
         args, _kwargs = mock_pool_cls.call_args
         self.assertEqual(args[0], 2)
         self.assertEqual(args[1], 20)
+
+    @patch.dict("os.environ", DB_ENV)
+    @patch(
+        "data_ngin.infrastructure.repository.ohlcv_repository.psycopg2_pool.ThreadedConnectionPool"
+    )
+    def test_get_pool_passes_validated_connect_kwargs(self, mock_pool_cls: MagicMock) -> None:
+        """The pool's connection settings come from DatabaseConfig (int port included)."""
+        OhlcvRepository._get_pool()
+
+        _args, kwargs = mock_pool_cls.call_args
+        self.assertEqual(
+            kwargs,
+            {
+                "host": "db.internal.example.com",
+                "port": 6543,
+                "dbname": "futures_data_db",
+                "user": "app_user",
+                "password": "s3cret",
+            },
+        )
+
+    @patch(
+        "data_ngin.infrastructure.repository.ohlcv_repository.psycopg2_pool.ThreadedConnectionPool"
+    )
+    def test_get_pool_rejects_missing_db_env(self, mock_pool_cls: MagicMock) -> None:
+        """Missing DB_* variables raise instead of building a pool of Nones."""
+        env = {key: value for key, value in os.environ.items() if not key.startswith("DB_")}
+        with patch.dict("os.environ", env, clear=True), self.assertRaises(ValueError):
+            OhlcvRepository._get_pool()
+
+        mock_pool_cls.assert_not_called()
 
 
 class TestOhlcvRepositoryReads(unittest.TestCase):

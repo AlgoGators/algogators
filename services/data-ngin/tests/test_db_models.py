@@ -1,13 +1,50 @@
 import logging
+import os
 import unittest
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
+from data_ngin.infrastructure import db_models
 from data_ngin.infrastructure.db_models import OHLCV, Base, get_engine
 from sqlalchemy import inspect
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+
+
+class TestGetEngineUnit(unittest.TestCase):
+    """Unit tests for get_engine's URL construction -- no live database.
+
+    get_engine now builds its DSN via platform_db.DatabaseConfig.url(), which
+    quote_plus-escapes credentials; the old raw f-string broke as soon as the
+    password contained '@' or '/'.
+    """
+
+    DB_ENV: ClassVar[dict[str, str]] = {
+        "DB_HOST": "db.internal.example.com",
+        "DB_PORT": "6543",
+        "DB_NAME": "futures_data_db",
+        "DB_USER": "app_user",
+        "DB_PASSWORD": "p@ss/w:rd",
+    }
+
+    @patch.dict("os.environ", DB_ENV)
+    def test_get_engine_survives_reserved_characters_in_password(self) -> None:
+        engine = get_engine()
+
+        self.assertEqual(engine.url.host, "db.internal.example.com")
+        self.assertEqual(engine.url.port, 6543)
+        self.assertEqual(engine.url.database, "futures_data_db")
+        self.assertEqual(engine.url.username, "app_user")
+        # The password round-trips intact despite '@', '/' and ':'.
+        self.assertEqual(engine.url.password, "p@ss/w:rd")
+
+    @patch.object(db_models, "load_dotenv", lambda: None)
+    def test_get_engine_missing_env_raises_value_error(self) -> None:
+        env = {key: value for key, value in os.environ.items() if not key.startswith("DB_")}
+        with patch.dict("os.environ", env, clear=True), self.assertRaises(ValueError):
+            get_engine()
 
 
 @pytest.mark.integration

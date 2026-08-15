@@ -1,29 +1,25 @@
-name: research-api · quality
+name: lib-platform-db · quality
 
 on:
   pull_request:
     paths:
-      - 'services/research-api/**'
-      - 'libs/research-core/**'
       - 'libs/platform-db/**'
       - 'uv.lock'
       - 'pyproject.toml'
       - '.github/workflows/_quality-python.yml'
-      - '.github/workflows/svc-research-api.quality.yml'
+      - '.github/workflows/lib-platform-db.quality.yml'
   push:
     branches: [main]
     paths:
-      - 'services/research-api/**'
-      - 'libs/research-core/**'
       - 'libs/platform-db/**'
       - 'uv.lock'
       - 'pyproject.toml'
       - '.github/workflows/_quality-python.yml'
-      - '.github/workflows/svc-research-api.quality.yml'
+      - '.github/workflows/lib-platform-db.quality.yml'
   workflow_dispatch:
 
 concurrency:
-  group: svc-research-api-quality-${{ github.ref }}
+  group: lib-platform-db-quality-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -33,16 +29,16 @@ jobs:
   quality:
     uses: ./.github/workflows/_quality-python.yml
     with:
-      path: services/research-api
+      path: libs/platform-db
       python-versions: '["3.11"]'
       runners: '["ubuntu-latest"]'
-      coverage-min: 80
+      coverage-min: 60
       strict-types: false
       build-check: false
     secrets: inherit
 
   gate:
-    name: svc-research-api quality
+    name: lib-platform-db quality
     if: always()
     needs: [quality]
     runs-on: ubuntu-latest

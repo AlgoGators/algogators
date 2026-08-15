@@ -35,6 +35,10 @@
     "apps/website": {
       "release-type": "node",
       "package-name": "@algogators/website"
+    },
+    "libs/platform-db": {
+      "release-type": "python",
+      "package-name": "platform-db"
     }
   }
 }

@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  checkEmailRequest,
   devLoginRequest,
   loginRequest,
   logoutRequest,
@@ -135,5 +136,44 @@ describe('logoutRequest', () => {
       `${API_BASE_URL}/auth/logout`,
       expect.objectContaining({ method: 'POST', credentials: 'include' })
     );
+  });
+});
+
+describe('checkEmailRequest', () => {
+  it('POSTs the email to /auth/check-email with cookie credentials', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ registered: false }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(checkEmailRequest('a@b.c')).resolves.toEqual({
+      ok: true,
+      registered: false,
+      message: undefined,
+    });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`${API_BASE_URL}/auth/check-email`);
+    expect(init.credentials).toBe('include');
+    expect(JSON.parse(init.body)).toEqual({ email: 'a@b.c' });
+  });
+
+  it('reports an already-registered email', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ registered: true })));
+
+    await expect(checkEmailRequest('a@b.c')).resolves.toMatchObject({
+      ok: true,
+      registered: true,
+    });
+  });
+
+  it('surfaces the backend message on a rejected email', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(jsonResponse({ message: 'Email not authorized' }, 403))
+    );
+
+    await expect(checkEmailRequest('a@b.c')).resolves.toEqual({
+      ok: false,
+      registered: false,
+      message: 'Email not authorized',
+    });
   });
 });

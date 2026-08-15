@@ -5,6 +5,7 @@ description = "AlgoGators market-data ingestion service"
 requires-python = ">=3.11"
 readme = "README.md"
 dependencies = [
+    "platform-db",
     "pandas>=2.2.3,<3",
     "databento>=0.44.1",
     "python-dotenv>=1.0.1",

@@ -6,6 +6,7 @@ import pandas as pd
 import yfinance as yf
 
 from algosystem.marketdata.domain.benchmark import Ticker
+from algosystem.marketdata.domain.normalize import normalize_price_series
 from algosystem.shared.errors import MarketDataError
 from algosystem.shared.values import DateRange
 
@@ -55,19 +56,12 @@ def _select_price_series(data: pd.DataFrame, ticker: Ticker) -> pd.Series:
 
 
 def _normalize(prices: pd.Series, ticker: Ticker) -> pd.Series:
-    series = prices.copy().sort_index()
-    if not isinstance(series.index, pd.DatetimeIndex):
-        raise MarketDataError(f"yfinance response index is not datetime for {ticker.value}")
-    if series.index.tz is not None:
-        series.index = series.index.tz_convert(None)
-    try:
-        series = series.astype(float)
-    except (TypeError, ValueError) as exc:
-        raise MarketDataError(f"yfinance returned non-numeric prices for {ticker.value}") from exc
-    series = series.dropna()
-    if series.empty:
-        raise MarketDataError(f"no usable benchmark prices returned for {ticker.value}")
-    return series
+    return normalize_price_series(
+        prices,
+        index_error=f"yfinance response index is not datetime for {ticker.value}",
+        dtype_error=f"yfinance returned non-numeric prices for {ticker.value}",
+        empty_error=f"no usable benchmark prices returned for {ticker.value}",
+    )
 
 
 __all__ = ["YFinanceBenchmarkProvider"]

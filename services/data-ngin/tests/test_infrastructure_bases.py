@@ -66,7 +66,7 @@ class RecordingCleaner(Cleaner):
 
 
 class SyncFetcher(Fetcher):
-    """Fetcher with a synchronous fetch_data (for fetch_and_validate)."""
+    """Minimal concrete Fetcher: implements the single abstract method."""
 
     def fetch_data(self, symbol: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
         return [
@@ -289,40 +289,9 @@ def test_cleaner_clean_orchestrates_hooks_in_order() -> None:
     assert "transformed" in result.columns
 
 
-def test_cleaner_detect_time_gaps_finds_missing_days() -> None:
-    cleaner = RecordingCleaner()
-    data = pd.DataFrame({"time": ["2023-01-03", "2023-01-01", "2023-01-04"], "close": [3, 1, 4]})
-
-    missing = cleaner.detect_time_gaps(data, time_column="time", freq="D")
-
-    assert list(missing) == [pd.Timestamp("2023-01-02")]
-
-
-def test_cleaner_detect_time_gaps_no_gaps() -> None:
-    cleaner = RecordingCleaner()
-    data = pd.DataFrame({"time": ["2023-01-01", "2023-01-02"], "close": [1, 2]})
-
-    missing = cleaner.detect_time_gaps(data, time_column="time", freq="D")
-
-    assert len(missing) == 0
-
-
-def test_cleaner_log_missing_data_warns_per_timestamp(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    # Prevent basicConfig from installing a FileHandler writing data_quality.log
-    # into the working directory.
-    monkeypatch.setattr(logging, "basicConfig", lambda **kwargs: None)
-    cleaner = RecordingCleaner()
-    stamps = [pd.Timestamp("2023-01-02"), pd.Timestamp("2023-01-05")]
-
-    with caplog.at_level(logging.WARNING):
-        cleaner.log_missing_data(stamps)
-
-    warned = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warned) == 2
-    assert "2023-01-02" in warned[0]
-    assert "2023-01-05" in warned[1]
+# Cleaner.detect_time_gaps / log_missing_data were deleted (gap detection is
+# consolidated in StalenessChecker.detect_date_gaps, tested in
+# tests/domain/test_services.py), so their tests went with them.
 
 
 # ---------------------------------------------------------------------------
@@ -356,61 +325,6 @@ def test_fetcher_retrieve_delegates_to_fetch_data() -> None:
     ]
 
 
-def test_fetcher_detect_time_gaps_returns_missing_strings() -> None:
-    fetcher = SyncFetcher({})
-    data = [
-        {"time": "2023-01-01", "close": 1.0},
-        {"time": "2023-01-04", "close": 4.0},
-    ]
-
-    missing = fetcher.detect_time_gaps(data, time_column="time", freq="D")
-
-    assert missing == ["2023-01-02", "2023-01-03"]
-
-
-def test_fetcher_detect_time_gaps_missing_column_raises() -> None:
-    fetcher = SyncFetcher({})
-    data = [{"date": "2023-01-01", "close": 1.0}]
-
-    with pytest.raises(ValueError, match="Time column 'time' not found"):
-        fetcher.detect_time_gaps(data, time_column="time", freq="D")
-
-
-def test_fetcher_log_missing_data_warns_when_gaps(caplog: pytest.LogCaptureFixture) -> None:
-    fetcher = SyncFetcher({})
-
-    with caplog.at_level(logging.WARNING, logger="SyncFetcher"):
-        fetcher.log_missing_data(["2023-01-02", "2023-01-03"])
-
-    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 2
-    assert "2023-01-02" in warnings[0]
-
-
-def test_fetcher_log_missing_data_info_when_none(caplog: pytest.LogCaptureFixture) -> None:
-    fetcher = SyncFetcher({})
-
-    with caplog.at_level(logging.INFO, logger="SyncFetcher"):
-        fetcher.log_missing_data([])
-
-    infos = [r.message for r in caplog.records if r.levelno == logging.INFO]
-    assert infos == ["No missing data detected."]
-
-
-def test_fetcher_fetch_and_validate_returns_data_and_logs_gaps(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    fetcher = SyncFetcher({})
-
-    with caplog.at_level(logging.WARNING, logger="SyncFetcher"):
-        data = fetcher.fetch_and_validate(
-            symbol="ES",
-            start_date="2023-01-01",
-            end_date="2023-01-03",
-            time_column="time",
-            freq="D",
-        )
-
-    assert len(data) == 2
-    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("2023-01-02" in message for message in warnings)
+# Fetcher.detect_time_gaps / log_missing_data / fetch_and_validate were deleted
+# (gap detection is consolidated in StalenessChecker.detect_date_gaps, tested
+# in tests/domain/test_services.py), so their tests went with them.

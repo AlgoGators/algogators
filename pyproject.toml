@@ -19,6 +19,7 @@ package = false
 
 [tool.uv.sources]
 research-core = { workspace = true }
+platform-db = { workspace = true }
 
 [tool.uv.workspace]
 # Members are listed explicitly rather than globbed. Add each Python member here
@@ -26,6 +27,7 @@ research-core = { workspace = true }
 # member directory has matching workflow callers.
 members = [
     "libs/algosystem",
+    "libs/platform-db",
     "libs/research-core",
     "services/data-ngin",
     "services/research-api",

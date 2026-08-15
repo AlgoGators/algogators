@@ -1,20 +1,13 @@
-import os
 import sys
 
-import psycopg2
 from dotenv import load_dotenv
+from research_api.infrastructure.db.postgres import get_db_connection
 
 load_dotenv()
 
 
 def add_authorized_email(email, reset=False):
-    conn = psycopg2.connect(
-        host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT", "5432"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        dbname=os.getenv("DB_NAME"),
-    )
+    conn = get_db_connection()
 
     cursor = conn.cursor()
 
@@ -45,8 +38,8 @@ def add_authorized_email(email, reset=False):
         conn.commit()
 
         print("Success! Pre-authorized email added:")
-        print(f"  ID: {new_user[0]}")
-        print(f"  Email: {new_user[1]}")
+        print(f"  ID: {new_user['id']}")
+        print(f"  Email: {new_user['email']}")
         print("\nUser can now register at the 'Join the fund' page.")
 
     except Exception as e:

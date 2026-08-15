@@ -89,16 +89,9 @@ export function validateReason(reason: unknown): [boolean, string] {
   return [true, ''];
 }
 
-export function formatEquity(value: number | null | undefined): string {
-  if (value === null || value === undefined) return '$0';
-
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  }).format(value);
-}
+// Equity renders with the same whole-dollar USD rules as mock capital. Kept as
+// its own export because the incubation views (and tests) refer to it by name.
+export const formatEquity = formatMockCapital;
 
 export function isNearEndOfWindow(
   daysElapsed: number,

@@ -1,4 +1,10 @@
-"""Postgres connection utilities."""
+"""Postgres connection utilities.
+
+Configuration comes from the shared ``platform_db.DatabaseConfig`` (the
+canonical DB_* env reader); the connection strategy is deliberately unchanged:
+one unpooled connection per call, RealDictCursor rows, a connect timeout, and
+the DNS/OperationalError diagnostics that make production failures readable.
+"""
 
 import logging
 import os
@@ -7,6 +13,7 @@ from pathlib import Path
 
 import psycopg2
 from dotenv import load_dotenv
+from platform_db import ConfigurationError, DatabaseConfig
 from psycopg2.extras import RealDictCursor
 
 ENV_PATH = Path(__file__).resolve().parents[3] / ".env"
@@ -14,9 +21,13 @@ load_dotenv(dotenv_path=ENV_PATH)
 
 logger = logging.getLogger(__name__)
 
+# DatabaseConfig requires DB_PORT; research-api has always defaulted it, so the
+# default is applied here (the call site) before from_env reads the environment.
+DEFAULT_DB_PORT = "5432"
+
 logger.info("=== Database module loaded ===")
 logger.info("DB_HOST: %s", os.getenv("DB_HOST"))
-logger.info("DB_PORT: %s", os.getenv("DB_PORT", "5432"))
+logger.info("DB_PORT: %s", os.getenv("DB_PORT", DEFAULT_DB_PORT))
 logger.info("DB_NAME: %s", os.getenv("DB_NAME"))
 logger.info("DB_USER: %s", os.getenv("DB_USER"))
 logger.info(
@@ -26,46 +37,27 @@ logger.info(
 
 
 def get_db_connection():
-    host = os.getenv("DB_HOST")
-    port = os.getenv("DB_PORT", "5432")
-    user = os.getenv("DB_USER")
-    password = os.getenv("DB_PASSWORD")
-    dbname = os.getenv("DB_NAME")
+    env = dict(os.environ)
+    env.setdefault("DB_PORT", DEFAULT_DB_PORT)
+    try:
+        config = DatabaseConfig.from_env(env)
+    except ConfigurationError as exc:
+        logger.error(str(exc))
+        raise
 
     logger.info("=== Attempting DB connection ===")
-    logger.info("Target: %s@%s:%s/%s", user, host, port, dbname)
-
-    missing = []
-    if not host:
-        missing.append("DB_HOST")
-    if not user:
-        missing.append("DB_USER")
-    if not password:
-        missing.append("DB_PASSWORD")
-    if not dbname:
-        missing.append("DB_NAME")
-
-    if missing:
-        error_msg = "Missing required database environment variables: " + ", ".join(missing)
-        logger.error(error_msg)
-        raise ValueError(error_msg)
-
-    assert host is not None  # the `missing` check above raised otherwise
+    logger.info("Target: %s@%s:%s/%s", config.user, config.host, config.port, config.database)
 
     try:
-        logger.info("Resolving hostname: %s", host)
-        resolved_ip = socket.gethostbyname(host)
+        logger.info("Resolving hostname: %s", config.host)
+        resolved_ip = socket.gethostbyname(config.host)
         logger.info("Hostname resolved to: %s", resolved_ip)
     except socket.gaierror as exc:
-        logger.error("DNS resolution failed for %s: %s", host, exc)
+        logger.error("DNS resolution failed for %s: %s", config.host, exc)
 
     try:
         conn = psycopg2.connect(
-            host=host,
-            port=port,
-            user=user,
-            password=password,
-            dbname=dbname,
+            **config.connect_kwargs(),
             cursor_factory=RealDictCursor,
             connect_timeout=10,
         )
@@ -78,7 +70,7 @@ def get_db_connection():
         if "could not connect to server" in error_str or "Connection refused" in error_str:
             logger.error(">>> DIAGNOSIS: Database server unreachable")
             logger.error("    Check: Is PostgreSQL running? Is the host/port correct?")
-            logger.error("    Check: Security group allows inbound on port %s?", port)
+            logger.error("    Check: Security group allows inbound on port %s?", config.port)
         elif "password authentication failed" in error_str:
             logger.error(">>> DIAGNOSIS: Invalid credentials")
             logger.error("    Check: DB_USER and DB_PASSWORD are correct")

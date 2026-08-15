@@ -1,4 +1,5 @@
 import type { Strategy, StrategyMetrics } from './portfolioData';
+import { aggregateEquityCurves, computePortfolioTotals } from './portfolioAggregation';
 
 // Shapes of the derived data the StrategyBuilder view renders. Extracted verbatim
 // from the old inline useMemo so the computation can live (and be tested) apart
@@ -108,10 +109,12 @@ export function computeCombinedMetrics(
     return emptyCombined();
   }
 
-  const totalInvested = selected.reduce((sum, s) => sum + s.invested, 0);
-  const totalValue = selected.reduce((sum, s) => sum + s.currentValue, 0);
-  const totalReturn = totalValue - totalInvested;
-  const returnPercent = (totalReturn / totalInvested) * 100;
+  const {
+    totalInvested,
+    totalValue,
+    totalReturn,
+    totalReturnPercent: returnPercent,
+  } = computePortfolioTotals(selected);
 
   // Combine all positions for asset allocation
   const assetValues: { [key: string]: number } = {};
@@ -155,15 +158,7 @@ export function computeCombinedMetrics(
   // Combined equity curve: sum each selected strategy's REAL historical equity by
   // date, then express it as cumulative % return from the first (earliest) point.
   // Reads the actual per-strategy equity curves instead of simulating a series.
-  const equityByDate = new Map<string, number>();
-  selected.forEach(s => {
-    s.historicalData.forEach(pt => {
-      equityByDate.set(pt.date, (equityByDate.get(pt.date) || 0) + pt.value);
-    });
-  });
-  const combinedCurve = Array.from(equityByDate.entries())
-    .map(([date, value]) => ({ date, value }))
-    .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+  const combinedCurve = aggregateEquityCurves(selected);
 
   const baseEquity = combinedCurve.length > 0 ? combinedCurve[0].value : 0;
   const historicalPerformance = combinedCurve.map(pt => ({

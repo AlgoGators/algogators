@@ -22,6 +22,7 @@ members = [
     "algosystem",
     "algoterminal",
     "data-ngin",
+    "platform-db",
     "research-api",
     "research-core",
 ]
@@ -930,6 +931,7 @@ dependencies = [
     { name = "databento" },
     { name = "fastapi" },
     { name = "pandas" },
+    { name = "platform-db" },
     { name = "prometheus-fastapi-instrumentator" },
     { name = "psycopg2-binary" },
     { name = "pyarrow" },
@@ -948,6 +950,7 @@ requires-dist = [
     { name = "databento", specifier = ">=0.44.1" },
     { name = "fastapi", specifier = ">=0.115.6" },
     { name = "pandas", specifier = ">=2.2.3,<3" },
+    { name = "platform-db", editable = "libs/platform-db" },
     { name = "prometheus-fastapi-instrumentator", specifier = ">=7.0.0" },
     { name = "psycopg2-binary", specifier = ">=2.9.10" },
     { name = "pyarrow", specifier = ">=18.1.0" },
@@ -2495,6 +2498,17 @@ wheels = [
 ]
 
 [[package]]
+name = "platform-db"
+version = "0.1.0"
+source = { editable = "libs/platform-db" }
+dependencies = [
+    { name = "python-dotenv" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "python-dotenv", specifier = ">=1.0.1" }]
+
+[[package]]
 name = "platformdirs"
 version = "4.11.3"
 source = { registry = "https://pypi.org/simple" }
@@ -3136,6 +3150,7 @@ dependencies = [
     { name = "flask-jwt-extended" },
     { name = "flask-limiter" },
     { name = "gunicorn" },
+    { name = "platform-db" },
     { name = "psycopg2-binary" },
     { name = "python-dotenv" },
     { name = "research-core" },
@@ -3149,6 +3164,7 @@ requires-dist = [
     { name = "flask-jwt-extended", specifier = ">=4.7.4" },
     { name = "flask-limiter", specifier = ">=4.1.1" },
     { name = "gunicorn", specifier = ">=23.0" },
+    { name = "platform-db", editable = "libs/platform-db" },
     { name = "psycopg2-binary", specifier = ">=2.9.12" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "research-core", editable = "libs/research-core" },
