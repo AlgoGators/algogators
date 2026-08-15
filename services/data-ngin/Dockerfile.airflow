@@ -1,0 +1,28 @@
+# Airflow image for the data-ngin DAGs. Airflow is deliberately NOT a
+# workspace dependency (its pins conflict with the rest of the monorepo), so
+# it lives only here, in the deploy image.
+# Build context is the REPO ROOT:
+#   docker build -f services/data-ngin/Dockerfile.airflow .
+FROM apache/airflow:2.10.3-python3.11
+
+USER root
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpq-dev && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+USER airflow
+WORKDIR /opt/airflow
+
+# Install the service package (and its workspace lib) into Airflow's
+# environment so the DAGs can `import data_ngin`.
+COPY --chown=airflow:root libs/platform-db /opt/deps/platform-db
+COPY --chown=airflow:root services/data-ngin /opt/deps/data-ngin
+RUN pip install --no-cache-dir \
+    /opt/deps/platform-db \
+    /opt/deps/data-ngin
+
+COPY --chown=airflow:root services/data-ngin/dags /opt/airflow/dags
+
+EXPOSE 8080

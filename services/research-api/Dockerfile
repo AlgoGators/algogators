@@ -1,3 +1,10 @@
+# Build context is the REPO ROOT (not this directory) because research-api
+# depends on the workspace libs research-core and platform-db, which are not
+# published to PyPI:
+#   docker build -f services/research-api/Dockerfile .
+# Installing the libs first means pip finds their requirements already
+# satisfied and never consults PyPI for those names (also closes the
+# dependency-confusion hole of resolving internal names from a public index).
 FROM python:3.13-slim
 
 WORKDIR /app
@@ -5,12 +12,13 @@ WORKDIR /app
 # Install curl for healthcheck
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-# Install the member straight from its manifest. Build context is the repo
-# root so the workspace lockfile could be consulted later if needed:
-#   docker build -f services/research-api/Dockerfile services/research-api
-COPY pyproject.toml README.md ./
-COPY src ./src
-RUN pip install --no-cache-dir .
+COPY libs/platform-db ./libs/platform-db
+COPY libs/research-core ./libs/research-core
+COPY services/research-api ./services/research-api
+RUN pip install --no-cache-dir \
+    ./libs/platform-db \
+    ./libs/research-core \
+    ./services/research-api
 
 # Create logs directory
 RUN mkdir -p logs

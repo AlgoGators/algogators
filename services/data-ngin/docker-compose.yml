@@ -1,10 +1,12 @@
+# Run from this directory. Build contexts point at the repo root because the
+# service depends on the workspace lib platform-db (not on PyPI); the code is
+# INSTALLED into the images, no source volume-mounts needed.
 services:
-
 
   airflow-init:
     build:
-      context: .
-      dockerfile: DockerFile
+      context: ../..
+      dockerfile: services/data-ngin/Dockerfile.airflow
     container_name: airflow-init
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
@@ -12,10 +14,7 @@ services:
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
-      PYTHONPATH: /opt/airflow/data_engine
     volumes:
-      - ./dags:/opt/airflow/dags
-      - .:/opt/airflow/data_engine
       - airflow_data:/opt/airflow
     command: >
       bash -c "airflow db migrate &&
@@ -23,8 +22,8 @@ services:
 
   airflow-webserver:
     build:
-      context: .
-      dockerfile: DockerFile
+      context: ../..
+      dockerfile: services/data-ngin/Dockerfile.airflow
     container_name: airflow-webserver
     restart: always
     depends_on:
@@ -35,10 +34,7 @@ services:
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
-      PYTHONPATH: /opt/airflow/data_engine
     volumes:
-      - ./dags:/opt/airflow/dags
-      - .:/opt/airflow/data_engine
       - airflow_data:/opt/airflow
     ports:
       - "8080:8080"
@@ -46,8 +42,8 @@ services:
 
   airflow-scheduler:
     build:
-      context: .
-      dockerfile: DockerFile
+      context: ../..
+      dockerfile: services/data-ngin/Dockerfile.airflow
     container_name: airflow-scheduler
     restart: always
     depends_on:
@@ -58,30 +54,23 @@ services:
       AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
-      PYTHONPATH: /opt/airflow/data_engine
     volumes:
-      - ./dags:/opt/airflow/dags
-      - .:/opt/airflow/data_engine
       - airflow_data:/opt/airflow
     command: ["airflow", "scheduler"]
 
   api:
     build:
-      context: .
-      dockerfile: DockerFile
+      context: ../..
+      dockerfile: services/data-ngin/Dockerfile
     container_name: data-ngin-api
     restart: always
-    environment:
-      PYTHONPATH: /opt/airflow/data_engine
-      DATA_NGIN_CONFIG_PATH: /opt/airflow/data_engine/src/config/config.yaml
+    environment: {}
+      # DATA_NGIN_CONFIG_PATH: only set to override the packaged
+      # data_ngin/config/config.yaml default.
       # DATA_NGIN_API_KEY: set this before exposing the API beyond localhost --
-      # unset, the API-key check is disabled (see src/api/server.py).
-    volumes:
-      - .:/opt/airflow/data_engine
-    working_dir: /opt/airflow/data_engine
+      # unset, the API-key check is disabled (see data_ngin/api/server.py).
     ports:
       - "8000:8000"
-    command: ["uvicorn", "data_ngin.api.server:app", "--host", "0.0.0.0", "--port", "8000"]
 
 volumes:
   db_data:

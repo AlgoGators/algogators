@@ -28,6 +28,8 @@ jobs:
     uses: ./.github/workflows/_publish-container.yml
     with:
       path: services/data-ngin
+      # repo-root context: the image installs workspace libs (platform-db, ...)
+      context: .
       image: algogators/data-ngin
       environment: ghcr
       push: ${{ !(inputs.dry-run || false) }}

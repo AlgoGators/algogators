@@ -1,39 +1,23 @@
-FROM apache/airflow:2.10.3-python3.11
+# The data-ngin service image (GraphQL API / one-shot ingestion runs).
+# Build context is the REPO ROOT because data-ngin depends on the workspace
+# lib platform-db, which is not published to PyPI:
+#   docker build -f services/data-ngin/Dockerfile .
+# The Airflow deployment uses Dockerfile.airflow instead; dags/ ship there.
+FROM python:3.11-slim
 
-USER root
+WORKDIR /app
 
-# Install system dependencies and Poetry
-RUN apt-get update && apt-get install -y \
-    curl \
-    git \
-    build-essential \
-    libpq-dev && \
-    curl -sSL https://install.python-poetry.org | python3 - && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-# Debug: Check Poetry installation
-RUN echo "Checking Poetry installation..." && \
-    ls -la /root/.local/bin/ && \
-    /root/.local/bin/poetry --version
+COPY libs/platform-db ./libs/platform-db
+COPY services/data-ngin ./services/data-ngin
+RUN pip install --no-cache-dir \
+    ./libs/platform-db \
+    ./services/data-ngin
 
-# Set Poetry path
-ENV PATH="/root/.local/bin:$PATH"
+RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+USER appuser
 
-USER airflow
-WORKDIR /opt/airflow
+EXPOSE 8000
 
-# Debug: Check Poetry access as airflow user
-RUN echo "Checking Poetry as airflow user..." && \
-    which poetry && \
-    poetry --version
-
-# Copy dependency files
-COPY --chown=airflow:root pyproject.toml poetry.lock* ./
-
-# Install dependencies
-RUN poetry config virtualenvs.create false && \
-    poetry install --no-interaction --no-ansi --only main --no-root
-
-ENV PYTHONPATH=/opt/airflow/data_engine
-EXPOSE 8080
+CMD ["uvicorn", "data_ngin.api.server:app", "--host", "0.0.0.0", "--port", "8000"]
