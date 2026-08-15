@@ -82,16 +82,22 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
-      - name: Locate vcpkg
-        shell: bash
-        run: echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
-
-      - name: Refresh vcpkg registry
-        # The manifest pins a versioning baseline; the runner image's vcpkg
-        # clone may predate it, so fetch before resolving.
+      - name: Pin vcpkg to the manifest baseline
+        # The repo manifest pins builtin-baseline; the runner image's vcpkg
+        # tool and registry lag it unpredictably, so use a checkout at exactly
+        # that commit. blob:none keeps the clone small; bootstrap downloads a
+        # prebuilt tool binary.
         shell: bash
         run: |
-          git -C "$VCPKG_INSTALLATION_ROOT" fetch origin master             || sudo git -C "$VCPKG_INSTALLATION_ROOT" fetch origin master
+          BASELINE=$(python3 -c "import json;print(json.load(open('vcpkg.json'))['builtin-baseline'])")
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg "$RUNNER_TEMP/vcpkg"
+          git -C "$RUNNER_TEMP/vcpkg" checkout -q "$BASELINE"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          else
+            "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          fi
+          echo "VCPKG_ROOT=$RUNNER_TEMP/vcpkg" >> "$GITHUB_ENV"
 
       - name: Install Ninja
         if: runner.os == 'Linux'
