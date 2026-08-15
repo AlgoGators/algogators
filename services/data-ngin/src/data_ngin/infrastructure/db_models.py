@@ -1,7 +1,7 @@
-import os
 from typing import ClassVar
 
 from dotenv import load_dotenv
+from platform_db import DatabaseConfig
 from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.ext.declarative import declarative_base
@@ -54,30 +54,16 @@ def get_engine() -> Engine:
         Engine: A SQLAlchemy Engine object for database interactions.
 
     Raises:
-        ValueError: If any required environment variable is missing.
+        platform_db.ConfigurationError: (a ValueError subclass) if any required
+            environment variable is missing or invalid.
     """
     # Load environment variables from .env file
     load_dotenv()
 
-    # Retrieve database connection parameters from environment variables
-    db_user: str | None = os.getenv("DB_USER")
-    db_password: str | None = os.getenv("DB_PASSWORD")
-    db_host: str | None = os.getenv("DB_HOST")
-    db_port: str | None = os.getenv("DB_PORT")
-    db_name: str | None = os.getenv("DB_NAME")
-
-    # Validate that all required parameters are present
-    if not all([db_user, db_password, db_host, db_port, db_name]):
-        raise ValueError(
-            "One or more required environment variables are missing. "
-            "Ensure DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, and DB_NAME are set in the .env file."
-        )
-
-    # Build the connection string
-    connection_string: str = f"postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-
-    # Create and return the SQLAlchemy Engine
-    return create_engine(connection_string)
+    # DatabaseConfig validates the DB_* variables and builds a URL with
+    # quote_plus-escaped credentials, so a password containing '@' or '/'
+    # can no longer break the DSN the way the old f-string did.
+    return create_engine(DatabaseConfig.from_env().url())
 
 
 def get_session(engine: Engine) -> Session:

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from algosystem.marketdata.domain.normalize import normalize_price_series
 from algosystem.shared.errors import MarketDataError
 from algosystem.shared.values import DateRange
 
@@ -26,12 +27,13 @@ class ParquetBenchmarkCache:
         if not path.exists():
             return False
         try:
-            prices = self._read(path)
+            sliced = _normalize(
+                self._read(path),
+                date_range=date_range,
+                empty_error=f"benchmark cache has no data for alias: {alias}",
+            )
         except MarketDataError:
             return False
-        if prices.empty:
-            return False
-        sliced = _slice(prices, date_range)
         return len(sliced) >= 2
 
     def get(self, alias: str, date_range: DateRange) -> pd.Series:
@@ -39,9 +41,11 @@ class ParquetBenchmarkCache:
         path = self._path(alias)
         if not path.exists():
             raise MarketDataError(f"benchmark cache miss for alias: {alias}")
-        prices = _slice(self._read(path), date_range)
-        if prices.empty:
-            raise MarketDataError(f"benchmark cache has no data for alias: {alias}")
+        prices = _normalize(
+            self._read(path),
+            date_range=date_range,
+            empty_error=f"benchmark cache has no data for alias: {alias}",
+        )
         prices.name = alias
         return prices
 
@@ -51,7 +55,10 @@ class ParquetBenchmarkCache:
             raise MarketDataError("benchmark cache can only store pandas Series")
         try:
             self.directory.mkdir(parents=True, exist_ok=True)
-            series = _normalize(prices)
+            series = _normalize(
+                prices,
+                empty_error=f"no usable benchmark prices to cache for alias: {alias}",
+            )
             series.to_frame(name="price").to_parquet(self._path(alias))
         except MarketDataError:
             raise
@@ -71,13 +78,13 @@ class ParquetBenchmarkCache:
         except Exception as exc:
             raise MarketDataError(f"failed to read benchmark cache: {path}") from exc
         if isinstance(frame, pd.Series):
-            return _normalize(frame)
+            return frame
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             raise MarketDataError(f"benchmark cache file is empty: {path}")
         if "price" in frame.columns:
-            return _normalize(frame["price"])
+            return frame["price"]
         if frame.shape[1] == 1:
-            return _normalize(frame.iloc[:, 0])
+            return frame.iloc[:, 0]
         raise MarketDataError(f"benchmark cache file has no price column: {path}")
 
 
@@ -96,22 +103,19 @@ def default_cache_dir() -> Path:
     return Path.home() / ".algosystem" / "benchmarks"
 
 
-def _normalize(prices: pd.Series) -> pd.Series:
-    if not isinstance(prices.index, pd.DatetimeIndex):
-        raise MarketDataError("benchmark cache prices must use a DatetimeIndex")
-    series = prices.copy().sort_index()
-    if series.index.tz is not None:
-        series.index = series.index.tz_convert(None)
-    try:
-        series = series.astype(float)
-    except (TypeError, ValueError) as exc:
-        raise MarketDataError("benchmark cache prices must be numeric") from exc
-    return series.dropna()
-
-
-def _slice(prices: pd.Series, date_range: DateRange) -> pd.Series:
-    series = _normalize(prices)
-    return series.loc[date_range.mask(series.index)]
+def _normalize(
+    prices: pd.Series,
+    *,
+    date_range: DateRange | None = None,
+    empty_error: str,
+) -> pd.Series:
+    return normalize_price_series(
+        prices,
+        date_range=date_range,
+        index_error="benchmark cache prices must use a DatetimeIndex",
+        dtype_error="benchmark cache prices must be numeric",
+        empty_error=empty_error,
+    )
 
 
 __all__ = ["ParquetBenchmarkCache", "default_cache_dir"]

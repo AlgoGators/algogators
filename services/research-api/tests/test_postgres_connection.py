@@ -67,8 +67,11 @@ def test_get_db_connection_lists_every_missing_var(monkeypatch):
     with pytest.raises(ValueError) as excinfo:
         postgres.get_db_connection()
 
+    # DatabaseConfig.from_env reads (and therefore reports) the variables in
+    # DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD order; DB_PORT is absent
+    # because get_db_connection defaults it to 5432 before validation.
     message = str(excinfo.value)
-    assert "DB_HOST, DB_USER, DB_PASSWORD, DB_NAME" in message
+    assert "DB_HOST, DB_NAME, DB_USER, DB_PASSWORD" in message
 
 
 # --- successful connections ---------------------------------------------------
@@ -84,7 +87,7 @@ def test_get_db_connection_passes_env_config_to_psycopg2(monkeypatch, db_env):
     assert conn is fake.result
     assert fake.kwargs == {
         "host": "db.internal.example.com",
-        "port": "6543",
+        "port": 6543,
         "user": "algouser",
         "password": "s3cret",
         "dbname": "algolens",
@@ -102,7 +105,7 @@ def test_get_db_connection_defaults_port_to_5432(monkeypatch, db_env):
     postgres.get_db_connection()
 
     assert fake.kwargs is not None
-    assert fake.kwargs["port"] == "5432"
+    assert fake.kwargs["port"] == 5432
 
 
 def test_dns_failure_is_logged_but_connection_still_attempted(monkeypatch, db_env, caplog):

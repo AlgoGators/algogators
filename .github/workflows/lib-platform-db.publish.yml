@@ -1,0 +1,34 @@
+name: lib-platform-db · publish
+
+on:
+  push:
+    tags: ['platform-db/v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-python.yml
+    with:
+      path: libs/platform-db
+      coverage-min: 85
+      build-check: true
+    secrets: inherit
+
+  publish:
+    needs: quality
+    uses: ./.github/workflows/_publish-pypi.yml
+    with:
+      path: libs/platform-db
+      environment: pypi
+      dry-run: ${{ inputs.dry-run || false }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write

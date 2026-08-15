@@ -4,6 +4,7 @@ on:
   pull_request:
     paths-ignore:
       - 'services/data-ngin/**'
+      - 'libs/platform-db/**'
       - 'uv.lock'
       - 'pyproject.toml'
       - '.github/workflows/_quality-python.yml'

@@ -6,6 +6,7 @@ import pandas as pd
 
 from algosystem.backtesting import EquityCurve
 from algosystem.marketdata.domain.benchmark import STANDARD_CATALOG, BenchmarkCatalog
+from algosystem.marketdata.domain.normalize import normalize_price_series
 from algosystem.marketdata.domain.ports import BenchmarkCache, BenchmarkProvider
 from algosystem.shared.errors import MarketDataError
 from algosystem.shared.values import DateRange
@@ -61,15 +62,13 @@ def _coerce_timestamp(value: object) -> pd.Timestamp:
 def _slice_prices(prices: pd.Series, date_range: DateRange) -> pd.Series:
     if not isinstance(prices, pd.Series):
         raise MarketDataError("benchmark provider returned a non-Series result")
-    series = prices.copy().sort_index()
-    if not isinstance(series.index, pd.DatetimeIndex):
-        raise MarketDataError("benchmark prices must use a DatetimeIndex")
-    if series.index.tz is not None:
-        series.index = series.index.tz_convert(None)
-    sliced = series.loc[date_range.mask(series.index)].dropna()
-    if sliced.empty:
-        raise MarketDataError("benchmark provider returned no prices for the requested range")
-    return sliced
+    return normalize_price_series(
+        prices,
+        date_range=date_range,
+        index_error="benchmark prices must use a DatetimeIndex",
+        dtype_error="benchmark provider returned non-numeric prices",
+        empty_error="benchmark provider returned no prices for the requested range",
+    )
 
 
 __all__ = ["FetchBenchmark"]

@@ -1,20 +1,12 @@
-import os
-
-import psycopg2
 from dotenv import load_dotenv
+from research_api.infrastructure.db.postgres import get_db_connection
 from werkzeug.security import generate_password_hash
 
 load_dotenv()
 
 
 def setup_database():
-    conn = psycopg2.connect(
-        host=os.getenv("DB_HOST"),
-        port=os.getenv("DB_PORT", "5432"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        dbname=os.getenv("DB_NAME"),
-    )
+    conn = get_db_connection()
 
     cursor = conn.cursor()
 
@@ -62,7 +54,9 @@ def setup_database():
         print("\nCurrent users in database:")
         for user in users:
             print(
-                f"  ID: {user[0]}, Email: {user[1]}, Name: {user[2]} {user[3]}, Role: {user[4]}, Created: {user[5]}"
+                f"  ID: {user['id']}, Email: {user['email']}, "
+                f"Name: {user['first_name']} {user['last_name']}, "
+                f"Role: {user['role']}, Created: {user['created_at']}"
             )
 
     except Exception as e:

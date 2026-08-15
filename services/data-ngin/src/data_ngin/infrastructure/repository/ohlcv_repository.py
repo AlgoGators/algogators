@@ -5,6 +5,7 @@ import threading
 from typing import Any, ClassVar, Optional
 
 import psycopg2
+from platform_db import DatabaseConfig
 from psycopg2 import pool as psycopg2_pool
 
 from data_ngin.infrastructure.inserter import Inserter
@@ -48,14 +49,14 @@ class OhlcvRepository(Inserter):
         if cls._pool is None:
             with cls._pool_lock:
                 if cls._pool is None:
+                    # DB_* credentials go through the shared DatabaseConfig so
+                    # they are validated (missing/blank vars raise instead of
+                    # silently building a pool with None values); the pool
+                    # sizing knobs stay a local concern.
                     cls._pool = psycopg2_pool.ThreadedConnectionPool(
                         int(os.getenv("DB_POOL_MIN_CONN", "1")),
                         int(os.getenv("DB_POOL_MAX_CONN", "10")),
-                        dbname=os.getenv("DB_NAME"),
-                        user=os.getenv("DB_USER"),
-                        password=os.getenv("DB_PASSWORD"),
-                        host=os.getenv("DB_HOST"),
-                        port=os.getenv("DB_PORT"),
+                        **DatabaseConfig.from_env().connect_kwargs(),
                     )
         return cls._pool
 

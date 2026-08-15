@@ -5,6 +5,7 @@ on:
     paths-ignore:
       - 'services/research-api/**'
       - 'libs/research-core/**'
+      - 'libs/platform-db/**'
       - 'uv.lock'
       - 'pyproject.toml'
       - '.github/workflows/_quality-python.yml'

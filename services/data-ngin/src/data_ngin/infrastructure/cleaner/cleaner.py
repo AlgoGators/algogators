@@ -1,4 +1,3 @@
-import logging
 from abc import ABC, abstractmethod
 
 import pandas as pd
@@ -65,40 +64,11 @@ class Cleaner(ABC):
         """
         pass
 
-    # 9
-    def detect_time_gaps(
-        self, data: pd.DataFrame, time_column: str, freq: str
-    ) -> list[pd.Timestamp]:
-        """
-        Detects missing time gaps in the time series data.
-
-        Args:
-            data (pd.DataFrame): The data to check for gaps.
-            time_column (str): The column that contains the timestamp information.
-            freq (str): The expected frequency of the timestamps (e.g., 'D' for daily).
-
-        Returns:
-            List[pd.Timestamp]: List of missing timestamps.
-        """
-        data[time_column] = pd.to_datetime(data[time_column])
-        data = data.sort_values(by=time_column)
-        time_range = pd.date_range(
-            start=data[time_column].min(), end=data[time_column].max(), freq=freq
-        )
-        missing_timestamps = time_range.difference(data[time_column])
-
-        return missing_timestamps
-
-    def log_missing_data(self, missing_timestamps: list[pd.Timestamp]) -> None:
-        """
-        Logs the missing time gaps to a log file.
-
-        Args:
-            missing_timestamps (List[pd.Timestamp]): The list of missing timestamps to log.
-        """
-        logging.basicConfig(filename="data_quality.log", level=logging.INFO)
-        for timestamp in missing_timestamps:
-            logging.warning(f"Missing data at timestamp: {timestamp}")
+    # Gap detection lives in one place: StalenessChecker.detect_date_gaps
+    # (data_ngin.domain.services). Cleaner's detect_time_gaps /
+    # log_missing_data copies were deleted -- log_missing_data also carried a
+    # logging.basicConfig(filename="data_quality.log") side effect that
+    # hijacked the process's root logger.
 
     def clean(self, data: pd.DataFrame) -> pd.DataFrame:
         """

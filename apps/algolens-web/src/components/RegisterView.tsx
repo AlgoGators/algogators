@@ -1,13 +1,11 @@
 import React, { useState } from 'react';
 import logo from '../assets/logo.png';
 import { useAuth } from '../adapters/react/AuthContext';
+import { checkEmailRequest } from '../infrastructure/api/authApi';
 
 interface RegisterViewProps {
   onBackToLogin: () => void;
 }
-
-// Get API URL from environment variable or default to localhost
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
 export function RegisterView({ onBackToLogin }: RegisterViewProps) {
   const [step, setStep] = useState<'email' | 'details'>('email');
@@ -26,22 +24,14 @@ export function RegisterView({ onBackToLogin }: RegisterViewProps) {
     setIsLoading(true);
 
     try {
-      const response = await fetch(`${API_URL}/auth/check-email`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ email }),
-      });
+      const result = await checkEmailRequest(email);
 
-      const data = await response.json();
-
-      if (response.ok && !data.registered) {
+      if (result.ok && !result.registered) {
         setStep('details');
-      } else if (data.registered) {
+      } else if (result.registered) {
         setError('Account already registered. Please login instead.');
       } else {
-        setError(data.message || 'Email not authorized. Contact an administrator.');
+        setError(result.message || 'Email not authorized. Contact an administrator.');
       }
     } catch {
       setError('Failed to verify email. Please try again.');

@@ -3,17 +3,23 @@ import { API_BASE_URL } from './httpClient';
 
 export const DEV_MODE = import.meta.env.VITE_DEV_MODE === '1';
 
+const JSON_HEADERS = { 'Content-Type': 'application/json' };
+
+/**
+ * Every auth endpoint shares the same fetch skeleton: same base URL and cookie
+ * credentials (the session travels in an httpOnly cookie, sent/received only
+ * when `credentials: 'include'` is set).
+ */
+async function authFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(`${API_BASE_URL}${path}`, { credentials: 'include', ...init });
+}
+
 export interface SessionResult {
   user: User | null;
   status: number;
 }
 
-export async function verifySessionRequest(): Promise<SessionResult> {
-  const response = await fetch(`${API_BASE_URL}/auth/verify`, {
-    method: 'GET',
-    credentials: 'include',
-  });
-
+async function toSessionResult(response: Response): Promise<SessionResult> {
   if (!response.ok) {
     return { user: null, status: response.status };
   }
@@ -22,39 +28,38 @@ export async function verifySessionRequest(): Promise<SessionResult> {
   return { user: data.user, status: response.status };
 }
 
-export async function devLoginRequest(): Promise<SessionResult> {
-  const response = await fetch(`${API_BASE_URL}/auth/dev-login`, {
-    method: 'POST',
-    credentials: 'include',
-    headers: { 'Content-Type': 'application/json' },
-  });
-
-  if (!response.ok) {
-    return { user: null, status: response.status };
-  }
-
-  const data: AuthResponse = await response.json();
-  return { user: data.user, status: response.status };
-}
-
-export async function loginRequest(email: string, password: string): Promise<User> {
-  const response = await fetch(`${API_BASE_URL}/auth/login`, {
-    method: 'POST',
-    credentials: 'include', // send/receive the auth cookies
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ email, password }),
-  });
-
+/** Parse the user out of a login/register response, or throw the backend's error. */
+async function toUser(response: Response, action: 'Login' | 'Registration'): Promise<User> {
   if (!response.ok) {
     const error = await response.json();
-    console.error('[AuthContext] Login failed with error:', error);
-    throw new Error(error.error || 'Login failed');
+    console.error(`[AuthContext] ${action} failed with error:`, error);
+    throw new Error(error.error || `${action} failed`);
   }
 
   const data: AuthResponse = await response.json();
   return data.user;
+}
+
+export async function verifySessionRequest(): Promise<SessionResult> {
+  const response = await authFetch('/auth/verify', { method: 'GET' });
+  return toSessionResult(response);
+}
+
+export async function devLoginRequest(): Promise<SessionResult> {
+  const response = await authFetch('/auth/dev-login', {
+    method: 'POST',
+    headers: JSON_HEADERS,
+  });
+  return toSessionResult(response);
+}
+
+export async function loginRequest(email: string, password: string): Promise<User> {
+  const response = await authFetch('/auth/login', {
+    method: 'POST',
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ email, password }),
+  });
+  return toUser(response, 'Login');
 }
 
 export async function registerRequest(
@@ -63,12 +68,9 @@ export async function registerRequest(
   firstName: string,
   lastName: string
 ): Promise<User> {
-  const response = await fetch(`${API_BASE_URL}/auth/register`, {
+  const response = await authFetch('/auth/register', {
     method: 'POST',
-    credentials: 'include', // send/receive the auth cookies
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: JSON_HEADERS,
     body: JSON.stringify({
       email,
       password,
@@ -76,20 +78,30 @@ export async function registerRequest(
       last_name: lastName,
     }),
   });
-
-  if (!response.ok) {
-    const error = await response.json();
-    console.error('[AuthContext] Registration failed with error:', error);
-    throw new Error(error.error || 'Registration failed');
-  }
-
-  const data: AuthResponse = await response.json();
-  return data.user;
+  return toUser(response, 'Registration');
 }
 
 export async function logoutRequest(): Promise<void> {
-  await fetch(`${API_BASE_URL}/auth/logout`, {
+  await authFetch('/auth/logout', { method: 'POST' });
+}
+
+export interface CheckEmailResult {
+  ok: boolean;
+  registered: boolean;
+  message?: string;
+}
+
+/**
+ * Ask the backend whether an email is pre-authorized and/or already registered.
+ * Sent with cookie credentials like every other auth call.
+ */
+export async function checkEmailRequest(email: string): Promise<CheckEmailResult> {
+  const response = await authFetch('/auth/check-email', {
     method: 'POST',
-    credentials: 'include',
+    headers: JSON_HEADERS,
+    body: JSON.stringify({ email }),
   });
+
+  const data = await response.json();
+  return { ok: response.ok, registered: Boolean(data.registered), message: data.message };
 }
