@@ -28,6 +28,12 @@ on:
       run-clang-tidy:
         type: boolean
         default: true
+      run-clang-format:
+        description: >
+          Off only for imported code that predates the style; reformatting it
+          in one shot would conflict with every in-flight feature branch.
+        type: boolean
+        default: true
       timeout-minutes:
         type: number
         default: 60
@@ -38,6 +44,7 @@ permissions:
 jobs:
   format:
     name: clang-format
+    if: ${{ inputs.run-clang-format }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
