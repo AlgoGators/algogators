@@ -30,7 +30,7 @@
     },
     "apps/algoterminal": {
       "release-type": "python",
-      "package-name": "algoterminal"
+      "package-name": "algoterminal-cli"
     },
     "apps/website": {
       "release-type": "node",

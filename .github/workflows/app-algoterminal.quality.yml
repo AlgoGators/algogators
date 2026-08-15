@@ -34,7 +34,7 @@ jobs:
       path: apps/algoterminal
       python-versions: '["3.11"]'
       runners: '["ubuntu-latest","windows-latest"]'
-      coverage-min: 65
+      coverage-min: 80
       strict-types: false
       build-check: true
     secrets: inherit
