@@ -86,6 +86,13 @@ jobs:
         shell: bash
         run: echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
 
+      - name: Refresh vcpkg registry
+        # The manifest pins a versioning baseline; the runner image's vcpkg
+        # clone may predate it, so fetch before resolving.
+        shell: bash
+        run: |
+          git -C "$VCPKG_INSTALLATION_ROOT" fetch origin master             || sudo git -C "$VCPKG_INSTALLATION_ROOT" fetch origin master
+
       - name: Install Ninja
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y ninja-build
