@@ -20,6 +20,14 @@ on:
       dockerfile:
         type: string
         default: Dockerfile
+      context:
+        description: >
+          Build context. Defaults to the member directory. Services that
+          depend on workspace libs (research-core, platform-db) must pass '.'
+          so the libs are inside the context; their Dockerfiles COPY
+          libs/<name> by repo-relative path.
+        type: string
+        default: ''
       platforms:
         type: string
         default: linux/amd64
@@ -90,7 +98,7 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: ${{ inputs.path }}
+          context: ${{ inputs.context || inputs.path }}
           file: ${{ inputs.path }}/${{ inputs.dockerfile }}
           platforms: ${{ inputs.platforms }}
           push: ${{ inputs.push }}

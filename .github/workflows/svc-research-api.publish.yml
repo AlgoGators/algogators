@@ -28,6 +28,8 @@ jobs:
     uses: ./.github/workflows/_publish-container.yml
     with:
       path: services/research-api
+      # repo-root context: the image installs workspace libs (platform-db, ...)
+      context: .
       image: algogators/research-api
       environment: ghcr
       push: ${{ !(inputs.dry-run || false) }}
