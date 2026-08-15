@@ -1,0 +1,75 @@
+{
+    "_description": "COPPER_GOLD_IP_PORTFOLIO - Copper/Gold ratio macro regime strategy for futures",
+    "portfolio_id": "COPPER_GOLD_IP_PORTFOLIO",
+    "initial_capital": 500000,
+    "reserve_capital_pct": 0.10,
+    "strategies": {
+        "COPPER_GOLD_IP": {
+            "enabled_backtest": true,
+            "enabled_live": false,
+            "default_allocation": 1.0,
+            "type": "CopperGoldIPStrategy",
+            "symbols": ["HG.v.0", "GC.v.0", "CL.v.0", "SI.v.0", "ZN.v.0", "UB.v.0", "6J.v.0", "MES.v.0", "MNQ.v.0"],
+            "config": {
+                "macro_csv_path": "data/macro/copper_gold_daily.csv",
+                "roc_window": 20,
+                "ma_fast": 10,
+                "ma_slow": 50,
+                "zscore_window": 120,
+                "zscore_threshold": 0.5,
+                "w1": 0.33,
+                "w2": 0.33,
+                "w3": 0.34,
+                "min_holding_period": 5,
+                "spx_momentum_lookback": 60,
+                "breakeven_lookback": 20,
+                "liquidity_zscore_window": 60,
+                "liquidity_threshold": -1.5,
+                "inflation_shock_threshold": 0.15,
+                "growth_positive_threshold": 0.5,
+                "growth_negative_threshold": -0.5,
+                "dxy_momentum_lookback": 20,
+                "dxy_momentum_threshold": 0.03,
+                "china_cli_avg_window": 65,
+                "china_cli_threshold": -2.0,
+                "correlation_window": 20,
+                "correlation_threshold": 0.70,
+                "leverage_target": 2.0,
+                "max_margin_utilization": 0.50,
+                "drawdown_warning_pct": 0.10,
+                "drawdown_stop_pct": 0.15,
+                "max_single_equity_notional": 0.20,
+                "max_single_commodity_notional": 0.15,
+                "max_total_equity_notional": 0.35,
+                "max_total_commodity_notional": 0.40,
+
+                "use_ensemble_roc": false,
+                "roc_windows": [10, 20, 60, 120],
+
+                "use_gsr_filter": false,
+                "gsr_fear_threshold": 80.0,
+                "gsr_greed_threshold": 65.0,
+                "gsr_conflict_scale": 0.75,
+
+                "use_inverse_vol_weights": false,
+                "vol_weight_lookback": 63,
+                "min_asset_class_weight": 0.10,
+                "max_asset_class_weight": 0.50,
+
+                "use_vol_targeting": false,
+                "target_portfolio_vol": 0.15,
+                "vol_target_lookback": 63,
+                "min_leverage": 0.5,
+                "max_leverage": 3.0,
+
+                "use_momentum_confirmation": false,
+                "momentum_lookbacks": [21, 63, 252],
+                "momentum_disagreement_scale": 0.5,
+
+                "use_carry_modifier": false,
+                "carry_lookback": 63,
+                "carry_disagreement_scale": 0.65
+            }
+        }
+    }
+}
