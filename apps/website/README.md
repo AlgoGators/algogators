@@ -1,6 +1,6 @@
 # website
 
-The algogators.org marketing site, migrated from the `AlgoGatorsWebsite` repo.
+The algogators.com marketing site, migrated from the `AlgoGatorsWebsite` repo.
 
 Hand-authored static HTML in `site/`; no framework, no bundler. The npm
 scripts exist so this member answers the same four CI gates as every other

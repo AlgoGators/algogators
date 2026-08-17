@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "algogators.org — static marketing site (GitHub Pages)",
+  "description": "algogators.com — static marketing site (GitHub Pages)",
   "scripts": {
     "lint": "node scripts/check-links.mjs",
     "typecheck": "node --check site/assets/main.js && node --check scripts/check-links.mjs && node --check scripts/build.mjs",
