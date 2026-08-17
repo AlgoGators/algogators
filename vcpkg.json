@@ -3,11 +3,22 @@
   "name": "algogators",
   "version-string": "0.0.0",
   "description": "Manifest-mode dependency set for the C++ members (trade-ngin and anything that links it)",
+  "builtin-baseline": "ddf0518c31a259dcc359fd4c7bcb1ce8a27e9855",
+  "overrides": [
+    {
+      "name": "libpqxx",
+      "version": "7.10.5",
+      "$reason": "trade-ngin targets the libpqxx 7 API; 8.x changed result iteration to row_ref and breaks every row lambda. Lift with a dedicated migration."
+    }
+  ],
   "dependencies": [
     "gtest",
     "nlohmann-json",
     "arrow",
     "libpqxx",
-    "spdlog"
+    "spdlog",
+    "eigen3",
+    "nlopt",
+    "curl"
   ]
 }

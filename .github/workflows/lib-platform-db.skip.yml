@@ -1,0 +1,19 @@
+name: lib-platform-db · quality (skip)
+
+on:
+  pull_request:
+    paths-ignore:
+      - 'libs/platform-db/**'
+      - 'uv.lock'
+      - 'pyproject.toml'
+      - '.github/workflows/_quality-python.yml'
+      - '.github/workflows/lib-platform-db.quality.yml'
+
+permissions: {}
+
+jobs:
+  gate:
+    name: lib-platform-db quality
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "libs/platform-db untouched; skipping member CI"

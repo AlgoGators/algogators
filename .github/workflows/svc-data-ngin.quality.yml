@@ -4,20 +4,20 @@ on:
   pull_request:
     paths:
       - 'services/data-ngin/**'
+      - 'libs/platform-db/**'
       - 'uv.lock'
       - 'pyproject.toml'
       - '.github/workflows/_quality-python.yml'
       - '.github/workflows/svc-data-ngin.quality.yml'
-      - 'platform/contracts/**'
   push:
     branches: [main]
     paths:
       - 'services/data-ngin/**'
+      - 'libs/platform-db/**'
       - 'uv.lock'
       - 'pyproject.toml'
       - '.github/workflows/_quality-python.yml'
       - '.github/workflows/svc-data-ngin.quality.yml'
-      - 'platform/contracts/**'
   workflow_dispatch:
 
 concurrency:
@@ -34,7 +34,7 @@ jobs:
       path: services/data-ngin
       python-versions: '["3.11"]'
       runners: '["ubuntu-latest"]'
-      coverage-min: 70
+      coverage-min: 80
       strict-types: false
       build-check: false
     secrets: inherit

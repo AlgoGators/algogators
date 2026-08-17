@@ -1,14 +1,201 @@
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.17)
+project(trade_ngin VERSION 1.0.0 LANGUAGES CXX)
 
-project(trade_ngin LANGUAGES CXX)
+# Fix macOS SDK path to prevent recurring SDK errors
+if(APPLE)
+    execute_process(
+        COMMAND xcrun --show-sdk-path
+        OUTPUT_VARIABLE CMAKE_OSX_SYSROOT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    message(STATUS "Using macOS SDK: ${CMAKE_OSX_SYSROOT}")
+endif()
 
+# Set build type if not specified
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+# Set C++ standard
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Enable common compiler warnings
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-Wall -Wextra -Wsign-compare)
+    # Imported pre-monorepo code: the CI presets pass -Werror, which this
+    # codebase does not yet satisfy. Ratchet by deleting this line.
+    add_compile_options(-Wno-error)
+endif()
+
+# Output directories
+# Multi-config generators (Visual Studio, Xcode) use the _DEBUG/_RELEASE variants.
+# Single-config generators (Unix Makefiles, Ninja) use the unsuffixed variables;
+# CMAKE_BUILD_TYPE is resolved at configure time so the path matches what the README expects.
+if(CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_BINARY_DIR}/bin/Debug")
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release")
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_BINARY_DIR}/bin/Debug")
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release")
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG   "${CMAKE_BINARY_DIR}/bin/Debug")
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/bin/Release")
+else()
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/${CMAKE_BUILD_TYPE}")
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/${CMAKE_BUILD_TYPE}")
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/${CMAKE_BUILD_TYPE}")
+endif()
+
+# Find packages
+#set(GTest_DIR "C:/vcpkg/installed/x64-windows/share/gtest")
+find_package(GTest CONFIG REQUIRED)
+#set(nlohmann_json_DIR "C:/vcpkg/installed/x64-windows/share/nlohmann_json")
+find_package(nlohmann_json CONFIG REQUIRED)
+#set(Arrow_DIR "C:/vcpkg/installed/x64-windows/share/arrow")
+find_package(Arrow REQUIRED)
+# vcpkg's default linux triplet builds Arrow static; Windows/mac dev setups
+# may have the shared target instead. Link whichever exists.
+if(TARGET Arrow::arrow_shared)
+    set(TRADE_NGIN_ARROW Arrow::arrow_shared)
+else()
+    set(TRADE_NGIN_ARROW Arrow::arrow_static)
+endif()
+find_package(libpqxx CONFIG REQUIRED)
+find_package(Eigen3 REQUIRED)
+find_package(NLopt REQUIRED)
+
+# Find curl for email functionality
+find_package(CURL REQUIRED)
+
+
+# Include code coverage module if enabled
+include(cmake/CodeCoverage.cmake)
+
+# Add source files for the library
+set(TRADE_NGIN_SOURCES
+    src/core/state_manager.cpp
+    src/core/config_manager.cpp
+    src/core/config_version.cpp
+    src/core/config_base.cpp
+    src/core/config_loader.cpp
+    src/core/logger.cpp
+    src/core/email_sender.cpp
+    src/core/chart_generator.cpp
+    src/core/run_id_generator.cpp
+    src/data/postgres_database.cpp
+    src/data/postgres_database_extensions.cpp
+    src/data/market_data_bus.cpp
+    src/data/conversion_utils.cpp
+    src/data/credential_store.cpp
+    src/data/database_pooling.cpp
+    src/instruments/futures.cpp
+    src/instruments/equity.cpp
+    src/instruments/option.cpp
+    src/instruments/instrument_registry.cpp
+    src/order/order_manager.cpp
+    src/risk/risk_manager.cpp
+    src/optimization/dynamic_optimizer.cpp
+    src/execution/execution_engine.cpp
+    src/portfolio/portfolio_manager.cpp
+    src/backtest/transaction_cost_analysis.cpp
+    src/backtest/backtest_pnl_manager.cpp
+    src/backtest/backtest_price_manager.cpp
+    src/backtest/backtest_metrics_calculator.cpp
+    src/backtest/backtest_execution_manager.cpp
+    src/backtest/backtest_data_loader.cpp
+    src/backtest/backtest_portfolio_constraints.cpp
+    src/backtest/backtest_coordinator.cpp
+    src/backtest/backtest_csv_exporter.cpp
+    src/backtest/slippage_model.cpp
+    src/transaction_cost/asset_cost_config.cpp
+    src/transaction_cost/spread_model.cpp
+    src/transaction_cost/impact_model.cpp
+    src/transaction_cost/transaction_cost_manager.cpp
+    src/strategy/base_strategy.cpp
+    src/strategy/trend_following.cpp
+    src/strategy/trend_following_slow.cpp
+    src/strategy/trend_following_fast.cpp
+    src/strategy/regime_detector.cpp
+    src/storage/results_manager_base.cpp
+    src/storage/backtest_results_manager.cpp
+    src/storage/live_results_manager.cpp
+    src/live/live_data_loader.cpp
+    src/live/live_historical_metrics.cpp
+    src/live/live_metrics_calculator.cpp
+    src/live/live_trading_coordinator.cpp
+    src/live/live_price_manager.cpp
+    src/live/live_pnl_manager.cpp
+    src/live/execution_manager.cpp
+    src/live/margin_manager.cpp
+    src/live/csv_exporter.cpp
+    src/statistics/utils/statistics_utils.cpp
+    src/statistics/transformers/normalizer.cpp
+    src/statistics/transformers/pca.cpp
+    src/statistics/tests/adf_test.cpp
+    src/statistics/tests/kpss_test.cpp
+    src/statistics/tests/johansen_test.cpp
+    src/statistics/tests/engle_granger_test.cpp
+    src/statistics/volatility/garch.cpp
+    src/statistics/volatility/egarch.cpp
+    src/statistics/volatility/gjr_garch.cpp
+    src/statistics/volatility/dcc_garch.cpp
+    src/statistics/tests/phillips_perron_test.cpp
+    src/statistics/tests/variance_ratio_test.cpp
+    src/statistics/state_estimation/kalman_filter.cpp
+    src/statistics/state_estimation/hmm.cpp
+    src/statistics/state_estimation/markov_switching.cpp
+    src/statistics/state_estimation/extended_kalman_filter.cpp
+    src/statistics/regression/ols_regression.cpp
+    src/statistics/regression/ridge_regression.cpp
+    src/statistics/regression/lasso_regression.cpp
+    src/statistics/hurst_exponent.cpp
+    src/statistics/preprocessing/outlier_handler.cpp
+    src/statistics/preprocessing/missing_data_handler.cpp
+)
+
+# Add library target
+add_library(trade_ngin SHARED ${TRADE_NGIN_SOURCES})
+
+ # Add test-specific compile definitions when building tests
+if(BUILD_TESTING)
+    target_compile_definitions(trade_ngin PRIVATE USE_DIRECT_DB_CONNECTION)
+endif()
+
+# Link against dependencies
+target_link_libraries(trade_ngin
+    PUBLIC
+        nlohmann_json::nlohmann_json
+        libpqxx::pqxx
+        ${TRADE_NGIN_ARROW}
+        CURL::libcurl
+        Eigen3::Eigen
+        NLopt::nlopt
+)
+
+# Windows-specific settings
+if(WIN32)
+    set_target_properties(trade_ngin PROPERTIES
+        WINDOWS_EXPORT_ALL_SYMBOLS ON
+    )
+endif()
+
+# Set up include directories for the library
+target_include_directories(trade_ngin
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${Arrow_INCLUDE_DIRS}
+)
+
+# Apply coverage flags if enabled
+if(ENABLE_COVERAGE)
+    add_coverage_target(trade_ngin)
+endif()
+
+# Enable testing
 enable_testing()
 
-add_library(trade_ngin src/trade_ngin.cpp)
-target_include_directories(trade_ngin PUBLIC include)
-target_compile_features(trade_ngin PUBLIC cxx_std_20)
+# Add tests subdirectory
+add_subdirectory(tests)
 
-add_executable(trade_ngin_smoke tests/smoke_test.cpp)
-target_link_libraries(trade_ngin_smoke PRIVATE trade_ngin)
-
-add_test(NAME trade_ngin_smoke COMMAND trade_ngin_smoke)
+# Add apps subdirectory
+add_subdirectory(apps)
