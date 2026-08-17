@@ -5,6 +5,7 @@ on:
     paths:
       - 'services/research-api/**'
       - 'libs/research-core/**'
+      - 'libs/platform-db/**'
       - 'uv.lock'
       - 'pyproject.toml'
       - '.github/workflows/_quality-python.yml'
@@ -14,6 +15,7 @@ on:
     paths:
       - 'services/research-api/**'
       - 'libs/research-core/**'
+      - 'libs/platform-db/**'
       - 'uv.lock'
       - 'pyproject.toml'
       - '.github/workflows/_quality-python.yml'
@@ -34,7 +36,7 @@ jobs:
       path: services/research-api
       python-versions: '["3.11"]'
       runners: '["ubuntu-latest"]'
-      coverage-min: 60
+      coverage-min: 80
       strict-types: false
       build-check: false
     secrets: inherit

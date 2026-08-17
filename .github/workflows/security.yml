@@ -72,7 +72,10 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           queries: security-and-quality
-      - uses: github/codeql-action/autobuild@v3
+          # build-mode none: C++ here needs the whole vcpkg dependency tree to
+          # compile, which autobuild cannot provide; buildless extraction scans
+          # the sources directly. Interpreted languages ignore this setting.
+          build-mode: none
       - uses: github/codeql-action/analyze@v3
         with:
           category: /language:${{ matrix.language }}

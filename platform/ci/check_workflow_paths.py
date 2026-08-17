@@ -13,8 +13,14 @@ Run locally with ``just check-paths``; runs in CI on every PR.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
+
+try:  # 3.11+
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - only on 3.9/3.10
+    import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
 from _common import (
     ALWAYS_REQUIRED,
@@ -263,6 +269,107 @@ def rule_skip_matches(
         )
 
 
+def _normalize_dist(name: str) -> str:
+    """PEP 503 normalization, so `platform_db` and `platform-db` compare equal."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _python_member_manifest(member: Member) -> dict | None:
+    manifest = REPO_ROOT / member.path / "pyproject.toml"
+    if not manifest.exists():
+        return None
+    with manifest.open("rb") as fh:
+        return tomllib.load(fh)
+
+
+def rule_workspace_deps_are_packaged(report: Report, members: list[Member]) -> None:
+    """A member that depends on a workspace lib must ship that lib with it.
+
+    Workspace libs are not published to PyPI, so a dependency edge onto one is
+    only sound while every shipped artifact bundles the lib. Two failure modes
+    this makes loud:
+
+    * a PyPI-published member (publish calls ``_publish-pypi``) gaining a
+      workspace dependency -- the published wheel would be uninstallable, or
+      worse, pip would resolve the internal name from the public index
+      (dependency confusion);
+    * a container-published member whose Dockerfile does not install the lib,
+      or whose publish caller still builds from the member-only context where
+      the lib is not even inside the build context.
+    """
+    by_dist: dict[str, Member] = {}
+    deps_of: dict[str, set[str]] = {}
+    for member in members:
+        manifest = _python_member_manifest(member)
+        if manifest is None:
+            continue
+        project = manifest.get("project", {})
+        dist = _normalize_dist(project.get("name", ""))
+        by_dist[dist] = member
+        deps_of[dist] = {
+            _normalize_dist(re.split(r"[\s<>=!~;\[]", dep, 1)[0])
+            for dep in project.get("dependencies", [])
+        }
+
+    def workspace_closure(dist: str) -> set[str]:
+        seen: set[str] = set()
+        frontier = [dist]
+        while frontier:
+            for dep in deps_of.get(frontier.pop(), set()):
+                if dep in by_dist and dep not in seen:
+                    seen.add(dep)
+                    frontier.append(dep)
+        return seen
+
+    for dist, member in by_dist.items():
+        ws_deps = workspace_closure(dist)
+        if not ws_deps:
+            continue
+        publish = WORKFLOW_DIR / f"{member.slug}.publish.yml"
+        if not publish.exists():
+            continue  # nothing shipped, nothing to bundle
+        publish_text = publish.read_text(encoding="utf-8")
+        publish_rel = f".github/workflows/{publish.name}"
+
+        if "_publish-pypi" in publish_text:
+            libs = ", ".join(sorted(by_dist[d].path for d in ws_deps))
+            report.fail(
+                f"{member.path}/pyproject.toml",
+                f"published to PyPI but depends on workspace lib(s) {libs}, which are not on "
+                "PyPI -- the wheel would be uninstallable, or pip would resolve the internal "
+                "name from the public index",
+                "drop the dependency, vendor the code, or publish the lib to PyPI first",
+            )
+            continue
+
+        if "_publish-container" in publish_text:
+            if not re.search(r"^\s*context:\s*['\"]?\.['\"]?\s*$", publish_text, re.M):
+                report.fail(
+                    publish_rel,
+                    f"{member.path} depends on workspace lib(s) but the container build does "
+                    "not use the repo-root context, so the libs are outside the build context",
+                    "pass `context: .` to _publish-container.yml",
+                )
+            dockerfiles = sorted((REPO_ROOT / member.path).glob("Dockerfile*"))
+            if not dockerfiles:
+                report.fail(
+                    publish_rel,
+                    f"{member.path} publishes a container but has no Dockerfile",
+                    "add one that installs the member and its workspace libs",
+                )
+            for dockerfile in dockerfiles:
+                text = dockerfile.read_text(encoding="utf-8")
+                for dep in sorted(ws_deps):
+                    dep_path = by_dist[dep].path
+                    if dep_path not in text:
+                        report.fail(
+                            f"{member.path}/{dockerfile.name}",
+                            f"member depends on {dep_path} but this Dockerfile never installs "
+                            "it -- the image build would resolve the internal name from PyPI",
+                            f"COPY {dep_path} into the image and pip install it before the member",
+                        )
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -277,6 +384,7 @@ def main() -> int:
     rule_every_member_has_a_caller(report, members, workflows)
     rule_no_orphan_callers(report, members, workflows)
     rule_no_orphan_skips(report, members, skips)
+    rule_workspace_deps_are_packaged(report, members)
 
     for member in members:
         wf = workflows.get(member.slug)

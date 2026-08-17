@@ -1,0 +1,51 @@
+name: lib-platform-db · quality
+
+on:
+  pull_request:
+    paths:
+      - 'libs/platform-db/**'
+      - 'uv.lock'
+      - 'pyproject.toml'
+      - '.github/workflows/_quality-python.yml'
+      - '.github/workflows/lib-platform-db.quality.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'libs/platform-db/**'
+      - 'uv.lock'
+      - 'pyproject.toml'
+      - '.github/workflows/_quality-python.yml'
+      - '.github/workflows/lib-platform-db.quality.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: lib-platform-db-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-python.yml
+    with:
+      path: libs/platform-db
+      python-versions: '["3.11"]'
+      runners: '["ubuntu-latest"]'
+      coverage-min: 60
+      strict-types: false
+      build-check: false
+    secrets: inherit
+
+  gate:
+    name: lib-platform-db quality
+    if: always()
+    needs: [quality]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report result
+        run: |
+          if [ "${{ needs.quality.result }}" != "success" ]; then
+            echo "::error::quality result was ${{ needs.quality.result }}"
+            exit 1
+          fi

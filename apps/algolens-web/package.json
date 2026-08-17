@@ -1,12 +1,33 @@
 {
   "name": "@algogators/algolens-web",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "lint": "node scripts/placeholder.mjs lint",
-    "typecheck": "node scripts/placeholder.mjs typecheck",
-    "test": "node scripts/placeholder.mjs test",
-    "build": "node scripts/build-placeholder.mjs"
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --coverage"
+  },
+  "dependencies": {
+    "lucide-react": "^0.487.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^2.15.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@types/node": "^26.1.2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react-swc": "^4.3.3",
+    "eslint": "^9.39.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.46.4",
+    "vite": "8.2.1",
+    "vitest": "^3.2.7",
+    "@vitest/coverage-v8": "^3.2.7",
+    "jsdom": "^26.1.0"
   }
 }

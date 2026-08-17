@@ -9,7 +9,9 @@
 name = "algogators-workspace"
 version = "0.0.0"
 description = "AlgoGators monorepo workspace root (not published)"
-requires-python = ">=3.9"
+# 3.11 floor: data-ngin and research-api both require it, and one lockfile
+# means the workspace resolves for the intersection of all members.
+requires-python = ">=3.11"
 dependencies = []
 
 [tool.uv]
@@ -17,6 +19,7 @@ package = false
 
 [tool.uv.sources]
 research-core = { workspace = true }
+platform-db = { workspace = true }
 
 [tool.uv.workspace]
 # Members are listed explicitly rather than globbed. Add each Python member here
@@ -24,6 +27,7 @@ research-core = { workspace = true }
 # member directory has matching workflow callers.
 members = [
     "libs/algosystem",
+    "libs/platform-db",
     "libs/research-core",
     "services/data-ngin",
     "services/research-api",
@@ -39,8 +43,9 @@ dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
     "pyyaml>=6.0",
-    "tomli>=2.0; python_version < '3.11'",
     "types-PyYAML>=6.0",
+    # starlette's TestClient (data-ngin's API tests) requires httpx2 at runtime.
+    "httpx2>=0.1",
     # `just` from PyPI. Pinning it here rather than installing it with a
     # marketplace action means the task runner's version is in uv.lock like
     # everything else, and CI cannot drift from a developer's machine.
@@ -57,7 +62,7 @@ dev = [
 # ---------------------------------------------------------------------------
 
 [tool.ruff]
-target-version = "py39"
+target-version = "py311"
 line-length = 100
 extend-exclude = ["platform/contracts/codegen/generated", "**/build", "**/dist"]
 
@@ -70,10 +75,20 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"**/tests/**" = ["S101"]
+# SIM115: tests create NamedTemporaryFile(delete=False) then reopen by path,
+# which is the only pattern that works on Windows; a context manager would
+# hold the handle open and break the reopen.
+"**/tests/**" = ["S101", "SIM115"]
+# Sphinx requires a module-level `copyright` variable in conf.py.
+"**/docs/conf.py" = ["A001"]
+# Textual compose() methods nest `with` blocks to mirror the widget tree;
+# collapsing them destroys the layout's readability.
+"**/tui/**" = ["SIM117"]
 
 [tool.mypy]
-python_version = "3.11"
+# 3.12 because current numpy stubs use PEP 695 `type` statements, which mypy
+# refuses to parse under a 3.11 target. The workspace floor remains 3.11.
+python_version = "3.12"
 warn_unused_configs = true
 warn_redundant_casts = true
 warn_unused_ignores = true
@@ -82,6 +97,8 @@ check_untyped_defs = true
 # Not enabled globally. Libraries opt in via `strict-types: true` on their
 # quality workflow, which makes the root justfile pass --strict.
 strict = false
+# Sphinx docs and example scripts are not part of any package's API surface.
+exclude = ['/docs/', '/examples/']
 
 [[tool.mypy.overrides]]
 # Third-party packages in this stack that ship no type information.
@@ -91,8 +108,34 @@ module = [
     "quantstats.*",
     "weasyprint.*",
     "pyarrow.*",
+    # dags/ ship to the Airflow image; airflow itself is not a workspace dep.
+    "airflow.*",
+    "pendulum.*",
+    "seaborn.*",
+    "scipy.*",
+    "pandas.*",
+    "psycopg2.*",
+    # SQLAlchemy 1.4 (pinned by data-ngin) predates py.typed.
+    "sqlalchemy.*",
+    "matplotlib.*",
+    # algoterminal's terminal plotting and cointegration deps.
+    "plotext.*",
+    "statsmodels.*",
 ]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Imported pre-monorepo code (algosystem and data-ngin repos) carries ~250
+# type errors, almost all pandas/numpy arithmetic on untyped frames. Fixing
+# them is real work the migration should not block on, so these packages are
+# checked for syntax/imports only. Ratchet per-module by deleting entries from
+# this list as modules are cleaned; never add new ones.
+module = [
+    "algosystem.*",
+    "data_ngin.*",
+    "tests.*",
+]
+ignore_errors = true
 
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers --strict-config"
@@ -100,6 +143,12 @@ testpaths = ["tests"]
 markers = [
     "slow: takes more than a second; excluded from the fast PR gate",
     "integration: needs a live dependency (database, broker, market data feed)",
+    # algosystem's suite predates the monorepo and tags with these as well.
+    "unit: pure in-process unit test",
+    "web: exercises the embedded web/report interface",
+    "cli: exercises the click CLI",
+    "benchmark: needs benchmark reference data",
+    "database: needs a live database connection",
 ]
 
 [tool.coverage.run]

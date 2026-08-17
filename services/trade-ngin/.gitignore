@@ -1,0 +1,42 @@
+.env
+.vscode/
+build/
+build_coverage/
+logs/
+config.json
+config_conservative.json
+
+# Modular config (local overrides, credentials - do not track)
+config/
+apps/backtest/results/
+.claude/
+CLAUDE.md
+.csv
+.cache/
+# Ignore real configs (credentials) in config/, not config_template/
+config/portfolios/conservative/email.json
+config/portfolios/conservative/portfolio.json
+config/portfolios/conservative/risk.json
+config/**/*email.json*
+config/**/*portfolio.json*
+config/**/*risk.json*
+
+# macOS system files
+.DS_Store
+**/.DS_Store
+
+# Backup files
+*.backup
+*_backup.*
+
+# Daily position CSV files
+daily_positions_*.csv
+
+.idea/
+
+cmake-build-debug/
+
+config/defaults.json
+config/portfolios/conservative/portfolio.json
+config/portfolios/conservative/risk.json
+email.json

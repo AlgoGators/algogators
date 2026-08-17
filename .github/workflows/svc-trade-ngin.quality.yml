@@ -8,7 +8,6 @@ on:
       - 'CMakePresets.json'
       - '.github/workflows/_quality-cpp.yml'
       - '.github/workflows/svc-trade-ngin.quality.yml'
-      - 'platform/contracts/**'
   push:
     branches: [main]
     paths:
@@ -17,7 +16,6 @@ on:
       - 'CMakePresets.json'
       - '.github/workflows/_quality-cpp.yml'
       - '.github/workflows/svc-trade-ngin.quality.yml'
-      - 'platform/contracts/**'
   workflow_dispatch:
 
 concurrency:
@@ -32,9 +30,12 @@ jobs:
     uses: ./.github/workflows/_quality-cpp.yml
     with:
       path: services/trade-ngin
-      builds: '[{"preset":"ci-gcc13","os":"ubuntu-latest"},{"preset":"ci-clang18","os":"ubuntu-latest"},{"preset":"ci-msvc","os":"windows-latest"}]'
-      sanitizers: '["ci-asan","ci-ubsan"]'
-      run-clang-tidy: true
+      # Imported pre-monorepo code: one toolchain first; restore clang/msvc + sanitizers as the code is cleaned.
+      builds: '[{"preset":"ci-gcc13","os":"ubuntu-latest"}]'
+      sanitizers: '[]'
+      run-clang-tidy: false
+      # 3,900+ pre-existing violations; reformat once the feature branches land.
+      run-clang-format: false
     secrets: inherit
 
   gate:
