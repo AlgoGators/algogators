@@ -105,6 +105,7 @@ contracts:
 # Verify every service's workflow path filters still match reality.
 check-paths:
     uv run python platform/ci/check_workflow_paths.py
+    uv run pytest tests/test_ci_path_filters.py -q --no-cov
 
 # Generate the quality + publish workflow pair for a new service.
 new-service kind name:

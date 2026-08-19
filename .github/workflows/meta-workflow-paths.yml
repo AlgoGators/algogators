@@ -41,3 +41,7 @@ jobs:
       - run: uv sync --locked --all-groups
       - name: Check workflow path filters
         run: uv run python platform/ci/check_workflow_paths.py
+      - name: Test CI path-filter behaviour
+        # The checker proves the filters are self-consistent; these prove they
+        # produce the right runs for a given changed-file set.
+        run: uv run pytest tests/test_ci_path_filters.py -q --no-cov
