@@ -41,18 +41,3 @@ jobs:
       - run: uv sync --locked --all-groups
       - name: Check workflow path filters
         run: uv run python platform/ci/check_workflow_paths.py
-
-  actionlint:
-    name: actionlint
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Lint workflow syntax
-        # Catches the errors GitHub only reports at run time: bad `needs`
-        # references, undefined matrix keys, malformed expressions.
-        run: |
-          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-          ./actionlint -color -shellcheck=

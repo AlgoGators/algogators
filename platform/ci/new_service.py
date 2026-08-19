@@ -177,25 +177,6 @@ jobs:
 {gate(member)}"""
 
 
-def skip(member: Member, paths: list[str]) -> str:
-    return f"""name: {member.slug} · quality (skip)
-
-on:
-  pull_request:
-    paths-ignore:
-{yaml_list(paths)}
-
-permissions: {{}}
-
-jobs:
-  gate:
-    name: {member.gate_name}
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "{member.path} untouched; skipping member CI"
-"""
-
-
 def publish(member: Member) -> str:
     tag = member.name.removeprefix("@algogators/").replace("_", "-")
     if member.tier == "libs" or member.path == "apps/algoterminal":
@@ -375,7 +356,6 @@ def main(argv: list[str] | None = None) -> int:
         QUALITY_RENDERERS[member.archetype](member, paths),
         args.force,
     )
-    write(WORKFLOW_DIR / f"{member.slug}.skip.yml", skip(member, paths), args.force)
     write(WORKFLOW_DIR / f"{member.slug}.publish.yml", publish(member), args.force)
     return 0
 
