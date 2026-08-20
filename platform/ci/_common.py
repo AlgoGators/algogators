@@ -1,10 +1,9 @@
 """Shared machinery for the monorepo's CI meta-tooling.
 
-Three consumers import this:
+Two consumers import this:
 
 * ``check_workflow_paths.py`` -- verifies each member's path filters are honest
-* ``pr_gate.py``             -- the single required status check
-* ``new_service.py``         -- generates a member's workflow files
+* ``new_service.py``          -- generates a member's workflow files
 
 The one idea holding it together: a member's ``paths:`` filter is the *only*
 declaration of what that member owns. Everything else -- which checks a PR must
@@ -168,7 +167,7 @@ class Member:
 
     @property
     def gate_name(self) -> str:
-        """The check-run name branch protection and pr_gate.py look for."""
+        """The stable check-run name branch protection would reference."""
         return f"{self.slug} quality"
 
 
@@ -284,20 +283,6 @@ class QualityWorkflow:
         return self.file.relative_to(REPO_ROOT).as_posix()
 
 
-@dataclass
-class SkipWorkflow:
-    """A parsed ``<slug>.skip.yml`` branch-protection companion."""
-
-    file: Path
-    slug: str
-    paths_ignore: list[str] = field(default_factory=list)
-    gate_name: str | None = None
-
-    @property
-    def rel(self) -> str:
-        return self.file.relative_to(REPO_ROOT).as_posix()
-
-
 def load_quality_workflows(workflow_dir: Path = WORKFLOW_DIR) -> list[QualityWorkflow]:
     """Parse every ``*.quality.yml`` caller in the workflow directory."""
     results: list[QualityWorkflow] = []
@@ -325,32 +310,6 @@ def load_quality_workflows(workflow_dir: Path = WORKFLOW_DIR) -> list[QualityWor
                 wf.gate_name = job["name"]
         results.append(wf)
     return results
-
-
-def load_skip_workflows(workflow_dir: Path = WORKFLOW_DIR) -> list[SkipWorkflow]:
-    """Parse every ``*.skip.yml`` no-op workflow in the workflow directory."""
-    results: list[SkipWorkflow] = []
-    if not workflow_dir.is_dir():
-        return results
-    for file in sorted(workflow_dir.glob("*.skip.yml")):
-        data = yaml.safe_load(file.read_text("utf-8")) or {}
-        triggers = data.get("on") or data.get(True) or {}
-        wf = SkipWorkflow(
-            file=file,
-            slug=file.name.removesuffix(".skip.yml"),
-            paths_ignore=list((triggers.get("pull_request") or {}).get("paths-ignore") or []),
-        )
-        for job in (data.get("jobs") or {}).values():
-            if isinstance(job, dict) and job.get("name"):
-                wf.gate_name = job["name"]
-                break
-        results.append(wf)
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Git
-# ---------------------------------------------------------------------------
 
 
 def changed_files(base_ref: str, head_ref: str = "HEAD", root: Path = REPO_ROOT) -> list[str]:
