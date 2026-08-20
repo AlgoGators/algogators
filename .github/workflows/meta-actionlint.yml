@@ -1,0 +1,40 @@
+name: meta · actionlint
+
+# Workflow syntax linting. Unlike the `workflow paths` check next door, this
+# job owns exactly one directory -- .github/ -- so it is path-filtered like any
+# other member. A change that cannot affect workflow syntax cannot break it.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: meta-actionlint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Lint workflow syntax
+        # Catches the errors GitHub only reports at run time: bad `needs`
+        # references, undefined matrix keys, malformed expressions.
+        run: |
+          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color -shellcheck=
