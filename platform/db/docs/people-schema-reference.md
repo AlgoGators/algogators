@@ -99,6 +99,7 @@ The identity table. Everyone else in this schema hangs off it.
 | `first_name`, `last_name` | `TEXT NOT NULL` | Both non-blank. |
 | `email` | `TEXT NOT NULL` | The applicant's **UF email**, which is what the forms ask for. |
 | `person_type` | `TEXT`, nullable | `'member'` or `'investor'`. |
+| `github_user_id` | `BIGINT`, nullable | The numeric GitHub account ID. Set for members; `NULL` for applicants and investors. |
 | `name_key` | generated, stored | `lower(trim(first) || ' ' || trim(last))`. |
 | `deleted_at`, `row_version`, `created_at`, `updated_at` | | Standard set. |
 
@@ -107,6 +108,11 @@ The identity table. Everyone else in this schema hangs off it.
 - **`person_type` is denormalized and is not the source of truth.** The authoritative answer to "is
   this person a member?" is the existence of a `people.member` row. Anything gating access on
   membership must join `member` rather than read this column.
+- **`github_user_id` is the numeric ID, not the login.** GitHub usernames can be renamed; the
+  numeric ID never changes, so it is the only value safe to use as a join key against GitHub. The
+  login is fetched from the API when a human needs to read it, never stored. `person_github_user_id_idx`
+  is unique and partial (`WHERE github_user_id IS NOT NULL`), so applicants and investors may leave
+  it `NULL` without colliding.
 - `person_email_lower_idx` is unique on `lower(email)` and partial. Case-insensitive because a
   plain `UNIQUE` lets `Jane@ufl.edu` and `jane@ufl.edu` both exist, which is how one person becomes
   two rows and their application history splits in half.
@@ -209,6 +215,13 @@ One table with a `kind` rather than two near-identical tables.
   treats a composite FK with any `NULL` column as satisfied, so this needs no separate exemption.
 - **Alumni stay in the table** with `left_on` set, rather than being deleted out of it.
 - `member_person_live_idx`: one live member row per person.
+- **For members, GitHub is the source of truth.** Membership of the GitHub organisation, the
+  org team a person belongs to, and the `leadership` org team are authoritative; `member`,
+  `member_team`, and `is_leadership` are a mirror written only by the GitHub sync (see
+  [GitHub sync](#github-sync)). Applicants and investors are unaffected — GitHub knows nothing
+  about them. The ATS therefore onboards an accepted applicant by inviting them to the org and
+  recording their `github_user_id`, not by inserting a `member` row; the sync creates the row when
+  the invitation is accepted.
 
 ### `people.member_team` — team assignment history
 
@@ -374,7 +387,7 @@ is what makes "undo that upload" a real operation rather than an archaeology pro
 | Column | Type | Meaning |
 |---|---|---|
 | `id` | `BIGSERIAL` PK | |
-| `source` | `TEXT NOT NULL` | `'form_sync'`, `'excel_upload'`, `'app_edit'`, `'api'`. |
+| `source` | `TEXT NOT NULL` | `'form_sync'`, `'excel_upload'`, `'app_edit'`, `'api'`, `'github_sync'`. |
 | `filename` | `TEXT`, nullable | For file-based sources. |
 | `file_sha256` | `TEXT`, nullable | 64 hex chars. Catches "did I already upload this exact sheet" before any row is touched. |
 | `actor` | `TEXT NOT NULL` | Who did it. |
@@ -453,6 +466,25 @@ intended interim state, and tightening it later is a second migration rather tha
 resumes, rubric grades, and the dates of birth inside `raw_response` are the most sensitive rows in
 the system, so this should not be left indefinitely.
 
+## GitHub sync
+
+Internal members are managed in the GitHub organisation, and the `people` schema mirrors that. Each
+run of the sync is one `import_batch` with `source = 'github_sync'` and `actor = 'github_sync'`, so
+every change it makes lands in `change_log` like any other write.
+
+| GitHub state | Mirrored as |
+|---|---|
+| Org member whose ID matches a `person.github_user_id` | A live `member` row (`left_on IS NULL`); created if missing. |
+| Member of org team whose slug matches `team.slug` | The current `member_team` row; the previous one is closed with `ended_on`. |
+| Member of the `leadership` org team | `member.is_leadership = TRUE`. |
+| Removed from the org | `member.left_on` set to the sync date; the open `member_team` row is closed. |
+| Org member with **no** matching `person` | Reported as unlinked. Never auto-creates a `person` — there is no email to identify them by. |
+
+Direction is GitHub → database only. Nothing in the database writes back to GitHub, so editing
+`member` or `member_team` by hand is overwritten on the next run; the place to make a change is the
+org. Database credentials are issued by Vault against GitHub team membership directly, so the
+mirror is for history and reporting, not for gating access.
+
 ## Out of scope
 
 Facts about what this schema deliberately does **not** do. Each is a design decision, not an
@@ -467,7 +499,8 @@ oversight.
 | **Investor modelling.** | A stub table, pending a decision on individuals vs. entities. |
 | **Hard deletes by any automated path.** | Soft delete via `deleted_at`; a real erasure is a deliberate manual act, and has to reach `change_log` rows too. |
 | **Market data of any kind.** | `services/data-ngin` owns `futures_data`, `equities_data`, `options_data`, `synthetic`. |
-| **Application code** — the ATS, the ingest scripts, the Excel diff tooling. | This document covers the tables those things write to. |
+| **Storing the GitHub login.** | Only `github_user_id`; the login is looked up from the API when displayed. |
+| **Application code** — the ATS, the ingest scripts, the Excel diff tooling, the GitHub sync. | This document covers the tables those things write to. |
 | **Any real database.** The migration has never been applied outside a throwaway container. | Running it for real is a deliberate, separate act. |
 
 ## Verify it worked
