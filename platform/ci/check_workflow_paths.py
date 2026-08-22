@@ -269,7 +269,7 @@ def rule_workspace_deps_are_packaged(report: Report, members: list[Member]) -> N
         dist = _normalize_dist(project.get("name", ""))
         by_dist[dist] = member
         deps_of[dist] = {
-            _normalize_dist(re.split(r"[\s<>=!~;\[]", dep, 1)[0])
+            _normalize_dist(re.split(r"[\s<>=!~;\[]", dep, maxsplit=1)[0])
             for dep in project.get("dependencies", [])
         }
 
