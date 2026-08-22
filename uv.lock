@@ -987,7 +987,7 @@ requires-dist = [
     { name = "databento", specifier = ">=0.44.1" },
     { name = "fastapi", specifier = ">=0.115.6" },
     { name = "pandas", specifier = ">=2.2.3,<3" },
-    { name = "platform-db", editable = "libs/platform-db" },
+    { name = "platform-db", editable = "platform/db" },
     { name = "prometheus-fastapi-instrumentator", specifier = ">=7.0.0" },
     { name = "psycopg2-binary", specifier = ">=2.9.10" },
     { name = "pyarrow", specifier = ">=18.1.0" },
@@ -2579,7 +2579,7 @@ wheels = [
 [[package]]
 name = "platform-db"
 version = "0.1.0"
-source = { editable = "libs/platform-db" }
+source = { editable = "platform/db" }
 dependencies = [
     { name = "python-dotenv" },
 ]
@@ -3252,7 +3252,7 @@ requires-dist = [
     { name = "flask-jwt-extended", specifier = ">=4.7.4" },
     { name = "flask-limiter", specifier = ">=4.1.1" },
     { name = "gunicorn", specifier = ">=23.0" },
-    { name = "platform-db", editable = "libs/platform-db" },
+    { name = "platform-db", editable = "platform/db" },
     { name = "psycopg2-binary", specifier = ">=2.9.12" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "research-core", editable = "libs/research-core" },

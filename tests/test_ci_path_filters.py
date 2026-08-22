@@ -209,9 +209,14 @@ def test_security_scanning_stays_repo_wide() -> None:
 
 
 def test_every_member_has_quality_and_publish_workflows() -> None:
+    """Platform members are workspace-internal: gated, but never published."""
     for member in MEMBERS:
         assert (WORKFLOWS / f"{member.slug}.quality.yml").exists(), member.slug
-        assert (WORKFLOWS / f"{member.slug}.publish.yml").exists(), member.slug
+        publish_exists = (WORKFLOWS / f"{member.slug}.publish.yml").exists()
+        if member.tier == "platform":
+            assert not publish_exists, f"{member.slug} must not publish"
+        else:
+            assert publish_exists, member.slug
 
 
 def test_no_workflow_references_a_missing_member_directory() -> None:

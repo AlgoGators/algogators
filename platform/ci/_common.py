@@ -35,8 +35,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
 
 #: Directories that may contain members. The tier a member lives in decides how
-#: it ships, which decides which publish workflow it gets.
-MEMBER_ROOTS = ("libs", "apps", "services")
+#: it ships, which decides which publish workflow it gets. `platform` holds
+#: cross-cutting members (e.g. platform/db) that are neither standalone libs
+#: nor deployable services.
+MEMBER_ROOTS = ("libs", "apps", "services", "platform")
 
 #: A directory is a member if it contains one of these. Discovery stops
 #: descending once it finds one, so nested source and test directories under a
@@ -151,7 +153,7 @@ class Member:
 
     path: str  # repo-relative, forward slashes: "libs/algosystem"
     archetype: str  # python | node | cpp
-    tier: str  # libs | apps | services
+    tier: str  # libs | apps | services | platform
     name: str  # distribution/package name, or the directory name
 
     @property
@@ -161,7 +163,7 @@ class Member:
     @property
     def slug(self) -> str:
         """Workflow filename stem: ``lib-algosystem``, ``app-algolens-web``."""
-        prefix = {"libs": "lib", "apps": "app", "services": "svc"}[self.tier]
+        prefix = {"libs": "lib", "apps": "app", "services": "svc", "platform": "platform"}[self.tier]
         rest = self.path.split("/", 1)[1].replace("/", "-")
         return f"{prefix}-{rest}"
 

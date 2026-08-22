@@ -1,25 +1,25 @@
-name: lib-platform-db · quality
+name: platform-db · quality
 
 on:
   pull_request:
     paths:
-      - 'libs/platform-db/**'
+      - 'platform/db/**'
       - 'uv.lock'
       - 'pyproject.toml'
       - '.github/workflows/_quality-python.yml'
-      - '.github/workflows/lib-platform-db.quality.yml'
+      - '.github/workflows/platform-db.quality.yml'
   push:
     branches: [main]
     paths:
-      - 'libs/platform-db/**'
+      - 'platform/db/**'
       - 'uv.lock'
       - 'pyproject.toml'
       - '.github/workflows/_quality-python.yml'
-      - '.github/workflows/lib-platform-db.quality.yml'
+      - '.github/workflows/platform-db.quality.yml'
   workflow_dispatch:
 
 concurrency:
-  group: lib-platform-db-quality-${{ github.ref }}
+  group: platform-db-quality-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -29,7 +29,7 @@ jobs:
   quality:
     uses: ./.github/workflows/_quality-python.yml
     with:
-      path: libs/platform-db
+      path: platform/db
       python-versions: '["3.11"]'
       runners: '["ubuntu-latest"]'
       coverage-min: 60
@@ -38,7 +38,7 @@ jobs:
     secrets: inherit
 
   gate:
-    name: lib-platform-db quality
+    name: platform-db quality
     if: always()
     needs: [quality]
     runs-on: ubuntu-latest
