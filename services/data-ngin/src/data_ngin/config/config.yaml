@@ -47,11 +47,16 @@ database:
   raw_table: "ohlcv_1d_raw"           
   table: "ohlcv_1d"
 
-# Time range for data fetching YYYY-MM-DD (Leave empty to fetch missing data)
-#Setting it really small to avoid unnecesary costs
+# Time range for data fetching YYYY-MM-DD. Left empty so determine_date_range()
+# (src/utils/dynamic_loader.py) does its incremental thing: start_date defaults
+# to (latest date already in the DB + 1 day), end_date defaults to yesterday.
+# Only hardcode real dates here for a one-off manual backfill; leaving a fixed
+# range in place permanently is what silently disabled daily incremental
+# fetching before (pipeline was stuck re-pulling 2010-06-06..2025-03-22 forever
+# instead of picking up new days).
 time_range:
-  start_date: "2010-06-06"              
-  end_date: "2025-03-22"
+  start_date: ""
+  end_date: ""
 
 # Options to handle missing data
 missing_data:
