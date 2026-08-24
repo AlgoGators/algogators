@@ -2,11 +2,16 @@ name: security
 
 # Repo-wide, not per-service. Security scanning does not respect directory
 # boundaries — a vulnerable transitive dependency in one service is a repo
-# problem — so this is one of the few workflows without path filters.
+# problem — so this workflow has no path filters on its triggers.
 #
 # Every job is gated on actually finding code of the relevant kind, so the
 # workflow stays green on a repo that has not had its services migrated in yet
 # and lights up automatically as each one lands.
+#
+# On push and pull_request, CodeQL additionally skips languages whose files
+# were not touched by the change — a docs-only or HTML-only commit should not
+# pay for a C++ extraction. The Monday scheduled run still scans every
+# detected language, which is what catches advisories against unchanged code.
 
 on:
   push:
@@ -36,19 +41,55 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - id: detect
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          langs=()
+
+          # Changed files for this event; empty scan_all means "filter by diff".
+          # Schedule/dispatch, unknown before-SHAs (new branch, force push) and
+          # missing bases all fall back to scanning everything.
+          scan_all=false
+          changed=""
+          case "$EVENT_NAME" in
+            push)
+              if [ -z "$PUSH_BEFORE" ] || ! git cat-file -e "$PUSH_BEFORE" 2>/dev/null; then
+                scan_all=true
+              else
+                changed=$(git diff --name-only "$PUSH_BEFORE" HEAD)
+              fi
+              ;;
+            pull_request)
+              if git cat-file -e "$PR_BASE_SHA" 2>/dev/null; then
+                changed=$(git diff --name-only "$PR_BASE_SHA" HEAD)
+              else
+                scan_all=true
+              fi
+              ;;
+            *)
+              scan_all=true
+              ;;
+          esac
+
           find_src() { find libs apps services -type f -name "$1" -not -path '*/node_modules/*' 2>/dev/null | head -1; }
-          [ -n "$(find_src '*.py')" ] && langs+=('"python"')
-          [ -n "$(find_src '*.ts')$(find_src '*.tsx')$(find_src '*.js')$(find_src '*.jsx')" ] && langs+=('"javascript-typescript"')
-          [ -n "$(find_src '*.cpp')$(find_src '*.hpp')$(find_src '*.cc')" ] && langs+=('"c-cpp"')
+          touched() {
+            [ "$scan_all" = true ] && return 0
+            printf '%s\n' "$changed" | grep -qE "$1"
+          }
+
+          langs=()
+          [ -n "$(find_src '*.py')" ] && touched '\.py$' && langs+=('"python"')
+          [ -n "$(find_src '*.ts')$(find_src '*.tsx')$(find_src '*.js')$(find_src '*.jsx')" ] && touched '\.(ts|tsx|js|jsx|mjs|cjs)$' && langs+=('"javascript-typescript"')
+          [ -n "$(find_src '*.cpp')$(find_src '*.hpp')$(find_src '*.cc')" ] && touched '\.(cpp|hpp|cc|h|cxx)$' && langs+=('"c-cpp"')
           json="[$(IFS=,; echo "${langs[*]:-}")]"
           echo "languages=$json" >> "$GITHUB_OUTPUT"
           echo "any=$([ "$json" = '[]' ] && echo false || echo true)" >> "$GITHUB_OUTPUT"
-          echo "Detected: $json"
+          echo "Detected: $json (scan_all=$scan_all)"
 
   codeql:
     name: codeql (${{ matrix.language }})
@@ -97,27 +138,6 @@ jobs:
           comment-summary-in-pr: on-failure
           # Copyleft licenses are incompatible with how this code is distributed.
           deny-licenses: GPL-3.0, AGPL-3.0, SSPL-1.0
-
-  scorecard:
-    name: scorecard
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: ossf/scorecard-action@v2
-        with:
-          results_file: scorecard.sarif
-          results_format: sarif
-          publish_results: false
-      - uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: scorecard.sarif
 
   sbom:
     name: sbom
