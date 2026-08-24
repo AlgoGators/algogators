@@ -29,10 +29,8 @@ from _common import (
     WORKFLOW_DIR,
     Member,
     QualityWorkflow,
-    SkipWorkflow,
     discover_members,
     load_quality_workflows,
-    load_skip_workflows,
     required_paths,
     uses_contracts,
 )
@@ -107,19 +105,6 @@ def rule_no_orphan_callers(
                 wf.rel,
                 "quality workflow has no matching member directory",
                 "delete the workflow, or restore the member it gates",
-            )
-
-
-def rule_no_orphan_skips(
-    report: Report, members: list[Member], skips: dict[str, SkipWorkflow]
-) -> None:
-    known = {m.slug for m in members}
-    for slug, wf in skips.items():
-        if slug not in known:
-            report.fail(
-                wf.rel,
-                "skip workflow has no matching member directory",
-                "delete the workflow, or restore the member it satisfies branch protection for",
             )
 
 
@@ -204,9 +189,10 @@ def rule_patterns_resolve(report: Report, wf: QualityWorkflow, root: Path) -> No
 def rule_gate_job(report: Report, wf: QualityWorkflow, member: Member) -> None:
     """The caller must expose a stable, correctly named gate job.
 
-    `pr_gate.py` looks the check up by this exact name, and branch protection
-    cannot use the matrix job names because those change whenever the matrix
-    does.
+    Branch protection cannot require the matrix job names -- those change
+    whenever the matrix does -- so each member exposes one gate job whose name
+    is stable. Keep it accurate even while `main` is unprotected: it is the
+    name protection would have to reference.
     """
     if wf.gate_name is None:
         report.fail(
@@ -218,7 +204,7 @@ def rule_gate_job(report: Report, wf: QualityWorkflow, member: Member) -> None:
         report.fail(
             wf.rel,
             f"gate job is named `{wf.gate_name}`, expected `{member.gate_name}`",
-            f"rename it to `{member.gate_name}` so pr_gate.py can find it",
+            f"rename it to `{member.gate_name}` so the gate name stays stable",
         )
 
 
@@ -242,30 +228,6 @@ def rule_reusable_exists(report: Report, wf: QualityWorkflow, member: Member) ->
             wf.rel,
             f"reusable workflow `{reusable}` does not exist",
             "restore it or fix the archetype",
-        )
-
-
-def rule_skip_matches(
-    report: Report, wf: QualityWorkflow, skip: SkipWorkflow | None, member: Member
-) -> None:
-    if skip is None:
-        report.fail(
-            wf.rel,
-            f"no skip workflow (expected .github/workflows/{member.slug}.skip.yml)",
-            "add the no-op companion so required checks do not hang when this member is untouched",
-        )
-        return
-    if skip.gate_name != member.gate_name:
-        report.fail(
-            skip.rel,
-            f"skip gate is named `{skip.gate_name}`, expected `{member.gate_name}`",
-            "use the same job name as the real gate job",
-        )
-    if skip.paths_ignore != wf.pr_paths:
-        report.fail(
-            skip.rel,
-            "paths-ignore does not match the real workflow's pull_request.paths list",
-            "make the lists byte-identical so the skip workflow is the branch-protection companion",
         )
 
 
@@ -307,7 +269,7 @@ def rule_workspace_deps_are_packaged(report: Report, members: list[Member]) -> N
         dist = _normalize_dist(project.get("name", ""))
         by_dist[dist] = member
         deps_of[dist] = {
-            _normalize_dist(re.split(r"[\s<>=!~;\[]", dep, 1)[0])
+            _normalize_dist(re.split(r"[\s<>=!~;\[]", dep, maxsplit=1)[0])
             for dep in project.get("dependencies", [])
         }
 
@@ -377,13 +339,11 @@ def main() -> int:
     root = REPO_ROOT
     members = discover_members(root)
     workflows = {wf.slug: wf for wf in load_quality_workflows(WORKFLOW_DIR)}
-    skips = {wf.slug: wf for wf in load_skip_workflows(WORKFLOW_DIR)}
     report = Report()
 
     rule_no_platform_package(report, root)
     rule_every_member_has_a_caller(report, members, workflows)
     rule_no_orphan_callers(report, members, workflows)
-    rule_no_orphan_skips(report, members, skips)
     rule_workspace_deps_are_packaged(report, members)
 
     for member in members:
@@ -396,7 +356,6 @@ def main() -> int:
         rule_gate_job(report, wf, member)
         rule_with_path_matches(report, wf, member)
         rule_reusable_exists(report, wf, member)
-        rule_skip_matches(report, wf, skips.get(member.slug), member)
 
     if members:
         print(f"Checked {len(members)} member(s):")

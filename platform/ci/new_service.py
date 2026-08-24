@@ -177,25 +177,6 @@ jobs:
 {gate(member)}"""
 
 
-def skip(member: Member, paths: list[str]) -> str:
-    return f"""name: {member.slug} · quality (skip)
-
-on:
-  pull_request:
-    paths-ignore:
-{yaml_list(paths)}
-
-permissions: {{}}
-
-jobs:
-  gate:
-    name: {member.gate_name}
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "{member.path} untouched; skipping member CI"
-"""
-
-
 def publish(member: Member) -> str:
     tag = member.name.removeprefix("@algogators/").replace("_", "-")
     if member.tier == "libs" or member.path == "apps/algoterminal":
@@ -353,7 +334,7 @@ def write(path: Path, content: str, force: bool) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--kind", choices=["libs", "apps", "services"], required=True)
+    parser.add_argument("--kind", choices=["libs", "apps", "services", "platform"], required=True)
     parser.add_argument("--name", required=True, help="member name or repo-relative path")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
@@ -375,7 +356,11 @@ def main(argv: list[str] | None = None) -> int:
         QUALITY_RENDERERS[member.archetype](member, paths),
         args.force,
     )
-    write(WORKFLOW_DIR / f"{member.slug}.skip.yml", skip(member, paths), args.force)
+    if member.tier == "platform":
+        # Platform members are workspace-internal: gated by quality, never
+        # published anywhere.
+        print(f"skipping publish workflow: {member.path} is a platform member")
+        return 0
     write(WORKFLOW_DIR / f"{member.slug}.publish.yml", publish(member), args.force)
     return 0
 

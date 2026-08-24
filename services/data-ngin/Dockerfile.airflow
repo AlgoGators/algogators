@@ -17,7 +17,7 @@ WORKDIR /opt/airflow
 
 # Install the service package (and its workspace lib) into Airflow's
 # environment so the DAGs can `import data_ngin`.
-COPY --chown=airflow:root libs/platform-db /opt/deps/platform-db
+COPY --chown=airflow:root platform/db /opt/deps/platform-db
 COPY --chown=airflow:root services/data-ngin /opt/deps/data-ngin
 RUN pip install --no-cache-dir \
     /opt/deps/platform-db \

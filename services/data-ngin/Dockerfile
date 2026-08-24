@@ -9,10 +9,10 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-COPY libs/platform-db ./libs/platform-db
+COPY platform/db ./platform/db
 COPY services/data-ngin ./services/data-ngin
 RUN pip install --no-cache-dir \
-    ./libs/platform-db \
+    ./platform/db \
     ./services/data-ngin
 
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app

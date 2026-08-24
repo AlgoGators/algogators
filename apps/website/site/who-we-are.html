@@ -1,383 +1,231 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>Who We Are — AlgoGators Investment Fund</title>
-  <meta name="description"
-    content="Meet the AlgoGators team — student analysts, engineers, and leadership behind the University of Florida's quantitative investment fund." />
+  <meta name="description" content="Meet the AlgoGators team — student analysts, engineers, and leadership behind the University of Florida's quantitative investment fund." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link
-    href="https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,62..125,100..900&family=Barlow:wght@700;800&family=Poppins:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
-    rel="stylesheet" />
-  <link rel="icon"
-    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 115'><polygon points='50,5 95,110 5,110' fill='none' stroke='%23FF5C00' stroke-width='10'/></svg>" />
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,62..125,100..900&family=Barlow:wght@700;800&family=Poppins:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 115'><polygon points='50,5 95,110 5,110' fill='none' stroke='%23FF5C00' stroke-width='10'/></svg>" />
   <link rel="stylesheet" href="assets/main.css" />
 </head>
-
 <body>
 
-  <div class="bg-grid" aria-hidden="true"></div>
-  <div class="grain" aria-hidden="true"></div>
+<div class="bg-grid" aria-hidden="true"></div>
+<div class="grain" aria-hidden="true"></div>
 
-  <header class="site-nav" id="siteNav">
-    <div class="nav-inner">
-      <a class="brand" href="index.html" aria-label="AlgoGators home">
-        <img src="download.png" alt="AlgoGators Investment Fund" class="brand-logo-img" />
-      </a>
-      <nav class="nav-links" aria-label="Primary">
-        <a href="index.html">Home</a>
-        <a href="who-we-are.html" class="active">Who We Are</a>
-        <a href="what-we-do.html">What We Do</a>
-        <a href="how-we-train.html">How We Train</a>
-        <a href="research.html">Research</a>
-        <a href="https://algolens.algogators.com/" class="ext" target="_blank" rel="noopener">AlgoLens</a>
-      </nav>
-      <a class="nav-cta" href="apply.html">Apply Now</a>
-      <button class="nav-burger" id="navBurger" aria-label="Menu"
-        aria-expanded="false"><span></span><span></span><span></span></button>
+<header class="site-nav" id="siteNav">
+  <div class="nav-inner">
+    <a class="brand" href="index.html" aria-label="AlgoGators home">
+      <img src="download.png" alt="AlgoGators Investment Fund" class="brand-logo-img" />
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="index.html">Home</a>
+      <a href="who-we-are.html" class="active">Who We Are</a>
+      <a href="what-we-do.html">What We Do</a>
+      <a href="how-we-train.html">How We Train</a>
+      <a href="research.html">Research</a>
+      <a href="https://algolens.algogators.com/" class="ext" target="_blank" rel="noopener">AlgoLens</a>
+    </nav>
+    <a class="nav-cta" href="apply.html">Apply Now</a>
+    <button class="nav-burger" id="navBurger" aria-label="Menu" aria-expanded="false"><span></span><span></span><span></span></button>
+  </div>
+</header>
+
+<nav class="mobile-menu" id="mobileMenu" aria-label="Mobile">
+  <a href="index.html" style="transition-delay:.1s"><span class="num">01</span>Home</a>
+  <a href="who-we-are.html" class="active" style="transition-delay:.16s"><span class="num">02</span>Who We Are</a>
+  <a href="what-we-do.html" style="transition-delay:.22s"><span class="num">03</span>What We Do</a>
+  <a href="how-we-train.html" style="transition-delay:.28s"><span class="num">04</span>Training</a>
+  <a href="research.html" style="transition-delay:.34s"><span class="num">05</span>Research</a>
+  <a href="apply.html" style="transition-delay:.4s"><span class="num">06</span>Apply Now</a>
+  <a href="https://algolens.algogators.com/" target="_blank" rel="noopener" style="transition-delay:.46s"><span class="num">07</span>AlgoLens <svg width="11" height="11" viewBox="0 0 11 11" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="display:inline-block;vertical-align:middle;margin-left:2px"><path d="M1.5 9.5L9.5 1.5M9.5 1.5H3.5M9.5 1.5V7.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+  <p class="menu-foot">Data Driven, Student Run — Est. 2023</p>
+</nav>
+
+<main>
+
+<!-- ═══════════════ PAGE HERO ═══════════════ -->
+<section class="page-hero">
+  <div class="wrap">
+    <p class="label rise d1"><span class="idx"></span>The People</p>
+    <h1 class="display rise d2">Who <span class="orange">We Are</span></h1>
+    <p class="lede rise d3">
+      AlgoGators enables a dynamic team of finance experts and quantitative analysts to combine
+      deep market knowledge with innovative technology. Our goals go beyond just running a fund;
+      we strive to <span class="hl">democratize the field of quantitative finance</span> and provide
+      students with <span class="hl">relevant, hands-on experience</span>.
+    </p>
+  </div>
+</section>
+
+<!-- ═══════════════ GROUP PHOTO ═══════════════ -->
+<section class="group-photo-section">
+  <div class="group-photo-wrap rise d4">
+    <img src="miscellanious/team_group_photo.jpg" alt="The AlgoGators team" />
+    <div class="group-photo-overlay" aria-hidden="true"></div>
+    <div class="group-photo-info">
+      <div class="group-photo-label">
+        <span class="group-photo-tag">△ AlgoGators Investment Fund</span>
+        <p class="group-photo-title">The <span class="orange">Fund</span></p>
+      </div>
+      <div class="group-photo-stats">
+        <div class="gp-stat"><span class="gp-num">26</span><span class="gp-lbl">Members</span></div>
+        <div class="gp-stat"><span class="gp-num">4</span><span class="gp-lbl">Departments</span></div>
+        <div class="gp-stat"><span class="gp-num">'23</span><span class="gp-lbl">Founded</span></div>
+      </div>
     </div>
-  </header>
+  </div>
+</section>
 
-  <nav class="mobile-menu" id="mobileMenu" aria-label="Mobile">
-    <a href="index.html" style="transition-delay:.1s"><span class="num">01</span>Home</a>
-    <a href="who-we-are.html" class="active" style="transition-delay:.16s"><span class="num">02</span>Who We Are</a>
-    <a href="what-we-do.html" style="transition-delay:.22s"><span class="num">03</span>What We Do</a>
-    <a href="how-we-train.html" style="transition-delay:.28s"><span class="num">04</span>Training</a>
-    <a href="research.html" style="transition-delay:.34s"><span class="num">05</span>Research</a>
-    <a href="apply.html" style="transition-delay:.4s"><span class="num">06</span>Apply Now</a>
-    <a href="https://algolens.algogators.com/" target="_blank" rel="noopener" style="transition-delay:.46s"><span
-        class="num">07</span>AlgoLens <svg width="11" height="11" viewBox="0 0 11 11" fill="none"
-        xmlns="http://www.w3.org/2000/svg" aria-hidden="true"
-        style="display:inline-block;vertical-align:middle;margin-left:2px">
-        <path d="M1.5 9.5L9.5 1.5M9.5 1.5H3.5M9.5 1.5V7.5" stroke="currentColor" stroke-width="1.5"
-          stroke-linecap="round" stroke-linejoin="round" />
-      </svg></a>
-    <p class="menu-foot">Data Driven, Student Run — Est. 2023</p>
-  </nav>
+<!-- ═══════════════ ROSTER ═══════════════ -->
+<section style="padding:0 0 clamp(72px,10vw,130px)">
+  <div class="wrap">
 
-  <main>
+    <!-- LEADERSHIP -->
+    <div class="dept-head" data-reveal>
+      <h2>Leadership</h2><span class="count">/ 07</span><span class="rule"></span>
+    </div>
+    <div class="member-grid" style="grid-template-columns:repeat(auto-fill,minmax(210px,1fr))">
+      <div class="member" data-reveal><div class="ph"><img loading="lazy" src="Headshots/Dominick_Dupuy.jpg" alt="Dominick Dupuy"/></div><p class="nm">Dominick Dupuy</p><p class="rl">President</p></div>
+      <div class="member" data-reveal style="--d:.06s"><div class="ph"><img loading="lazy" src="Headshots/Hemdutt_Rao.jpg" alt="Hemdutt Rao"/></div><p class="nm">Hemdutt Rao</p><p class="rl">Vice President</p></div>
+      <div class="member" data-reveal style="--d:.12s"><div class="ph"><img loading="lazy" src="Headshots/Alexander_Robbins.jpg" alt="Alexander Robbins"/></div><p class="nm">Alexander Robbins</p><p class="rl">Director of Quantitative Research</p></div>
+      <div class="member" data-reveal style="--d:.18s"><div class="ph"><img loading="lazy" src="Headshots/Anna_Claire_Skipper.jpg" alt="Anna Claire Skipper"/></div><p class="nm">Anna Claire Skipper</p><p class="rl">Head of Investor Relations</p></div>
+      <div class="member" data-reveal style="--d:.30s"><div class="ph"><img loading="lazy" src="Headshots/John_Riley.jpg" alt="John Riley"/></div><p class="nm">John Riley</p><p class="rl">Director of Quantitative Development</p></div>
+      <div class="member" data-reveal style="--d:.36s"><div class="ph"><img loading="lazy" src="Headshots/Eric_Schwarz.jpg" alt="Eric Schwarz"/></div><p class="nm">Eric Schwarz</p><p class="rl">Director of Quantitative Trading</p></div>
+      <div class="member" data-reveal><div class="ph"><img loading="lazy" src="Headshots/Christophe_Muracciole.jpg" alt="Christophe Muracciole"/></div><p class="nm">Christophe Muracciole</p><p class="rl">Director of Education</p></div>
+      <!-- INSERT_LEADERSHIP -->
+    </div>
 
-    <!-- ═══════════════ PAGE HERO ═══════════════ -->
-    <section class="page-hero">
-      <div class="wrap">
-        <p class="label rise d1"><span class="idx"></span></p>
-        <h1 class="display rise d2">Who <span class="orange">We Are</span></h1>
-        <p class="lede rise d3">
-          AlgoGators enables a dynamic team of finance experts and quantitative analysts to combine
-          deep market knowledge with innovative technology. Our goals go beyond just running a fund;
-          we strive to <span class="hl">democratize the field of quantitative finance</span> and provide
-          students with <span class="hl">relevant, hands-on experience</span>.
+    <!-- Quantitative Research -->
+    <div class="dept-head" data-reveal>
+      <h2>Quantitative Research</h2><span class="count">/ 07</span><span class="rule"></span>
+    </div>
+    <div class="member-grid">
+      <div class="member" data-reveal style="--d:.12s"><div class="ph"><img loading="lazy" src="Headshots/Alexander_Robbins.jpg" alt="Alexander Robbins"/></div><p class="nm">Alexander Robbins</p><p class="rl">Director of Quantitative Research</p></div>
+      <div class="member" data-reveal style="--d:.12s"><div class="ph"><img loading="lazy" src="Headshots\Cristophe Meracciole.JPG" alt="Christophe Muracciole"/></div><p class="nm">Christophe Muracciole</p><p class="rl">Quantitative Research Lead</p></div>
+      <div class="member" data-reveal style="--d:.1s"><div class="ph"><img loading="lazy" src="Headshots/Gannon_Stoner.jpg" alt="Gannon Stoner"/></div><p class="nm">Gannon Stoner</p><p class="rl">Senior Quant Researcher</p></div>
+      <div class="member" data-reveal style="--d:.3s"><div class="ph"><img loading="lazy" src="Headshots/Hudson_Shields.jpg" alt="Hudson Shields"/></div><p class="nm">Hudson Shields</p><p class="rl">Senior Quant Researcher</p></div>
+      <div class="member" data-reveal style="--d:.2s"><div class="ph"><img loading="lazy" src="Headshots/Dat_Le.jpg" alt="Dat Le"/></div><p class="nm">Dat Le</p><p class="rl">Senior Quant Researcher</p></div>
+      <div class="member" data-reveal style="--d:.25s"><div class="ph"><img loading="lazy" src="Headshots/Sebastian_Bernal-Orta.jpg" alt="Sebastian Bernal-Orta"/></div><p class="nm">Sebastian Bernal-Orta</p><p class="rl">Senior Quant Researcher</p></div>
+      <div class="member" data-reveal style="--d:.25s"><div class="ph"><img loading="lazy" src="Headshots/Nhat_Minh_Hoang.jpg" alt="Nhat Minh Hoang"/></div><p class="nm">Nhat Minh Hoang</p><p class="rl">Senior Quant Researcher</p></div>
+      <!-- INSERT_QR -->
+    </div>
+
+    <!-- Quantitative Trading -->
+    <div class="dept-head" data-reveal>
+      <h2>Quantitative Trading</h2><span class="count">/ 05</span><span class="rule"></span>
+    </div>
+    <div class="member-grid">
+      <div class="member" data-reveal style="--d:.36s"><div class="ph"><img loading="lazy" src="Headshots/Eric_Schwarz.jpg" alt="Eric Schwarz"/></div><p class="nm">Eric Schwarz</p><p class="rl">Director of Quantitative Trading</p></div>
+      <div class="member" data-reveal><div class="ph"><img loading="lazy" src="Headshots/Riley_Hebrank.jpg" alt="Riley Hebrank"/></div><p class="nm">Riley Hebrank</p><p class="rl">Senior Trading Analyst</p></div>
+      <div class="member" data-reveal style="--d:.15s"><div class="ph"><img loading="lazy" src="Headshots/Dean_Lucas.jpg" alt="Dean Lucas"/></div><p class="nm">Dean Lucas</p><p class="rl">Senior Trading Analyst</p></div>
+      <div class="member" data-reveal style="--d:.3s"><div class="ph"><img loading="lazy" src="Headshots/Agnivesh_Kaundinva.jpg" alt="Agnivesh Kaundinva"/></div><p class="nm">Agnivesh Kaundinva</p><p class="rl">Senior Trading Analyst</p></div>
+      <div class="member" data-reveal style="--d:.4s"><div class="ph"><img loading="lazy" src="Headshots/Nathan_Kaul.jpg" alt="Nathan Kaul"/></div><p class="nm">Nathan Kaul</p><p class="rl">Senior Trading Analyst</p></div>
+
+      <!-- INSERT_QT -->
+    </div>
+
+    <!-- Quantitative Development -->
+    <div class="dept-head" data-reveal>
+      <h2>Quantitative Development</h2><span class="count">/ 06</span><span class="rule"></span>
+    </div>
+    <div class="member-grid">
+      <div class="member" data-reveal style="--d:.30s"><div class="ph"><img loading="lazy" src="Headshots/John_Riley.jpg" alt="John Riley"/></div><p class="nm">John Riley</p><p class="rl">Director of Quantitative Development</p></div>
+      <div class="member" data-reveal style="--d:.2s"><div class="ph"><img loading="lazy" src="Headshots/Pranav_Bhargava.jpg" alt="Pranav Bhargava"/></div><p class="nm">Pranav Bhargava</p><p class="rl">Senior Quant Developer</p></div>
+      <div class="member" data-reveal style="--d:.1s"><div class="ph"><img loading="lazy" src="Headshots/Gabrielle_Polito.jpg" alt="Gabrielle Polito"/></div><p class="nm">Gabrielle Polito</p><p class="rl">Senior Quant Developer</p></div>
+      <div class="member" data-reveal style="--d:.15s"><div class="ph"><img loading="lazy" src="Headshots/Fabio_Jorge_Hernandez.jpg" alt="Fabio Jorge Hernandez"/></div><p class="nm">Fabio Jorge Hernandez</p><p class="rl">Senior Quant Developer</p></div>
+      <div class="member" data-reveal style="--d:.25s"><div class="ph"><img loading="lazy" src="Headshots/Oliver_Deng.jpg" alt="Oliver Deng"/></div><p class="nm">Oliver Deng</p><p class="rl">Senior Quant Developer</p></div>
+      <div class="member" data-reveal style="--d:.2s"><div class="ph"><img loading="lazy" src="Headshots/Sivan_Pushpagiri.jpg" alt="Sivan Pushpagiri"/></div><p class="nm">Sivan Pushpagiri</p><p class="rl">Senior Quant Developer</p></div>
+      <!-- INSERT_QDE -->
+    </div>
+
+
+    <!-- INVESTOR RELATIONS -->
+    <div class="dept-head" data-reveal>
+      <h2>Investor Relations</h2><span class="count">/ 05</span><span class="rule"></span>
+    </div>
+    <div class="member-grid">
+      <div class="member" data-reveal style="--d:.18s"><div class="ph"><img loading="lazy" src="Headshots/Anna_Claire_Skipper.jpg" alt="Anna Claire Skipper"/></div><p class="nm">Anna Claire Skipper</p><p class="rl">Head of Investor Relations</p></div>
+      <div class="member" data-reveal style="--d:.15s"><div class="ph"><img loading="lazy" src="Headshots/Giancarlo_Diaz.jpg" alt="Giancarlo Diaz"/></div><p class="nm">Giancarlo Diaz</p><p class="rl">IR Associate</p></div>
+      <div class="member" data-reveal style="--d:.2s"><div class="ph"><img loading="lazy" src="Headshots/Cristobal_Aguilera.jpg" alt="Cristobal Aguilera"/></div><p class="nm">Cristobal Aguilera</p><p class="rl">IR Associate</p></div>
+      <div class="member" data-reveal style="--d:.25s"><div class="ph"><img loading="lazy" src="Headshots/Brennan_Gilday.jpg" alt="Brennan Gilday"/></div><p class="nm">Brennan Gilday</p><p class="rl">IR Associate</p></div>
+      <!-- INSERT_IR -->
+    </div>
+
+  </div>
+</section>
+
+<!-- ═══════════════ DIRECTOR ═══════════════ -->
+<section class="section dark">
+  <div class="rings" style="width:340px;height:340px;top:-110px;right:-80px" aria-hidden="true"></div>
+  <div class="wrap">
+    <div class="cols-2">
+      <div class="member" data-reveal style="max-width:400px">
+        <div class="ph">
+          <img loading="lazy" src="Headshots/Dustin_Hebrank.jpg" alt="Dustin Hebrank, Director"/>
+        </div>
+      </div>
+      <div data-reveal style="--d:.15s">
+        <p class="label" style="color:var(--orange);margin-bottom:18px"><span class="idx">△</span>Director</p>
+        <h2 class="display" style="color:#fff;font-size:clamp(32px,4.5vw,58px);margin-bottom:24px">Dustin Hebrank</h2>
+        <p style="font-size:15px;line-height:1.9;color:var(--muted-d)">
+          Dustin Hebrank serves as AlgoGators' Director. He was the Chief Financial Officer at
+          Gulf Winds International, a position he held since being introduced to the company in 2012
+          through the C12 network. His career began with Hilton Hotels in 1998 as Director of Finance,
+          after which he joined a boutique investment bank in Tampa in 2004 to assist companies in
+          raising growth and acquisition capital.
         </p>
       </div>
-    </section>
+    </div>
+  </div>
+</section>
 
-    <!-- ═══════════════ GROUP PHOTO ═══════════════ -->
-    <section class="group-photo-section">
-      <div class="group-photo-wrap rise d4">
-        <img src="miscellanious/team_group_photo.jpg" alt="The AlgoGators team" />
-        <div class="group-photo-overlay" aria-hidden="true"></div>
-        <div class="group-photo-info">
-          <div class="group-photo-label">
-            <span class="group-photo-tag">△ AlgoGators Investment Fund</span>
-            <p class="group-photo-title">The <span class="orange">Fund</span></p>
-          </div>
-          <div class="group-photo-stats">
-            <div class="gp-stat"><span class="gp-num">34</span><span class="gp-lbl">Members</span></div>
-            <div class="gp-stat"><span class="gp-num">4</span><span class="gp-lbl">Departments</span></div>
-            <div class="gp-stat"><span class="gp-num">'23</span><span class="gp-lbl">Founded</span></div>
-          </div>
-        </div>
+</main>
+
+<footer class="site-footer">
+  <div class="footer-mark" aria-hidden="true">AlgoGators</div>
+  <div class="wrap">
+    <div class="footer-cols">
+      <div>
+        <p class="footer-tag">Data Driven, <em>Student Run.</em></p>
+        <p class="footer-disclaimer">
+          The content provided on this website is for informational purposes only and does not constitute an offer to sell,
+          a solicitation to buy, or a recommendation for any security, nor does it constitute an offer to provide investment
+          advisory or other services by AlgoGators Investment Fund. Nothing on this website shall be considered a solicitation
+          or offer to buy or sell any financial instrument or to offer or provide any investment advice or service to any
+          person in any jurisdiction. Investing involves risk, including the possible loss of principal.
+        </p>
       </div>
-    </section>
-
-    <!-- ═══════════════ ROSTER ═══════════════ -->
-    <section style="padding:0 0 clamp(72px,10vw,130px)">
-      <div class="wrap">
-
-        <!-- LEADERSHIP -->
-        <div class="dept-head" data-reveal>
-          <h2>Leadership</h2><span class="count"></span><span class="rule"></span>
-        </div>
-        <div class="member-grid" style="grid-template-columns:repeat(auto-fill,minmax(210px,1fr))">
-          <div class="member" data-reveal>
-            <div class="ph"><img loading="lazy" src="Headshots/Dominick_Dupuy.jpg" alt="Dominick Dupuy" /></div>
-            <p class="nm">Dominick Dupuy</p>
-            <p class="rl">President</p>
-          </div>
-          <div class="member" data-reveal style="--d:.06s">
-            <div class="ph"><img loading="lazy" src="Headshots/Hemdutt_Rao.jpg" alt="Hemdutt Rao" /></div>
-            <p class="nm">Hemdutt Rao</p>
-            <p class="rl">Vice President</p>
-          </div>
-          <div class="member" data-reveal style="--d:.12s">
-            <div class="ph"><img loading="lazy" src="Headshots/Alexander_Robbins.jpg" alt="Alexander Robbins" /></div>
-            <p class="nm">Alexander Robbins</p>
-            <p class="rl">Director of Quantitative Research</p>
-          </div>
-          <div class="member" data-reveal style="--d:.18s">
-            <div class="ph"><img loading="lazy" src="Headshots/Anna_Claire_Skipper.jpg" alt="Anna Claire Skipper" />
-            </div>
-            <p class="nm">Anna Claire Skipper</p>
-            <p class="rl">Head of Investor Relations</p>
-          </div>
-          <div class="member" data-reveal style="--d:.30s">
-            <div class="ph"><img loading="lazy" src="Headshots/John_Riley.jpg" alt="John Riley" /></div>
-            <p class="nm">John Riley</p>
-            <p class="rl">Director of Quantitative Development</p>
-          </div>
-          <div class="member" data-reveal style="--d:.36s">
-            <div class="ph"><img loading="lazy" src="Headshots/Eric_Schwarz.jpg" alt="Eric Schwarz" /></div>
-            <p class="nm">Eric Schwarz</p>
-            <p class="rl">Director of Quantitative Trading</p>
-          </div>
-          <div class="member" data-reveal>
-            <div class="ph"><img loading="lazy" src="Headshots/Christophe_Muracciole.jpg" alt="Christophe Muracciole" />
-            </div>
-            <p class="nm">Christophe Muracciole</p>
-            <p class="rl">Director of Education</p>
-          </div>
-          <!-- INSERT_LEADERSHIP -->
-        </div>
-
-        <!-- Quantitative Research -->
-        <div class="dept-head" data-reveal>
-          <h2>Quantitative Research</h2><span class="count"></span><span class="rule"></span>
-        </div>
-        <div class="member-grid">
-          <div class="member" data-reveal style="--d:.12s">
-            <div class="ph"><img loading="lazy" src="Headshots/Alexander_Robbins.jpg" alt="Alexander Robbins" /></div>
-            <p class="nm">Alexander Robbins</p>
-            <p class="rl">Director of Quantitative Research</p>
-          </div>
-          <div class="member" data-reveal style="--d:.12s">
-            <div class="ph"><img loading="lazy" src="Headshots\Cristophe Meracciole.JPG" alt="Christophe Muracciole" />
-            </div>
-            <p class="nm">Christophe Muracciole</p>
-            <p class="rl">Quantitative Research Lead</p>
-          </div>
-          <div class="member" data-reveal style="--d:.1s">
-            <div class="ph"><img loading="lazy" src="Headshots/Gannon_Stoner.jpg" alt="Gannon Stoner" /></div>
-            <p class="nm">Gannon Stoner</p>
-            <p class="rl">Senior Quant Researcher</p>
-          </div>
-          <div class="member" data-reveal style="--d:.3s">
-            <div class="ph"><img loading="lazy" src="Headshots/Hudson_Shields.jpg" alt="Hudson Shields" /></div>
-            <p class="nm">Hudson Shields</p>
-            <p class="rl">Senior Quant Researcher</p>
-          </div>
-          <div class="member" data-reveal style="--d:.2s">
-            <div class="ph"><img loading="lazy" src="Headshots/Dat_Le.jpg" alt="Dat Le" /></div>
-            <p class="nm">Dat Le</p>
-            <p class="rl">Senior Quant Researcher</p>
-          </div>
-          <div class="member" data-reveal style="--d:.25s">
-            <div class="ph"><img loading="lazy" src="Headshots/Sebastian_Bernal-Orta.jpg" alt="Sebastian Bernal-Orta" />
-            </div>
-            <p class="nm">Sebastian Bernal-Orta</p>
-            <p class="rl">Senior Quant Researcher</p>
-          </div>
-          <div class="member" data-reveal style="--d:.25s">
-            <div class="ph"><img loading="lazy" src="Headshots/Nhat_Minh_Hoang.jpg" alt="Nhat Minh Hoang" /></div>
-            <p class="nm">Nhat Minh Hoang</p>
-            <p class="rl">Senior Quant Researcher</p>
-          </div>
-          <!-- INSERT_QR -->
-        </div>
-
-        <!-- Quantitative Trading -->
-        <div class="dept-head" data-reveal>
-          <h2>Quantitative Trading</h2><span class="count"></span><span class="rule"></span>
-        </div>
-        <div class="member-grid">
-          <div class="member" data-reveal style="--d:.36s">
-            <div class="ph"><img loading="lazy" src="Headshots/Eric_Schwarz.jpg" alt="Eric Schwarz" /></div>
-            <p class="nm">Eric Schwarz</p>
-            <p class="rl">Director of Quantitative Trading</p>
-          </div>
-          <div class="member" data-reveal>
-            <div class="ph"><img loading="lazy" src="Headshots/Riley_Hebrank.jpg" alt="Riley Hebrank" /></div>
-            <p class="nm">Riley Hebrank</p>
-            <p class="rl">Senior Trading Analyst</p>
-          </div>
-          <div class="member" data-reveal style="--d:.15s">
-            <div class="ph"><img loading="lazy" src="Headshots/Dean_Lucas.jpg" alt="Dean Lucas" /></div>
-            <p class="nm">Dean Lucas</p>
-            <p class="rl">Senior Trading Analyst</p>
-          </div>
-          <div class="member" data-reveal style="--d:.3s">
-            <div class="ph"><img loading="lazy" src="Headshots/Agnivesh_Kaundinva.jpg" alt="Agnivesh Kaundinva" /></div>
-            <p class="nm">Agnivesh Kaundinva</p>
-            <p class="rl">Senior Trading Analyst</p>
-          </div>
-
-          <!-- INSERT_QT -->
-        </div>
-
-        <!-- Quantitative Development/Engineering -->
-        <div class="dept-head" data-reveal>
-          <h2>Quantitative Development</h2><span class="count"></span><span class="rule"></span>
-        </div>
-        <div class="member-grid">
-          <div class="member" data-reveal style="--d:.30s">
-            <div class="ph"><img loading="lazy" src="Headshots/John_Riley.jpg" alt="John Riley" /></div>
-            <p class="nm">John Riley</p>
-            <p class="rl">Director of Quantitative Development</p>
-          </div>
-          <div class="member" data-reveal style="--d:.2s">
-            <div class="ph"><img loading="lazy" src="Headshots/John_Lucas.jpg" alt="John Lucas" /></div>
-            <p class="nm">John Lucas</p>
-            <p class="rl">Senior Quant Developer</p>
-          </div>
-          <div class="member" data-reveal style="--d:.2s">
-            <div class="ph"><img loading="lazy" src="Headshots/Pranav_Bhargava.jpg" alt="Pranav Bhargava" /></div>
-            <p class="nm">Pranav Bhargava</p>
-            <p class="rl">Senior Quant Developer</p>
-          </div>
-          <div class="member" data-reveal style="--d:.1s">
-            <div class="ph"><img loading="lazy" src="Headshots/Gabrielle_Polito.jpg" alt="Gabrielle Polito" /></div>
-            <p class="nm">Gabrielle Polito</p>
-            <p class="rl">Senior Quant Developer</p>
-          </div>
-          <div class="member" data-reveal style="--d:.15s">
-            <div class="ph"><img loading="lazy" src="Headshots/Fabio_Jorge_Hernandez.jpg" alt="Fabio Jorge Hernandez" />
-            </div>
-            <p class="nm">Fabio Jorge Hernandez</p>
-            <p class="rl">Senior Quant Developer</p>
-          </div>
-          <div class="member" data-reveal style="--d:.25s">
-            <div class="ph"><img loading="lazy" src="Headshots/Oliver_Deng.jpg" alt="Oliver Deng" /></div>
-            <p class="nm">Oliver Deng</p>
-            <p class="rl">Senior Quant Developer</p>
-          </div>
-          <div class="member" data-reveal style="--d:.2s">
-            <div class="ph"><img loading="lazy" src="Headshots/Sivan_Pushpagiri.jpg" alt="Sivan Pushpagiri" /></div>
-            <p class="nm">Sivan Pushpagiri</p>
-            <p class="rl">Senior Quant Developer</p>
-          </div>
-          <div class="member" data-reveal style="--d:.4s">
-            <div class="ph"><img loading="lazy" src="Headshots/Nathan_Kaul.jpg" alt="Nathan Kaul" /></div>
-            <p class="nm">Nathan Kaul</p>
-            <p class="rl">Senior Trading Analyst</p>
-          </div>
-          <!-- INSERT_QDE -->
-        </div>
-
-
-        <!-- INVESTOR RELATIONS -->
-        <div class="dept-head" data-reveal>
-          <h2>Investor Relations</h2><span class="count"></span><span class="rule"></span>
-        </div>
-        <div class="member-grid">
-          <div class="member" data-reveal style="--d:.18s">
-            <div class="ph"><img loading="lazy" src="Headshots/Anna_Claire_Skipper.jpg" alt="Anna Claire Skipper" />
-            </div>
-            <p class="nm">Anna Claire Skipper</p>
-            <p class="rl">Head of Investor Relations</p>
-          </div>
-          <div class="member" data-reveal style="--d:.1s">
-            <div class="ph"><img loading="lazy" src="Headshots/Nandini_Karanam.jpg" alt="Nandini Karanam" /></div>
-            <p class="nm">Nandini Karanam</p>
-            <p class="rl">IR Associate</p>
-          </div>
-          <div class="member" data-reveal style="--d:.15s">
-            <div class="ph"><img loading="lazy" src="Headshots/Giancarlo_Diaz.jpg" alt="Giancarlo Diaz" /></div>
-            <p class="nm">Giancarlo Diaz</p>
-            <p class="rl">IR Associate</p>
-          </div>
-          <div class="member" data-reveal style="--d:.2s">
-            <div class="ph"><img loading="lazy" src="Headshots/Cristobal_Aguilera.jpg" alt="Cristobal Aguilera" /></div>
-            <p class="nm">Cristobal Aguilera</p>
-            <p class="rl">IR Associate</p>
-          </div>
-          <div class="member" data-reveal style="--d:.25s">
-            <div class="ph"><img loading="lazy" src="Headshots/Brennan_Gilday.jpg" alt="Brennan Gilday" /></div>
-            <p class="nm">Brennan Gilday</p>
-            <p class="rl">IR Associate</p>
-          </div>
-          <!-- INSERT_IR -->
-        </div>
-
+      <div>
+        <h5>Site</h5>
+        <nav>
+          <a href="index.html">Home</a>
+          <a href="who-we-are.html">Who We Are</a>
+          <a href="what-we-do.html">What We Do</a>
+          <a href="how-we-train.html">How We Train</a>
+          <a href="research.html">Research</a>
+        </nav>
       </div>
-    </section>
-
-    <!-- ═══════════════ DIRECTOR ═══════════════ -->
-    <section class="section dark">
-      <div class="rings" style="width:340px;height:340px;top:-110px;right:-80px" aria-hidden="true"></div>
-      <div class="wrap">
-        <div class="cols-2">
-          <div class="member" data-reveal style="max-width:400px">
-            <div class="ph">
-              <img loading="lazy" src="Headshots/Dustin_Hebrank.jpg" alt="Dustin Hebrank, Director" />
-            </div>
-          </div>
-          <div data-reveal style="--d:.15s">
-            <p class="label" style="color:var(--orange);margin-bottom:18px"><span class="idx">△</span>Director</p>
-            <h2 class="display" style="color:#fff;font-size:clamp(32px,4.5vw,58px);margin-bottom:24px">Dustin Hebrank
-            </h2>
-            <p style="font-size:15px;line-height:1.9;color:var(--muted-d)">
-              Dustin Hebrank serves as AlgoGators' Director. He was the Chief Financial Officer at
-              Gulf Winds International, a position he held since being introduced to the company in 2012
-              through the C12 network. His career began with Hilton Hotels in 1998 as Director of Finance,
-              after which he joined a boutique investment bank in Tampa in 2004 to assist companies in
-              raising growth and acquisition capital.
-            </p>
-          </div>
-        </div>
-      </div>
-    </section>
-
-  </main>
-
-  <footer class="site-footer">
-    <div class="footer-mark" aria-hidden="true">AlgoGators</div>
-    <div class="wrap">
-      <div class="footer-cols">
-        <div>
-          <p class="footer-tag">Data Driven, <em>Student Run.</em></p>
-          <p class="footer-disclaimer">
-            The content provided on this website is for informational purposes only and does not constitute an offer to
-            sell,
-            a solicitation to buy, or a recommendation for any security, nor does it constitute an offer to provide
-            investment
-            advisory or other services by AlgoGators Investment Fund. Nothing on this website shall be considered a
-            solicitation
-            or offer to buy or sell any financial instrument or to offer or provide any investment advice or service to
-            any
-            person in any jurisdiction. Investing involves risk, including the possible loss of principal.
-          </p>
-        </div>
-        <div>
-          <h5>Site</h5>
-          <nav>
-            <a href="index.html">Home</a>
-            <a href="who-we-are.html">Who We Are</a>
-            <a href="what-we-do.html">What We Do</a>
-            <a href="how-we-train.html">How We Train</a>
-            <a href="research.html">Research</a>
-          </nav>
-        </div>
-        <div>
-          <h5>Join</h5>
-          <nav>
-            <a href="apply.html">Apply Now</a>
-            <a href="https://algolens.algogators.com/" target="_blank" rel="noopener">AlgoLens ↗</a>
-            <a href="https://www.instagram.com/algogatorsfund/" target="_blank" rel="noopener">Instagram ↗</a>
-            <a href="https://www.linkedin.com/company/algogators-investment-fund/" target="_blank"
-              rel="noopener">LinkedIn ↗</a>
-          </nav>
-        </div>
-      </div>
-      <div class="footer-base">
-        <span>© <span data-year>2026</span> AlgoGators Investment Fund</span>
-        <span>Gainesville, FL</span>
+      <div>
+        <h5>Join</h5>
+        <nav>
+          <a href="apply.html">Apply Now</a>
+          <a href="https://algolens.algogators.com/" target="_blank" rel="noopener">AlgoLens ↗</a>
+          <a href="https://www.instagram.com/algogatorsfund/" target="_blank" rel="noopener">Instagram ↗</a>
+          <a href="https://www.linkedin.com/company/algogators-investment-fund/" target="_blank" rel="noopener">LinkedIn ↗</a>
+        </nav>
       </div>
     </div>
-  </footer>
+    <div class="footer-base">
+      <span>© <span data-year>2026</span> AlgoGators Investment Fund</span>
+      <span>Gainesville, FL</span>
+    </div>
+  </div>
+</footer>
 
-  <script src="assets/main.js" defer></script>
+<script src="assets/main.js" defer></script>
 </body>
-
 </html>

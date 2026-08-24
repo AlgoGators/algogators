@@ -22,6 +22,15 @@ Generated output is committed, not built at import time, so a C++ build does not
 need a Python toolchain. `just contracts` regenerates; CI fails if the working
 tree is dirty afterwards.
 
+## `db/`
+
+Shared database access: the canonical `DatabaseConfig` and the access-gate
+seam (`AccessRequest` / `AccessGate`) that services call to obtain database
+credentials. Today the gate is an allow-all wrapper over `DB_*` environment
+variables; it exists so an IAM-backed gate can replace it without touching any
+service's call sites. A workspace member with its own quality workflow
+(`platform-db.quality.yml`), unlike the plain directories below.
+
 ## `configs/`
 
 Shared instrument definitions, venue metadata, trading calendars. Data, not code

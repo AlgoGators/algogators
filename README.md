@@ -34,8 +34,11 @@ Still placeholders: `libs/research-core`, `apps/algoterminal`,
 Every member owns a thin workflow caller:
 
 - `<slug>.quality.yml` runs only when that member or one of its declared inputs changes.
-- `<slug>.skip.yml` is the no-op branch-protection companion for untouched members.
 - `<slug>.publish.yml` is tag-scoped with `<name>/v*` for independent releases.
+
+A member whose files are untouched runs nothing at all. `just check-paths`
+verifies every path filter still matches reality; it is the guard that makes
+path-filtered CI safe.
 
 Reusable workflows own the toolchain setup. Member manifests and justfiles own
 the commands and service-specific behavior.
