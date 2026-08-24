@@ -5,12 +5,13 @@ from typing import Any
 
 def validate_contract(obj: dict[str, Any]) -> list[str]:
     """
-    Validate a metrics contract JSON object.
+    Validate a metrics contract JSON object per spec §3.
 
     The contract must have:
-    - Required keys: probe_name, repo, probe_type, timestamp, status, metrics
-    - status values restricted to: OK, WARN, FAIL, NO_DATA (when present)
+    - Required keys: suite, repo, probe, captured_at, environment, metrics
+    - environment is a dict with: host, commit
     - metrics is a list of dicts with keys: id, value, unit
+    - Status should NOT be present at this layer (status is report.json-only)
 
     Args:
         obj: The contract object to validate.
@@ -21,20 +22,22 @@ def validate_contract(obj: dict[str, Any]) -> list[str]:
     errors: list[str] = []
 
     # Check required keys
-    required_keys = {"probe_name", "repo", "probe_type", "timestamp", "status", "metrics"}
+    required_keys = {"suite", "repo", "probe", "captured_at", "environment", "metrics"}
     missing_keys = required_keys - set(obj.keys())
     if missing_keys:
         for key in sorted(missing_keys):
             errors.append(f"Missing required key: {key}")
 
-    # Check status value if present
-    if "status" in obj:
-        valid_statuses = {"OK", "WARN", "FAIL", "NO_DATA"}
-        if obj["status"] not in valid_statuses:
-            errors.append(
-                f"Invalid status value: {obj['status']!r}. "
-                f"Must be one of: {', '.join(sorted(valid_statuses))}"
-            )
+    # Check environment structure
+    if "environment" in obj:
+        if not isinstance(obj["environment"], dict):
+            errors.append(f"environment must be a dict, got {type(obj['environment']).__name__}")
+        else:
+            env_required = {"host", "commit"}
+            env_missing = env_required - set(obj["environment"].keys())
+            if env_missing:
+                for key in sorted(env_missing):
+                    errors.append(f"environment missing required key: {key}")
 
     # Check metrics structure
     if "metrics" in obj:

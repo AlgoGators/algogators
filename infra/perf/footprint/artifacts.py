@@ -213,16 +213,26 @@ def _parse_docker_size(size_str: str) -> int:
     return 0
 
 
-def probe_artifacts(algogauge_path: str | None = None, prune: bool = False) -> dict[str, Any]:
-    """Run all artifact probes and return combined contract JSON.
+def probe_artifacts(
+    algogauge_path: str | None = None,
+    prune: bool = False,
+    host: str | None = None,
+    commit: str | None = None,
+) -> dict[str, Any]:
+    """Run all artifact probes and return combined contract JSON per spec §3.
 
     Args:
         algogauge_path: Optional path to algogauge repo.
         prune: If True, prune old algogauge runs.
+        host: Hostname or identifier (defaults to hostname).
+        commit: Git commit hash (defaults to 'unknown').
 
     Returns:
         Contract JSON dict with all artifact metrics.
     """
+    import socket
+    from datetime import UTC, datetime
+
     metrics = []
 
     # Algogauge artifacts
@@ -234,17 +244,16 @@ def probe_artifacts(algogauge_path: str | None = None, prune: bool = False) -> d
     # Docker containers
     metrics.extend(get_docker_container_stats())
 
-    # If no metrics collected, set status to NO_DATA
-    status = "OK" if metrics else "NO_DATA"
-
+    # Build contract JSON per spec §3
     contract = {
-        "probe_name": "artifacts",
+        "suite": "perf",
         "repo": "algogators",
-        "probe_type": "system",
-        "timestamp": __import__("datetime")
-        .datetime.now(__import__("datetime").timezone.utc)
-        .isoformat(),
-        "status": status,
+        "probe": "artifacts",
+        "captured_at": datetime.now(UTC).isoformat(),
+        "environment": {
+            "host": host or socket.gethostname(),
+            "commit": commit or "unknown",
+        },
         "metrics": metrics,
     }
 
