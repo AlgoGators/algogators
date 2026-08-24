@@ -191,6 +191,241 @@ class TestDbAuditRunner(unittest.TestCase):
         assert "note" in metric
 
     @patch("infra.perf.footprint.db_audit_runner.psycopg2.connect")
+    def test_db_audit_growth_metrics_second_run(self, mock_connect: MagicMock) -> None:
+        """On second run, growth_bytes_per_day should compute correctly with captured_at field.
+
+        This is a regression test for Finding 1: the script writes 'captured_at' but was
+        reading 'timestamp', causing a KeyError on the second run.
+        """
+        snapshots_dir = Path(self.snapshots_dir)
+
+        # Mock for initial run
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        # First run: return one table with 1000000 bytes
+        mock_cursor.fetchall.return_value = []
+
+        runner = DbAuditRunner(
+            host="localhost",
+            port=5432,
+            database="test_db",
+            user="postgres",
+            password="postgres",
+            snapshots_dir=str(snapshots_dir),
+        )
+
+        result1 = runner.run(commit="commit1")
+
+        # Manually create a prior snapshot with 800000 bytes for a table_bytes metric
+        # This simulates a prior run
+        prior_timestamp = "2024-01-01T10:00:00+00:00"
+        prior_snapshot = {
+            "suite": "perf",
+            "repo": "algogators",
+            "probe": "db_footprint",
+            "captured_at": prior_timestamp,
+            "environment": {"host": "localhost", "commit": "prior_commit"},
+            "metrics": [{"id": "table_bytes_futures_data_ohlcv", "value": 800000, "unit": "bytes"}],
+        }
+
+        # Write the prior snapshot manually
+        prior_path = snapshots_dir / f"db_footprint_{prior_timestamp.replace(':', '-')}.json"
+        with open(prior_path, "w") as f:
+            json.dump(prior_snapshot, f, indent=2)
+
+        # Second run: modify result1 to have a table_bytes metric with 1000000
+        # This simulates a 200000 byte increase over 1 day
+        from datetime import timedelta
+
+        result1_modified = result1.copy()
+        result1_modified["metrics"] = [
+            {"id": "table_bytes_futures_data_ohlcv", "value": 1000000, "unit": "bytes"}
+        ]
+
+        # Get the captured_at from result1 and write it as a snapshot
+        current_timestamp = result1_modified["captured_at"]
+        current_path = snapshots_dir / f"db_footprint_{current_timestamp.replace(':', '-')}.json"
+        with open(current_path, "w") as f:
+            json.dump(result1_modified, f, indent=2)
+
+        # Now run the audit again to compute growth metrics
+        # Reset the mock to return empty results for all queries
+        mock_cursor.fetchall.return_value = []
+
+        result2 = runner.run(commit="commit2")
+
+        # Find the growth metric
+        growth_metrics = [m for m in result2["metrics"] if m.get("id") == "growth_bytes_per_day"]
+        assert len(growth_metrics) == 1
+
+        metric = growth_metrics[0]
+        # Should have a value (not NO_DATA) since we have 2 snapshots
+        assert metric.get("value") is not None
+        assert metric.get("value") >= 0  # positive growth expected
+        assert metric.get("unit") == "bytes"
+        # Should NOT have NO_DATA status for second run
+        assert metric.get("status") != "NO_DATA"
+
+    @patch("infra.perf.footprint.db_audit_runner.psycopg2.connect")
+    def test_db_audit_index_space_schema_filter(self, mock_connect: MagicMock) -> None:
+        """The audit should compute index_share_pct with consistent schema filtering.
+
+        This is a regression test for Finding 2: idx_query must filter the same schemas
+        as rel_query to ensure the ratio never exceeds 100% for a valid database.
+        """
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        # Mock query results:
+        # 1. table_sizes query
+        # 2. idx_query (index bytes from user schemas only)
+        # 3. rel_query (relation bytes from user schemas only)
+        # 4. row_count_query
+        # 5. stream_query
+        # 6. compression_query
+        mock_cursor.fetchall.side_effect = [
+            [],  # table_sizes
+            [{"total": 500000}],  # index total (from user schemas only)
+            [{"total": 2000000}],  # relation total (from user schemas only)
+            [],  # row counts
+            [],  # stream row share
+            [],  # compression status
+        ]
+
+        runner = DbAuditRunner(
+            host="localhost",
+            port=5432,
+            database="test_db",
+            user="postgres",
+            password="postgres",
+            snapshots_dir=self.snapshots_dir,
+        )
+
+        result = runner.run()
+
+        # Find the index_share_pct metric
+        index_metrics = [m for m in result["metrics"] if m.get("id") == "index_share_pct"]
+        assert len(index_metrics) == 1
+
+        metric = index_metrics[0]
+        # 500000 / 2000000 = 0.25 = 25%
+        assert metric["value"] == 25.0
+        assert metric["unit"] == "percent"
+        # Should never exceed 100% with consistent filtering
+        assert metric["value"] <= 100.0
+
+    @patch("infra.perf.footprint.db_audit_runner.psycopg2.connect")
+    def test_db_audit_raw_cleaned_ratio_single_schema(self, mock_connect: MagicMock) -> None:
+        """The audit should handle raw/cleaned ratio in a single schema correctly."""
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        # Mock query results with tables in a single schema
+        mock_cursor.fetchall.side_effect = [
+            [],  # table_sizes
+            [{"total": 0}],  # index total
+            [{"total": 0}],  # relation total
+            [
+                {"schema_name": "futures_data", "table_name": "ohlcv_1d_raw", "row_count": 12},
+                {"schema_name": "futures_data", "table_name": "ohlcv_1d", "row_count": 10},
+            ],  # row counts
+            [],  # stream row share
+            [],  # compression status
+        ]
+
+        runner = DbAuditRunner(
+            host="localhost",
+            port=5432,
+            database="test_db",
+            user="postgres",
+            password="postgres",
+            snapshots_dir=self.snapshots_dir,
+        )
+
+        result = runner.run()
+
+        # Find the raw_cleaned_ratio metric
+        ratio_metrics = [m for m in result["metrics"] if "raw_cleaned_ratio" in m.get("id", "")]
+        assert len(ratio_metrics) == 1
+
+        metric = ratio_metrics[0]
+        # Single schema should use id without schema suffix
+        assert metric["id"] == "raw_cleaned_ratio"
+        # 12 raw / 10 cleaned = 1.2
+        assert metric["value"] == 1.2
+        assert metric["unit"] == "ratio"
+
+    @patch("infra.perf.footprint.db_audit_runner.psycopg2.connect")
+    def test_db_audit_raw_cleaned_ratio_multiple_schemas(self, mock_connect: MagicMock) -> None:
+        """The audit should keep raw/cleaned ratios separate per schema.
+
+        This is a regression test for Finding 3: raw_cleaned_ratio must not conflate
+        counts from different schemas into one number.
+        """
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_connect.return_value = mock_conn
+        mock_conn.cursor.return_value.__enter__.return_value = mock_cursor
+
+        # Mock query results with tables in two different schemas
+        mock_cursor.fetchall.side_effect = [
+            [],  # table_sizes
+            [{"total": 0}],  # index total
+            [{"total": 0}],  # relation total
+            [
+                # futures_data schema
+                {"schema_name": "futures_data", "table_name": "ohlcv_1d_raw", "row_count": 100},
+                {"schema_name": "futures_data", "table_name": "ohlcv_1d", "row_count": 50},
+                # equities_data schema
+                {"schema_name": "equities_data", "table_name": "ohlcv_1d_raw", "row_count": 200},
+                {"schema_name": "equities_data", "table_name": "ohlcv_1d", "row_count": 100},
+            ],  # row counts
+            [],  # stream row share
+            [],  # compression status
+        ]
+
+        runner = DbAuditRunner(
+            host="localhost",
+            port=5432,
+            database="test_db",
+            user="postgres",
+            password="postgres",
+            snapshots_dir=self.snapshots_dir,
+        )
+
+        result = runner.run()
+
+        # Find the raw_cleaned_ratio metrics
+        ratio_metrics = sorted(
+            [m for m in result["metrics"] if "raw_cleaned_ratio" in m.get("id", "")],
+            key=lambda x: x.get("id", ""),
+        )
+        assert len(ratio_metrics) == 2
+
+        # Should have two separate metrics, one per schema
+        ids = [m["id"] for m in ratio_metrics]
+        assert "raw_cleaned_ratio_equities_data" in ids
+        assert "raw_cleaned_ratio_futures_data" in ids
+
+        # Find each metric and verify the ratio
+        for metric in ratio_metrics:
+            if metric["id"] == "raw_cleaned_ratio_futures_data":
+                # 100 raw / 50 cleaned = 2.0
+                assert metric["value"] == 2.0
+            elif metric["id"] == "raw_cleaned_ratio_equities_data":
+                # 200 raw / 100 cleaned = 2.0
+                assert metric["value"] == 2.0
+
+            assert metric["unit"] == "ratio"
+
+    @patch("infra.perf.footprint.db_audit_runner.psycopg2.connect")
     def test_snapshot_file_created(self, mock_connect: MagicMock) -> None:
         """The audit should write a snapshot file with correct contract schema."""
         mock_conn = MagicMock()
