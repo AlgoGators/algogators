@@ -148,10 +148,13 @@ class DbAuditRunner:
 
     def _get_index_space(self, conn: Any) -> list[dict[str, Any]]:
         """Get index space metrics."""
-        # Get total index bytes
+        # Get total index bytes (filtered to user schemas only)
         idx_query = """
-            SELECT COALESCE(SUM(pg_relation_size(indexrelid)), 0)::bigint as total
-            FROM pg_index
+            SELECT COALESCE(SUM(pg_relation_size(i.indexrelid)), 0)::bigint as total
+            FROM pg_index i
+            JOIN pg_class idx ON i.indexrelid = idx.oid
+            JOIN pg_namespace n ON idx.relnamespace = n.oid
+            WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'timescaledb_information')
         """
         idx_rows = self._run_query(conn, idx_query)
         idx_bytes = idx_rows[0]["total"] if idx_rows else 0
@@ -183,37 +186,59 @@ class DbAuditRunner:
         return metrics
 
     def _get_raw_cleaned_ratio(self, conn: Any) -> list[dict[str, Any]]:
-        """Get the ratio of raw to cleaned table rows."""
-        # Get row counts for both tables
+        """Get the ratio of raw to cleaned table rows, grouped by schema.
+
+        Returns one metric entry per schema that contains both ohlcv_1d_raw and ohlcv_1d.
+        """
+        # Get row counts for both tables, grouped by schema
         row_count_query = """
             SELECT schemaname::text as schema_name,
                    tablename::text as table_name,
                    n_live_tup::bigint as row_count
             FROM pg_stat_user_tables
             WHERE tablename IN ('ohlcv_1d_raw', 'ohlcv_1d')
-            ORDER BY tablename
+            ORDER BY schemaname, tablename
         """
         rows = self._run_query(conn, row_count_query)
 
-        raw_count = None
-        cleaned_count = None
-
+        # Group by schema, tracking raw and cleaned counts per schema
+        schema_counts: dict[str, dict[str, int | None]] = {}
         for row in rows:
-            if row["table_name"] == "ohlcv_1d_raw":
-                raw_count = row["row_count"]
-            elif row["table_name"] == "ohlcv_1d":
-                cleaned_count = row["row_count"]
+            schema = row["schema_name"]
+            table = row["table_name"]
+            count = row["row_count"]
 
+            if schema not in schema_counts:
+                schema_counts[schema] = {"raw": None, "cleaned": None}
+
+            if table == "ohlcv_1d_raw":
+                schema_counts[schema]["raw"] = count
+            elif table == "ohlcv_1d":
+                schema_counts[schema]["cleaned"] = count
+
+        # Compute ratio per schema
         metrics = []
-        if raw_count is not None and cleaned_count is not None and cleaned_count > 0:
-            ratio = round(raw_count / cleaned_count, 3)
-            metrics.append(
-                {
-                    "id": "raw_cleaned_ratio",
-                    "value": ratio,
-                    "unit": "ratio",
-                }
-            )
+        for schema, counts in sorted(schema_counts.items()):
+            raw_count = counts["raw"]
+            cleaned_count = counts["cleaned"]
+
+            if raw_count is not None and cleaned_count is not None and cleaned_count > 0:
+                ratio = round(raw_count / cleaned_count, 3)
+
+                # If multiple schemas have this pair, include schema in metric id
+                if len(schema_counts) > 1:
+                    metric_id = f"raw_cleaned_ratio_{schema}"
+                else:
+                    metric_id = "raw_cleaned_ratio"
+
+                metrics.append(
+                    {
+                        "id": metric_id,
+                        "value": ratio,
+                        "unit": "ratio",
+                    }
+                )
+
         return metrics
 
     def _get_stream_row_share(self, conn: Any) -> list[dict[str, Any]]:
@@ -304,8 +329,8 @@ class DbAuditRunner:
             )
 
             # Parse timestamps
-            prior_ts = datetime.fromisoformat(prior_data["timestamp"])
-            current_ts = datetime.fromisoformat(current_data["timestamp"])
+            prior_ts = datetime.fromisoformat(prior_data["captured_at"])
+            current_ts = datetime.fromisoformat(current_data["captured_at"])
             days_elapsed = max(1, (current_ts - prior_ts).days)
 
             bytes_delta = current_total - prior_total
