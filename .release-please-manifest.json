@@ -7,5 +7,5 @@
   "apps/algolens-web": "0.1.0",
   "apps/algoterminal": "0.1.0",
   "apps/website": "0.1.0",
-  "libs/platform-db": "0.1.0"
+  "platform/db": "0.1.0"
 }

@@ -27,7 +27,7 @@ platform-db = { workspace = true }
 # member directory has matching workflow callers.
 members = [
     "libs/algosystem",
-    "libs/platform-db",
+    "platform/db",
     "libs/research-core",
     "services/data-ngin",
     "services/research-api",
