@@ -31,7 +31,7 @@ class TestDbAuditRunner(unittest.TestCase):
 
     @patch("infra.perf.footprint.db_audit_runner.psycopg2.connect")
     def test_db_audit_produces_valid_contract(self, mock_connect: MagicMock) -> None:
-        """The audit runner should produce a valid contract JSON."""
+        """The audit runner should produce a valid contract JSON per spec §3."""
         # Mock the database connection and cursor
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
@@ -50,18 +50,19 @@ class TestDbAuditRunner(unittest.TestCase):
             snapshots_dir=self.snapshots_dir,
         )
 
-        result = runner.run()
+        result = runner.run(host="test-host", commit="abc123")
 
-        # Check contract structure
-        assert "probe_name" in result
-        assert result["probe_name"] == "db_footprint"
+        # Check contract structure per spec §3
+        assert "suite" in result
+        assert result["suite"] == "perf"
         assert "repo" in result
         assert result["repo"] == "algogators"
-        assert "probe_type" in result
-        assert result["probe_type"] == "database"
-        assert "timestamp" in result
-        assert "status" in result
-        assert result["status"] in ("OK", "WARN", "FAIL", "NO_DATA")
+        assert "probe" in result
+        assert result["probe"] == "db_footprint"
+        assert "captured_at" in result
+        assert "environment" in result
+        assert result["environment"]["host"] == "test-host"
+        assert result["environment"]["commit"] == "abc123"
         assert "metrics" in result
         assert isinstance(result["metrics"], list)
 
@@ -191,7 +192,7 @@ class TestDbAuditRunner(unittest.TestCase):
 
     @patch("infra.perf.footprint.db_audit_runner.psycopg2.connect")
     def test_snapshot_file_created(self, mock_connect: MagicMock) -> None:
-        """The audit should write a snapshot file."""
+        """The audit should write a snapshot file with correct contract schema."""
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_connect.return_value = mock_conn
@@ -209,7 +210,7 @@ class TestDbAuditRunner(unittest.TestCase):
             snapshots_dir=str(snapshots_dir),
         )
 
-        runner.run()
+        runner.run(host="test-host", commit="abc123")
 
         # Check that a snapshot file was created
         snapshot_files = list(snapshots_dir.glob("db_footprint_*.json"))
@@ -219,9 +220,12 @@ class TestDbAuditRunner(unittest.TestCase):
         with open(snapshot_files[0]) as f:
             snapshot = json.load(f)
 
-        assert snapshot["probe_name"] == "db_footprint"
+        assert snapshot["probe"] == "db_footprint"
         assert snapshot["repo"] == "algogators"
+        assert snapshot["suite"] == "perf"
         assert "metrics" in snapshot
+        assert "environment" in snapshot
+        assert "captured_at" in snapshot
 
         # Validate contract
         errors = validate_contract(snapshot)
@@ -379,11 +383,14 @@ class TestDbAuditDockerIntegration(unittest.TestCase):
                 snapshots_dir=tmp_dir,
             )
 
-            result = runner.run()
+            result = runner.run(host="docker-localhost", commit="test-commit")
 
-            # Validate contract
-            assert result["probe_name"] == "db_footprint"
+            # Validate contract per spec §3
+            assert result["probe"] == "db_footprint"
             assert result["repo"] == "algogators"
+            assert result["suite"] == "perf"
+            assert result["environment"]["host"] == "docker-localhost"
+            assert result["environment"]["commit"] == "test-commit"
             errors = validate_contract(result)
             assert len(errors) == 0, f"Contract validation errors: {errors}"
 

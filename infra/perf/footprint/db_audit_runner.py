@@ -44,11 +44,15 @@ class DbAuditRunner:
         self.snapshots_dir = Path(snapshots_dir)
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
 
-    def run(self) -> dict[str, Any]:
+    def run(self, host: str | None = None, commit: str | None = None) -> dict[str, Any]:
         """Execute the audit and return the contract JSON.
 
+        Args:
+            host: Hostname or identifier of the environment (defaults to self.host).
+            commit: Git commit hash or identifier (defaults to 'unknown').
+
         Returns:
-            A contract JSON dict with all metrics.
+            A contract JSON dict with all metrics per spec §3.
         """
         conn = psycopg2.connect(
             host=self.host,
@@ -60,7 +64,7 @@ class DbAuditRunner:
 
         try:
             metrics: list[dict[str, Any]] = []
-            timestamp = datetime.now(UTC).isoformat()
+            captured_at = datetime.now(UTC).isoformat()
 
             # Execute each query and collect results
             metrics.extend(self._get_table_sizes(conn))
@@ -72,18 +76,23 @@ class DbAuditRunner:
             # Compute growth metrics
             metrics.extend(self._get_growth_metrics())
 
-            # Build contract JSON
+            # Build contract JSON per spec §3
             contract = {
-                "probe_name": "db_footprint",
+                "suite": "perf",
                 "repo": "algogators",
-                "probe_type": "database",
-                "timestamp": timestamp,
-                "status": "OK",
+                "probe": "db_footprint",
+                "captured_at": captured_at,
+                "environment": {
+                    "host": host or self.host,
+                    "commit": commit or "unknown",
+                },
                 "metrics": metrics,
             }
 
             # Write snapshot file
-            snapshot_path = self.snapshots_dir / f"db_footprint_{timestamp.replace(':', '-')}.json"
+            snapshot_path = (
+                self.snapshots_dir / f"db_footprint_{captured_at.replace(':', '-')}.json"
+            )
             with open(snapshot_path, "w") as f:
                 json.dump(contract, f, indent=2)
 

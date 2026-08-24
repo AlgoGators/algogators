@@ -51,10 +51,10 @@ class ReportGenerator:
         return flat
 
     def collect_metrics(self) -> dict[str, dict[str, Any]]:
-        """Collect all metrics from contract JSON files.
+        """Collect all metrics from contract JSON files per spec §3.
 
         Returns:
-            Dict mapping 'repo.probe.metric_id' -> {value, unit, timestamp, ...}
+            Dict mapping 'repo.probe.metric_id' -> {value, unit, captured_at, ...}
         """
         metrics = {}
 
@@ -68,8 +68,8 @@ class ReportGenerator:
                         contract = json.load(f)
 
                     repo = contract.get("repo", "unknown")
-                    probe = contract.get("probe_name", "unknown")
-                    timestamp = contract.get("timestamp")
+                    probe = contract.get("probe", "unknown")
+                    captured_at = contract.get("captured_at")
 
                     for metric in contract.get("metrics", []):
                         metric_id = metric.get("id", "unknown")
@@ -78,8 +78,7 @@ class ReportGenerator:
                         metrics[key] = {
                             "value": metric.get("value"),
                             "unit": metric.get("unit"),
-                            "timestamp": timestamp,
-                            "status": metric.get("status"),
+                            "captured_at": captured_at,
                         }
 
                 except (json.JSONDecodeError, KeyError):
