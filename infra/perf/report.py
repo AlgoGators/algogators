@@ -86,11 +86,14 @@ class ReportGenerator:
 
         return metrics
 
-    def generate_report(self, output_dir: str | None = None) -> tuple[str, str]:
+    def generate_report(
+        self, output_dir: str | None = None, now: datetime | None = None
+    ) -> tuple[str, str]:
         """Generate report.json and report.md.
 
         Args:
             output_dir: Directory to write reports. Defaults to current directory.
+            now: Injected datetime for testing. Defaults to datetime.now().
 
         Returns:
             Tuple of (report_json_path, report_md_path).
@@ -100,9 +103,12 @@ class ReportGenerator:
 
         metrics = self.collect_metrics()
 
+        # Use injected datetime or current time
+        timestamp = (now or datetime.now()).isoformat()
+
         # Build report structure
         report = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": timestamp,
             "results": [],
             "summary": {
                 "total": 0,

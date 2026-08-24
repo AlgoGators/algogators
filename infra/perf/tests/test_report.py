@@ -142,73 +142,97 @@ action = "Check if growth rate is sustainable"
         fail_count = sum(1 for r in report["results"] if r["status"] == "FAIL")
         assert fail_count > 0
 
-    def test_golden_file_byte_identical(self, tmp_path: Path) -> None:
-        """Golden file test: verify report structure and content matches expected format."""
-        fixtures_dir = tmp_path / "fixtures"
-        fixtures_dir.mkdir()
+    def test_golden_file_byte_identical(self) -> None:
+        """Golden file test: verify report.md is byte-for-byte identical to committed fixture.
 
-        # Create fixed input contracts with exact known values
-        contracts_dir = fixtures_dir / "contracts"
-        contracts_dir.mkdir()
+        Uses committed fixture files under tests/fixtures/golden_report/inputs/
+        with a fixed injected timestamp to ensure deterministic output.
+        """
+        from datetime import datetime
 
-        db_contract = {
-            "suite": "perf",
-            "repo": "algogators",
-            "probe": "db_footprint",
-            "captured_at": "2024-01-01T00:00:00+00:00",
-            "environment": {"host": "test-host", "commit": "abc123def456"},
-            "metrics": [
-                {"id": "table_bytes_test", "value": 1000000, "unit": "bytes"},
-                {"id": "raw_cleaned_ratio", "value": 1.2, "unit": "ratio"},
-            ],
-        }
+        # Path to committed fixture files
+        fixtures_dir = Path(__file__).parent / "fixtures" / "golden_report"
+        inputs_dir = fixtures_dir / "inputs"
+        expected_report_path = fixtures_dir / "expected_report.md"
 
-        with open(contracts_dir / "db_footprint.json", "w") as f:
-            json.dump(db_contract, f)
+        assert inputs_dir.exists(), f"Fixture inputs directory missing: {inputs_dir}"
+        assert expected_report_path.exists(), (
+            f"Expected report fixture missing: {expected_report_path}"
+        )
 
-        # Create fixed budgets.toml
-        budgets_path = fixtures_dir / "budgets.toml"
-        budgets_content = """
-[db_footprint.table_bytes_test]
-baseline = 500000
-threshold = 150
-action = "Investigate table growth"
+        # Generate report with fixed timestamp matching the golden file
+        fixed_time = datetime.fromisoformat("2024-06-15T12:30:45")
+        generator = ReportGenerator(
+            str(inputs_dir / "budgets.toml"),
+            [str(inputs_dir)],
+        )
 
-[db_footprint.raw_cleaned_ratio]
-baseline = "unset"
-threshold = 130
-action = "Monitor data quality"
-"""
-        budgets_path.write_text(budgets_content)
+        output_dir = fixtures_dir / "test_output"
+        output_dir.mkdir(exist_ok=True)
+        _, report_md_path = generator.generate_report(str(output_dir), now=fixed_time)
 
-        # Generate report
-        output_dir = fixtures_dir / "output"
-        output_dir.mkdir()
-        generator = ReportGenerator(str(budgets_path), [str(contracts_dir)])
-        _, report_md_path = generator.generate_report(str(output_dir))
-
-        # Read actual report
+        # Read both files
         with open(report_md_path) as f:
             actual_report = f.read()
 
-        # Verify golden structure (without timestamp which is dynamic)
-        expected_patterns = [
-            "# Performance Report",
-            "Generated:",  # timestamp is dynamic, just check it's there
-            "**Summary:** 2 metrics",
-            "(0 OK, 0 WARN, 1 FAIL, 1 NO_DATA)",  # raw_cleaned_ratio is NO_DATA because baseline is "unset"
-            "## Action Required (FAIL)",
-            "### db_footprint.table_bytes_test",
-            "Status: **FAIL**",
-            "Value: 1000000 bytes",
-            "**Action:** Investigate table growth",
-            "## All Metrics",
-            "| Metric | Status | Value | Baseline | Threshold |",
-            "| db_footprint.raw_cleaned_ratio | NO_DATA",  # NO_DATA when baseline is unset
-        ]
+        with open(expected_report_path) as f:
+            expected_report = f.read()
 
-        for pattern in expected_patterns:
-            assert pattern in actual_report, f"Expected pattern '{pattern}' not found in report"
+        # Byte-for-byte comparison (no substring checks, no patterns)
+        assert actual_report == expected_report, (
+            f"Report content does not match golden file.\n"
+            f"Expected:\n{repr(expected_report)}\n\n"
+            f"Actual:\n{repr(actual_report)}"
+        )
+
+    def test_golden_file_json_structure(self) -> None:
+        """Test that report.json is valid and has expected structure.
+
+        Uses committed fixture files and validates the machine-readable output
+        without exact byte comparison (JSON key order is not guaranteed).
+        """
+        from datetime import datetime
+
+        # Path to committed fixture files
+        fixtures_dir = Path(__file__).parent / "fixtures" / "golden_report"
+        inputs_dir = fixtures_dir / "inputs"
+
+        # Generate report with fixed timestamp
+        fixed_time = datetime.fromisoformat("2024-06-15T12:30:45")
+        generator = ReportGenerator(
+            str(inputs_dir / "budgets.toml"),
+            [str(inputs_dir)],
+        )
+
+        output_dir = fixtures_dir / "test_output"
+        output_dir.mkdir(exist_ok=True)
+        report_json_path, _ = generator.generate_report(str(output_dir), now=fixed_time)
+
+        # Parse and validate JSON structure
+        with open(report_json_path) as f:
+            report = json.load(f)
+
+        # Verify structure
+        assert "timestamp" in report
+        assert report["timestamp"] == "2024-06-15T12:30:45"
+        assert "results" in report
+        assert "summary" in report
+
+        # Verify summary counts
+        assert report["summary"]["total"] == 2
+        assert report["summary"]["ok"] == 0
+        assert report["summary"]["warn"] == 0
+        assert report["summary"]["fail"] == 1
+        assert report["summary"]["no_data"] == 1
+
+        # Verify results have expected keys
+        results_by_key = {r["key"]: r for r in report["results"]}
+        assert "db_footprint.table_bytes_test" in results_by_key
+        assert "db_footprint.raw_cleaned_ratio" in results_by_key
+
+        # Verify statuses
+        assert results_by_key["db_footprint.table_bytes_test"]["status"] == "FAIL"
+        assert results_by_key["db_footprint.raw_cleaned_ratio"]["status"] == "NO_DATA"
 
     def test_no_results_directories(self, sample_budgets: Path, tmp_path: Path) -> None:
         """Test report generation when no results directories exist."""
