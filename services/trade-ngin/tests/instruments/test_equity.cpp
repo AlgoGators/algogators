@@ -17,7 +17,6 @@ EquitySpec make_spec() {
     s.commission_per_share = 0.005;
     s.is_etf = false;
     s.is_marginable = true;
-    s.margin_requirement = 0.5;
     s.sector = "Technology";
     s.industry = "Software";
     s.trading_hours = "09:30-16:00";
@@ -39,7 +38,9 @@ TEST_F(EquityInstrumentTest, ConstructorAndAccessors) {
     EXPECT_DOUBLE_EQ(eq.get_tick_size(), 0.01);
     EXPECT_DOUBLE_EQ(eq.get_commission_per_contract(), 0.005 * 100.0);
     EXPECT_DOUBLE_EQ(eq.get_point_value(), 1.0);
-    EXPECT_DOUBLE_EQ(eq.get_margin_requirement(), 0.5);
+    // Legacy no-arg margin is a 0.0 sentinel post account-mode overhaul;
+    // real coverage is in test_equity_margin_cash_regt.cpp.
+    EXPECT_DOUBLE_EQ(eq.get_margin_requirement(), 0.0);
     EXPECT_EQ(eq.get_trading_hours(), "09:30-16:00");
     EXPECT_DOUBLE_EQ(eq.get_lot_size(), 100.0);
     EXPECT_FALSE(eq.is_etf());

@@ -12,6 +12,8 @@ set(TEST_SOURCES
     core/test_run_id_generator.cpp
     core/test_config_loader.cpp
     core/test_config_manager_extended.cpp
+    core/test_holiday_lookback_extended_closure.cpp
+    core/test_holiday_path_resolution.cpp
     data/test_db_utils.cpp
     data/test_postgres_database.cpp
     data/test_database_pooling.cpp
@@ -20,12 +22,24 @@ set(TEST_SOURCES
     data/test_credential_store.cpp
     data/test_credential_store_extended.cpp
     data/test_conversion_utils.cpp
+    data/test_conversion_utils_safe_get.cpp
+    data/test_utc_date_contract.cpp
+    data/test_postgres_param_safety.cpp
+    data/test_bar_close_uses_adjusted.cpp
+    data/test_market_data_utils.cpp
     order/test_order_manager.cpp
     order/test_utils.cpp
     instruments/test_futures.cpp
     instruments/test_equity.cpp
     instruments/test_option.cpp
     instruments/test_instrument_registry.cpp
+    instruments/test_equity_audit_status.cpp
+    instruments/test_equity_instrument_holiday_check_wired.cpp
+    instruments/test_equity_leverage_guardrail.cpp
+    instruments/test_equity_margin_cash_regt.cpp
+    instruments/test_equity_market_hours_exchange.cpp
+    instruments/test_exchange_json_wireup.cpp
+    instruments/test_futures_margin_overload.cpp
     risk/test_risk_manager.cpp
     risk/test_risk_manager_extended.cpp
     optimization/test_dynamic_optimizer.cpp
@@ -33,6 +47,10 @@ set(TEST_SOURCES
     backtesting/test_transaction_cost_analysis.cpp
     transaction_cost/test_spread_model.cpp
     transaction_cost/test_impact_model.cpp
+    transaction_cost/test_adv_classifier_wireup.cpp
+    transaction_cost/test_equity_borrow_fees.cpp
+    transaction_cost/test_unknown_equity_costs_dispatch.cpp
+    backtest/test_pnl_accounting_branch.cpp
     backtesting/test_slippage_model.cpp
     backtesting/test_backtest_execution_manager.cpp
     backtesting/test_backtest_price_manager.cpp
@@ -59,11 +77,24 @@ set(TEST_SOURCES
     live/test_live_pnl_manager.cpp
     live/test_live_data_loader.cpp
     live/test_csv_exporter.cpp
+    live/test_corp_actions_applier.cpp
+    live/test_corp_actions_audit_log.cpp
+    live/test_corp_actions_long_hold_total_return.cpp
+    live/test_corp_actions_ultrareview_fixes.cpp
+    live/test_audit_log_cumulative_dividend.cpp
+    live/test_live_metrics_includes_dividend_income.cpp
+    live/test_daily_pnl_identity.cpp
     strategy/test_base_strategy.cpp
     strategy/test_trend_following.cpp
     strategy/test_regime_detector.cpp
     strategy/test_trend_following_fast.cpp
     strategy/test_trend_following_slow.cpp
+    strategy/test_mean_reversion_backtest.cpp
+    strategy/test_equity_backtest_db_validation.cpp
+    strategy/test_equity_pnl_accounting.cpp
+    strategy/test_live_bt_signal_consistency.cpp
+    strategy/test_volatility_size_1_nan_guard.cpp
+    strategy/test_stale_unrealized_pnl_zero_avg_price.cpp
     statistics/test_normalizer.cpp
     statistics/test_pca.cpp
     statistics/test_adf.cpp
