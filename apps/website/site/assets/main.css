@@ -142,10 +142,15 @@ main, header, footer { position: relative; z-index: 1; }
    directly above a dark footer forms one seamless mass and reads as chrome,
    so the band that ends a page gets its own surface plus a brand rule. */
 .closer {
-  background: var(--white);
+  background: var(--paper);
   border-top: 2px solid var(--orange);
   text-align: center;
 }
+
+/* The Director is the one content section that closes a page, so it needs a
+   break from the roster above without borrowing the closer's brand rule. */
+.section-break { border-top: 1px solid var(--line-soft); }
+.section-break > .wrap { position: relative; }
 
 /* Deadline callout. The closing date is the most time-critical thing on the
    site; as a bare line of 13px mono it read as a caption. */
@@ -698,7 +703,7 @@ form.sent + .form-success { display: block; }
 }
 .process-num {
   font-family: var(--font-display); font-weight: 800; font-stretch: 120%;
-  font-size: clamp(64px, 9vw, 150px); line-height: 1;
+  font-size: clamp(44px, 5.6vw, 96px); line-height: 1;
   color: transparent; -webkit-text-stroke: 1.5px rgba(255,255,255,.22);
   position: absolute; top: 18px; right: 24px;
   pointer-events: none;
@@ -706,8 +711,10 @@ form.sent + .form-success { display: block; }
 .process-copy .label { margin-bottom: 14px; }
 .process-copy h3 {
   font-family: var(--font-display); font-weight: 800; font-stretch: 118%;
-  font-size: clamp(30px, 4.4vw, 58px); text-transform: uppercase;
+  font-size: clamp(26px, 3.5vw, 48px); text-transform: uppercase;
   color: #fff; letter-spacing: -.015em; margin-bottom: 20px;
+  /* the longest title, DEVELOPMENT, must clear the watermark's column */
+  padding-right: clamp(64px, 8vw, 130px);
 }
 .process-copy p { font-size: 15px; line-height: 1.85; color: var(--muted-d); max-width: 480px; }
 .process-img { position: relative; overflow: hidden; min-height: 320px; background: var(--ink-2); }
