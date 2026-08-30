@@ -16,7 +16,9 @@ export function readRoster(siteDir = SITE) {
   for (const chunk of html.split(/<h2>/).slice(1)) {
     const title = chunk.slice(0, chunk.indexOf('</h2>')).trim();
     const names = [...chunk.matchAll(/<p class="nm">([^<]+)<\/p>/g)].map((m) => m[1].trim());
-    sections.push({ title, names });
+    // A heading with no member tiles under it is not a roster section — the
+    // Director block uses the same .dept-head treatment but lists nobody.
+    if (names.length) sections.push({ title, names });
   }
   return sections;
 }

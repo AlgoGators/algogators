@@ -142,25 +142,21 @@ main, header, footer { position: relative; z-index: 1; }
    directly above a dark footer forms one seamless mass and reads as chrome,
    so the band that ends a page gets its own surface plus a brand rule. */
 .closer {
-  background: var(--paper);
+  /* No background: an opaque fill would paint over .bg-grid and the
+     graph-paper print would visibly stop at the band. */
   border-top: 2px solid var(--orange);
   text-align: center;
 }
 
-/* The Director is the one content section that closes a page, so it needs a
-   break from the roster above without borrowing the closer's brand rule. */
-.section-break { border-top: 1px solid var(--line-soft); }
-.section-break > .wrap { position: relative; }
+/* The Director closes who-we-are, so he takes the same rule. */
+.section-break { border-top: 2px solid var(--orange); }
 
 /* Deadline callout. The closing date is the most time-critical thing on the
    site; as a bare line of 13px mono it read as a caption. */
 .deadline-notice {
-  font-family: var(--font-mono); font-size: 14px; font-weight: 600;
+  font-family: var(--font-mono); font-size: 15px; font-weight: 700;
   letter-spacing: .1em; text-transform: uppercase; color: var(--orange);
-  background: rgba(255, 92, 0, .07);
-  border: 1px solid rgba(255, 92, 0, .28);
-  border-left: 3px solid var(--orange);
-  padding: 16px 18px; margin-top: 24px; line-height: 1.7;
+  margin-top: 28px; line-height: 1.8;
 }
 .deadline-notice b { color: var(--ink); font-weight: 700; }
 
@@ -317,7 +313,7 @@ body.menu-open .nav-burger span { background: #fff; }
   display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
   margin-bottom: clamp(24px, 4vh, 48px);
 }
-.hero-title { font-size: clamp(36px, 10.8vw, 170px); white-space: nowrap; }
+.hero-title { font-size: clamp(36px, 9.6vw, 150px); white-space: nowrap; }
 .hero-title > span { display: block; }
 
 .hero-foot {
