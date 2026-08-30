@@ -116,3 +116,17 @@
     el.textContent = new Date().getFullYear();
   });
 })();
+
+
+/* ── Application window ───────────────────────────────────────────────────
+   Elements tagged [data-when="open"|"closed"] flip on the deadline without a
+   redeploy. The closed variants ship `hidden`, so a visitor with JS disabled
+   sees the open copy rather than both, and there is no flash on load.
+   Reads the visitor's clock — fine for an application deadline.            */
+(function applicationWindow() {
+  var DEADLINE = Date.parse('2026-09-05T04:00:00Z'); // Sept 4, midnight ET
+  var open = Date.now() < DEADLINE;
+  document.querySelectorAll('[data-when]').forEach(function (el) {
+    el.hidden = (el.dataset.when === 'open') !== open;
+  });
+})();

@@ -133,6 +133,27 @@ main, header, footer { position: relative; z-index: 1; }
 .section.dark .label   { color: var(--muted-d); }
 .section.dark .lede    { color: var(--muted-d); }
 
+/* Closing band. Ink belongs to the footer alone: a dark section sitting
+   directly above a dark footer forms one seamless mass and reads as chrome,
+   so the band that ends a page gets its own surface plus a brand rule. */
+.closer {
+  background: var(--white);
+  border-top: 2px solid var(--orange);
+  text-align: center;
+}
+
+/* Deadline callout. The closing date is the most time-critical thing on the
+   site; as a bare line of 13px mono it read as a caption. */
+.deadline-notice {
+  font-family: var(--font-mono); font-size: 14px; font-weight: 600;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--orange);
+  background: rgba(255, 92, 0, .07);
+  border: 1px solid rgba(255, 92, 0, .28);
+  border-left: 3px solid var(--orange);
+  padding: 16px 18px; margin-top: 24px; line-height: 1.7;
+}
+.deadline-notice b { color: var(--ink); font-weight: 700; }
+
 .section-head {
   display: flex; align-items: baseline; justify-content: space-between;
   gap: 24px; flex-wrap: wrap;
@@ -509,11 +530,10 @@ body.menu-open .nav-burger span { background: #fff; }
 }
 .team-grid img {
   width: 100%; height: 100%; object-fit: cover; object-position: top;
-  filter: grayscale(1) contrast(1.05);
   transform: scale(1.01);
-  transition: filter .6s var(--ease-out), transform .6s var(--ease-out);
+  transition: transform .6s var(--ease-out);
 }
-.team-grid .ph:hover img { filter: grayscale(0); transform: scale(1.06); }
+.team-grid .ph:hover img { transform: scale(1.06); }
 .team-grid .ph::after {
   content: ''; position: absolute; inset: 0;
   background: linear-gradient(to top, rgba(255,92,0,.35), transparent 55%);
@@ -689,10 +709,10 @@ form.sent + .form-success { display: block; }
 .process-img img {
   position: absolute; inset: 0; width: 100%; height: 100%;
   object-fit: cover;
-  filter: grayscale(1) brightness(.62) contrast(1.1);
+  filter: brightness(.92) contrast(1.02);
   transition: filter .7s var(--ease-out), transform .7s var(--ease-out);
 }
-.process-row:hover .process-img img { filter: grayscale(0) brightness(.8); transform: scale(1.04); }.process-img::after {
+.process-row:hover .process-img img { filter: brightness(1) contrast(1); transform: scale(1.04); }.process-img::after {
   content: ''; position: absolute; inset: 0;
   background: linear-gradient(125deg, rgba(255,92,0,.28), transparent 55%);
   mix-blend-mode: multiply; pointer-events: none;
@@ -769,20 +789,9 @@ form.sent + .form-success { display: block; }
 
 .site-footer {
   background: var(--ink); color: var(--muted-d);
-  padding: clamp(60px, 8vw, 100px) 0 0;
+  padding: clamp(100px, 14vw, 180px) 0 0;
   position: relative; overflow: hidden;
 }
-.footer-mark {
-  font-family: var(--font-display); font-weight: 800; font-stretch: 120%;
-  font-size: clamp(48px, 10.5vw, 170px); line-height: .9;
-  text-transform: uppercase; letter-spacing: -.02em;
-  color: transparent; -webkit-text-stroke: 1.5px rgba(255,255,255,.16);
-  white-space: nowrap; user-select: none;
-  padding-left: clamp(20px, 4vw, 48px);
-  margin-bottom: clamp(40px, 6vw, 80px);
-  transition: -webkit-text-stroke-color .5s;
-}
-.footer-mark:hover { -webkit-text-stroke-color: var(--orange); }
 .footer-cols {
   display: grid; grid-template-columns: 2fr 1fr 1fr; gap: clamp(32px, 5vw, 80px);
   padding-bottom: clamp(40px, 5vw, 64px);

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>Apply Now — AlgoGators Investment Fund</title>
-  <meta name="description" content="Apply to AlgoGators — the University of Florida's student-run quantitative investment fund. Applications are now open." />
+  <meta name="description" content="Apply to AlgoGators — the University of Florida's student-run quantitative investment fund. Analyst and Investor Relations tracks, open to all majors." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Archivo:ital,wdth,wght@0,62..125,100..900;1,62..125,100..900&family=Barlow:wght@700;800&family=Poppins:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -51,7 +51,9 @@
   <div class="rings" style="width:560px;height:560px;top:-200px;left:50%;transform:translateX(-50%)" aria-hidden="true"></div>
   <div class="rings" style="width:300px;height:300px;bottom:-120px;right:-70px" aria-hidden="true"></div>
   <div class="wrap" style="text-align:center;width:100%">
-    <p class="label rise d1" style="color:var(--muted-d);margin-bottom:22px"><span class="idx"></span>Recruiting</p>
+    <p class="label rise d1" style="color:var(--muted-d);margin-bottom:22px"><span class="idx">△</span><span
+      data-when="open">Closing September 4 · Midnight</span><span data-when="closed" hidden>Applications Closed for
+      Fall 2026</span></p>
     <h1 class="display rise d2" style="font-size:clamp(60px,14vw,200px)">Apply <span class="orange">Now</span></h1>
     <p class="rise d3" style="font-family:var(--font-mono);font-size:13px;letter-spacing:.22em;text-transform:uppercase;color:var(--muted-d);margin-top:32px">
       ▼ How we pick the very best ▼
@@ -62,10 +64,12 @@
 <!-- ═══════════════ TICKER ═══════════════ -->
 <div class="ticker" style="border-bottom:1px solid var(--line-d)" aria-hidden="true">
   <div class="ticker-track">
-    <span><b>Applications are now open</b></span>
+    <span data-when="open">Applications close <b>September 4 · Midnight</b></span>
+    <span data-when="closed" hidden>Applications for Fall 2026 are <b>closed</b></span>
     <span>All majors welcome</span>
     <span>Analyst &amp; Investor Relations tracks</span>
-    <span><b>Applications are now open</b></span>
+    <span data-when="open">Applications close <b>September 4 · Midnight</b></span>
+    <span data-when="closed" hidden>Applications for Fall 2026 are <b>closed</b></span>
     <span>All majors welcome</span>
     <span>Analyst &amp; Investor Relations tracks</span>
   </div>
@@ -85,8 +89,10 @@
           applications. For more insight on the recruitment process, see our
           <span class="hl">application guide</span> below.
         </p>
-        <p style="font-family:var(--font-mono);font-size:13px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--orange);margin-top:24px">
-          △ Applications are now open — closing September 4th at midnight
+        <p class="deadline-notice">
+          <span data-when="open">△ Applications are now open — closing <b>September 4th at midnight</b></span>
+          <span data-when="closed" hidden>△ Applications for Fall 2026 are closed — come to an open meeting, every
+            other Friday</span>
         </p>
       </div>
     </div>
@@ -107,13 +113,13 @@
       <a class="index-row" data-reveal href="https://forms.cloud.microsoft/r/BzxLGu7ZkB" target="_blank" rel="noopener">
         <span class="no">03</span>
         <span class="ttl">Analyst Application</span>
-        <span class="meta"><span class="auth">Quant Research · Quant Development · Quant Trading</span><span class="tag">Form</span></span>
+        <span class="meta"><span class="auth">Quant Research · Quant Development · Quant Trading</span><span class="tag" data-when="open">Form</span><span class="tag" data-when="closed" hidden>Closed</span></span>
         <span class="go">↗</span>
       </a>
       <a class="index-row" data-reveal href="https://forms.cloud.microsoft/r/Qh4TTrv6Nz" target="_blank" rel="noopener">
         <span class="no">04</span>
         <span class="ttl">Investor Relations Application</span>
-        <span class="meta"><span class="auth">Outreach · Communications · Fundraising</span><span class="tag">Form</span></span>
+        <span class="meta"><span class="auth">Outreach · Communications · Fundraising</span><span class="tag" data-when="open">Form</span><span class="tag" data-when="closed" hidden>Closed</span></span>
         <span class="go">↗</span>
       </a>
     </div>
@@ -128,7 +134,6 @@
 </main>
 
 <footer class="site-footer">
-  <div class="footer-mark" aria-hidden="true">AlgoGators</div>
   <div class="wrap">
     <div class="footer-cols">
       <div>
