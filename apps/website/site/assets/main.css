@@ -4,6 +4,11 @@
    graph-paper grid, market-ticker motion, orange #FF5C00 on ink.
 ════════════════════════════════════════════════════════════ */
 
+/* [hidden] is display:none in the UA sheet, which any class selector that
+   sets display beats — .ticker-track span did exactly that, so both halves of
+   an open/closed pair rendered at once. */
+[hidden] { display: none !important; }
+
 :root {
   --orange:       #FF5C00;
   --orange-soft:  #FF7A33;
@@ -789,7 +794,7 @@ form.sent + .form-success { display: block; }
 
 .site-footer {
   background: var(--ink); color: var(--muted-d);
-  padding: clamp(100px, 14vw, 180px) 0 0;
+  padding: clamp(56px, 7vw, 88px) 0 0;
   position: relative; overflow: hidden;
 }
 .footer-cols {

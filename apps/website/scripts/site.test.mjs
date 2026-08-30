@@ -109,3 +109,21 @@ test('every headshot on disk is referenced by a page', () => {
   const orphans = readdirSync(join(SITE, 'Headshots')).filter((f) => !html.includes(f));
   assert.deepEqual(orphans, [], `unreferenced headshots ship to production: ${orphans}`);
 });
+
+test('the stylesheet forces [hidden] to win over class selectors', () => {
+  // [hidden] is only display:none in the UA sheet, so any class selector that
+  // sets display outranks it. .ticker-track span did, and both halves of an
+  // open/closed pair rendered at once.
+  const css = readFileSync(join(SITE, 'assets', 'main.css'), 'utf8');
+  assert.match(
+    css,
+    /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/,
+    'main.css must force [hidden] to display:none !important',
+  );
+});
+
+test('no class selector silently re-displays a hidden element', () => {
+  const css = readFileSync(join(SITE, 'assets', 'main.css'), 'utf8');
+  const guard = css.indexOf('[hidden]');
+  assert.ok(guard !== -1 && guard < css.indexOf(':root'), '[hidden] guard should come first');
+});
