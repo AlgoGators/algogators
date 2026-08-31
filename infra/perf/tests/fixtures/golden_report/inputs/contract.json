@@ -1,0 +1,22 @@
+{
+  "suite": "perf",
+  "repo": "algogators",
+  "probe": "db_footprint",
+  "captured_at": "2024-01-01T00:00:00+00:00",
+  "environment": {
+    "host": "test-host",
+    "commit": "abc123def456"
+  },
+  "metrics": [
+    {
+      "id": "table_bytes_test",
+      "value": 1000000,
+      "unit": "bytes"
+    },
+    {
+      "id": "raw_cleaned_ratio",
+      "value": 1.2,
+      "unit": "ratio"
+    }
+  ]
+}
