@@ -102,11 +102,6 @@ _default-node-test path:
 contracts:
     uv run python platform/contracts/codegen/generate.py
 
-# Prove a member's SQL migrations apply twice cleanly on a throwaway Postgres
-# (needs Docker). Only members with a migrations/ folder define this recipe.
-migrate-idempotent path:
-    @just _dispatch "{{ path }}" migrate-idempotent
-
 # Verify every service's workflow path filters still match reality.
 check-paths:
     uv run python platform/ci/check_workflow_paths.py

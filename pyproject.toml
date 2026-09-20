@@ -50,12 +50,6 @@ dev = [
     # marketplace action means the task runner's version is in uv.lock like
     # everything else, and CI cannot drift from a developer's machine.
     "rust-just>=1.36",
-    # platform/db's people import (Forms .xlsx -> Postgres) and its tests. Kept
-    # out of platform-db's own dependencies so the config library stays light
-    # for the services that depend on it.
-    "openpyxl>=3.1.5,<4",
-    "psycopg2-binary>=2.9.10",
-    "tzdata>=2024.1",
 ]
 
 # ---------------------------------------------------------------------------
@@ -121,7 +115,6 @@ module = [
     "scipy.*",
     "pandas.*",
     "psycopg2.*",
-    "openpyxl.*",
     # SQLAlchemy 1.4 (pinned by data-ngin) predates py.typed.
     "sqlalchemy.*",
     "matplotlib.*",

@@ -176,15 +176,12 @@ source = { virtual = "." }
 dev = [
     { name = "httpx2" },
     { name = "mypy" },
-    { name = "openpyxl" },
-    { name = "psycopg2-binary" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pyyaml" },
     { name = "ruff" },
     { name = "rust-just" },
     { name = "types-pyyaml" },
-    { name = "tzdata" },
 ]
 
 [package.metadata]
@@ -193,15 +190,12 @@ dev = [
 dev = [
     { name = "httpx2", specifier = ">=0.1" },
     { name = "mypy", specifier = ">=1.18" },
-    { name = "openpyxl", specifier = ">=3.1.5,<4" },
-    { name = "psycopg2-binary", specifier = ">=2.9.10" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-cov", specifier = ">=6.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", specifier = ">=0.14" },
     { name = "rust-just", specifier = ">=1.36" },
     { name = "types-pyyaml", specifier = ">=6.0" },
-    { name = "tzdata", specifier = ">=2024.1" },
 ]
 
 [[package]]
