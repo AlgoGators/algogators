@@ -23,36 +23,6 @@ Cross-cutting database access for AlgoGators services. Two layers:
   credentials; swapping it in changes no call sites. Denials raise
   `AccessDeniedError`, a `PermissionError` subclass.
 
-* **Migrations** (`migrations/`) — plain SQL, applied by hand to the target
-  database (pgAdmin or `psql`), never by CI or a deploy. `001_people_schema.sql`
-  is the `people` schema: applicants, members, investors. Its design is in
-  `docs/people-schema-reference.md`; `just migrate-idempotent platform/db` (from
-  the repo root, needs Docker) proves every file applies twice cleanly and
-  passes the assertion script under `tests/sql/`.
-
-* **People import** (`platform_db.people_import`) — loads a Microsoft Forms
-  `.xlsx` export (one recruiting cycle, one track) and the member roster CSV
-  into the `people` schema, idempotently, one `import_batch` per run:
-
-  ```sh
-  # DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD in the environment (or --dsn)
-  uv run python -m platform_db.people_import applications       --workbook "Fall 2026 ... Analyst Application.xlsx" --track analyst       --cycle fall-2026 --sheet Submissions --dry-run
-  uv run python -m platform_db.people_import members --csv members.csv --dry-run
-  uv run python -m platform_db.people_import close-cycle --cycle fall-2026 --dry-run
-  ```
-
-  `--dry-run` runs every write and rolls back, printing what would change.
-  Applications create person / student / majors / attachments / application
-  rows and the ranked team preferences; a "Composite Score" sheet's Interview
-  Invite and Fund Invite columns set `stage` and `outcome`. The roster matches
-  members to people by email, marks their pending application accepted, and
-  records the team on `member_team`. `close-cycle`, run last, marks every
-  application of the cycle still pending as rejected. The roster CSV columns are
-  `first_name,last_name,email,team,is_leadership` with `team` a `people.team`
-  slug or blank. Needs openpyxl and psycopg2, which the workspace dev group
-  provides. Integration tests run when `PEOPLE_TEST_DSN` points at a database
-  with the schema applied; see `tests/test_people_import_db.py`.
-
 Lives under `platform/` rather than `libs/` because it is not a standalone
 library: it is workspace-internal coupling that more than one service depends
 on, and it is growing toward runtime access management. Consumed by
