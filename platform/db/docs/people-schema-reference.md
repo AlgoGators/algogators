@@ -3,8 +3,8 @@ title: The people schema — applicants, members, and investors
 type: reference
 owner: Quant Dev
 audience: New technical members (any team) working against the AlgoGators platform database
-last_reviewed: 2026-08-19
-review_by: 2027-08-19
+last_reviewed: 2026-09-20
+review_by: 2027-09-20
 tags: [people schema, applicant tracking, platform-db, postgres migration, roster, recruiting database]
 ---
 
@@ -17,9 +17,9 @@ is, and what the database will and will not let you write.
 
 **Applies to.** Anyone reading from or writing to the platform database — the applicant tracking
 system (ATS), the Excel round-trip tooling, the Microsoft Forms ingest, the website roster, or a
-one-off query. It describes the schema **as committed in `001_people_schema.sql`**, which has been
-proven to execute against a throwaway Postgres in CI but **has not been applied to any real
-database**. It does not describe the ATS application itself, the ingest scripts, or the market-data
+one-off query. It describes the schema **as committed in `platform/db/migrations/001_people_schema.sql`**,
+which is proven against a throwaway Postgres by `just migrate-idempotent` (Postgres 12 and 16)
+and is applied by hand to `new_algo_data`. It does not describe the ATS application itself, the ingest scripts, or the market-data
 schemas (`futures_data`, `equities_data`, `options_data`, `synthetic`) which live in
 `services/data-ngin` and have nothing to do with people.
 
@@ -28,10 +28,9 @@ schemas (`futures_data`, `equities_data`, `options_data`, `synthetic`) which liv
 - You can read SQL. You do not need to have written a Postgres migration before — the recurring
   patterns are glossed in [Patterns used throughout](#patterns-used-throughout).
 - Docker, to run the schema locally. Everything below can be checked with
-  `just test platform/db` from the repo root.
-- The schema lives at `platform/db/migrations/001_people_schema.sql` on branch
-  `feat/people-schema`. It is in `platform/db` rather than in a service because people are
-  shared plumbing, not one service's data.
+  `just migrate-idempotent platform/db` from the repo root.
+- The schema lives at `platform/db/migrations/001_people_schema.sql`. It is in `platform/db`
+  rather than in a service because people are shared plumbing, not one service's data.
 
 ## What this schema is for
 
@@ -57,7 +56,7 @@ gets much shorter.
 | **`deleted_at TIMESTAMPTZ`** | Nothing is hard-deleted by any automated path. "Deleting" sets this timestamp; restoring sets it back to `NULL`. | A real `DELETE` from an Excel upload is unrecoverable. A hard delete stays a deliberate manual act by a database owner. |
 | **Partial unique indexes** | A uniqueness rule written as `CREATE UNIQUE INDEX ... WHERE deleted_at IS NULL` — it applies only to live rows. | A plain `UNIQUE` would let a soft-deleted person keep owning their email address forever, so re-adding them would fail against a row the application cannot even see. |
 | **Composite foreign keys** | Some tables reference *two* columns of a parent at once, e.g. `member` references `student (person_id, id)`. | Two separate FKs would each be individually valid while the row as a whole is a lie — a member row naming person 7 and a student record belonging to person 19. |
-| **Generated columns** | Columns computed by the database from other columns and stored (`name_key`, `grad_sort`, `stage_rank`, `application_score.total`). They cannot be written to directly. | A derived value maintained by application code eventually disagrees with what it derives from. This makes that impossible. |
+| **Generated columns** | Columns computed by the database from other columns and stored (`name_key`, `grad_sort`, `stage_rank`). They cannot be written to directly. | A derived value maintained by application code eventually disagrees with what it derives from. This makes that impossible. |
 
 Two conventions worth naming:
 
@@ -67,7 +66,7 @@ Two conventions worth naming:
 
 ## The tables
 
-Fourteen tables, in dependency order — the order the migration must create them in, because
+Thirteen tables, in dependency order — the order the migration must create them in, because
 several foreign keys point forward.
 
 ### `people.team` — the lookup of teams
@@ -327,35 +326,12 @@ parent application, not edited independently.
   `member_team`, decided after acceptance. The two are allowed to disagree, and rank is never an
   entitlement.
 
-### `people.application_score` — the six-criterion rubric
+### No score table
 
-One consolidated grade per application. Six `SMALLINT NOT NULL` columns, each `BETWEEN 1 AND 10`:
-
-| Criterion | Judges |
-|---|---|
-| `economic_foundation` | Strength of the economic hypothesis underpinning the strategy. |
-| `innovation` | Creativity and distinctiveness versus established frameworks. |
-| `alpha_potential` | Evidence of excess returns and a clear implementation path. |
-| `risk_management` | Depth of the plan to mitigate identified risks. |
-| `liquidity_capital` | Whether the strategy is practical in real markets. |
-| `performance_evidence` | Rigour of the historical or alternative evidence offered. |
-
-Plus `notes TEXT`, `scored_at`, the standard `deleted_at`/`row_version`/`created_at`/`updated_at`,
-and `total` — a generated column summing the six, range 6–60. The full 1-3 / 4-6 / 7-9 / 10 band
-descriptions for each criterion are in the migration's own comments.
-
-- **Columns rather than a JSONB blob or a row-per-criterion table.** The rubric is a fixed published
-  list, which makes it schema, not data. Columns give each criterion its own `CHECK` (a blob cannot
-  reject `{"innovation": 47}` or a typo'd key), make `NOT NULL` mean "this grade is complete", let
-  `total` be generated, and make `AVG(alpha_potential)` across a cycle a plain query.
-- Row-per-criterion was rejected because it cannot enforce "all six present": nothing stops a set of
-  four rows, and `total` becomes a `SUM` that silently returns a smaller number instead of erroring.
-- **The cost, accepted knowingly:** a seventh criterion is a migration, and existing rows need a
-  decision about their value for it.
-- **There is no grader column.** Applications are graded by leadership as a body, not by an
-  individual, so a `scored_by` field would name one person for a decision several people made.
-  `change_log.actor` still records who entered the row, which is the part worth auditing.
-- One live score per application, via a partial unique index.
+Grades are **not stored in the database**. Leadership grades in the grading workbook, per
+grader, on its own scale, and the only thing the database records is the decision: `stage` and
+`outcome` on `application`. An earlier draft of this schema had a six-criterion
+`application_score` table; the migration now drops it if present. It never held data.
 
 ### `people.investor` — a deliberate stub
 
@@ -413,8 +389,8 @@ Two trigger functions, applied by a `DO` block so the migration stays re-runnabl
 
 | Trigger | Fires | On |
 |---|---|---|
-| `<table>_log_change` | `AFTER INSERT OR UPDATE` | 10 tables: `person`, `student`, `student_major`, `member`, `member_team`, `team`, `application`, `application_score`, `application_form`, `investor` |
-| `<table>_bump_version` | `BEFORE UPDATE` | Those 10 **plus `attachment`** — 11 in total |
+| `<table>_log_change` | `AFTER INSERT OR UPDATE` | 9 tables: `person`, `student`, `student_major`, `member`, `member_team`, `team`, `application`, `application_form`, `investor` |
+| `<table>_bump_version` | `BEFORE UPDATE` | Those 9 **plus `attachment`** — 10 in total |
 
 - **History is written by a trigger rather than by application code on purpose.** `updated_at` is
   app-maintained and a stale one is cosmetic; history is not. In application code, a `psql` session,
@@ -435,10 +411,17 @@ Two trigger functions, applied by a `DO` block so the migration stays re-runnabl
 
 ## Views and access
 
-**One view: `people.roster_public`.** Every live member — past and present — with `id`,
-`first_name`, `last_name`, current team name, `is_leadership`, `joined_on`, and an `active` flag
-derived from `left_on IS NULL`. Alumni appear with `active = false` rather than being filtered out.
-No email, no GPA, no resume, no date of birth.
+**Two views.**
+
+`people.roster_public` — every live member, past and present, with `id`, `first_name`,
+`last_name`, current team name, `is_leadership`, `joined_on`, and an `active` flag derived from
+`left_on IS NULL`. Alumni appear with `active = false` rather than being filtered out. No email, no
+GPA, no resume, no date of birth.
+
+`people.applicant_history` — one row per person who has ever applied: `times_applied`, the
+`cycles` they applied in, first and last `submitted_at`, `latest_outcome`, and `is_current_member`.
+The count is derived from live `application` rows rather than stored, so it cannot drift from the
+applications themselves. "How many times has this person applied" is a lookup here, not a column.
 
 Grants are wrapped in an existence check, because these roles do not exist in every target database
 yet and an unguarded `GRANT` to a missing role aborts the whole migration:
@@ -450,7 +433,7 @@ yet and an unguarded `GRANT` to a missing role aborts the whole migration:
 
 **Until those roles exist, the schema is reachable only by the database owner.** That is the
 intended interim state, and tightening it later is a second migration rather than a rewrite. GPA,
-resumes, rubric grades, and the dates of birth inside `raw_response` are the most sensitive rows in
+resumes, and the dates of birth inside `raw_response` are the most sensitive rows in
 the system, so this should not be left indefinitely.
 
 ## Out of scope
@@ -463,35 +446,36 @@ oversight.
 | **Automatic file fetching.** Nothing downloads resumes from SharePoint — that would need Graph API credentials against a personal university account. | `attachment.content` stays `NULL` until a human uploads the file; `source_url` is the cross-check that the right file was paired. |
 | **A date-of-birth column**, now or later. | It stays inside `raw_response`, optional, and no ingest step fails without it. |
 | **GPA collection.** Neither recruiting form asks. | `student.gpa` is nullable and hand-entered. |
-| **Per-grader scores.** | One consolidated `application_score` row; leadership grades as a body. |
+| **Scores of any kind.** | Grading stays in the workbook; the database records only `stage` and `outcome`. |
 | **Investor modelling.** | A stub table, pending a decision on individuals vs. entities. |
 | **Hard deletes by any automated path.** | Soft delete via `deleted_at`; a real erasure is a deliberate manual act, and has to reach `change_log` rows too. |
 | **Market data of any kind.** | `services/data-ngin` owns `futures_data`, `equities_data`, `options_data`, `synthetic`. |
 | **Application code** — the ATS, the ingest scripts, the Excel diff tooling. | This document covers the tables those things write to. |
-| **Any real database.** The migration has never been applied outside a throwaway container. | Running it for real is a deliberate, separate act. |
+| **Applying itself.** Nothing in CI or a deploy runs this migration. | Applying to a real database is a deliberate, by-hand act (pgAdmin or psql), recorded in [Verify it worked](#verify-it-worked). |
 
 ## Verify it worked
 
 From the repo root:
 
 ```sh
-just test platform/db
+just migrate-idempotent platform/db
 ```
 
-Brings up a throwaway Postgres in Docker, applies every migration in filename order, and runs the
-suite. Expect **68 passed** at 99% coverage. The tests assert the claims above that a reader would
-otherwise have to take on faith — that a partial index really does free an email on soft delete,
-that `row_version` really is bumped by the database rather than the caller, that a composite FK
-really does reject a member row pointing at another person's student record.
+Brings up a throwaway Postgres in Docker (`PG_IMAGE` overrides the default `postgres:16-alpine`),
+applies every migration in filename order **twice** — any error on the second pass is a real
+idempotency defect — and then runs `tests/sql/001_people_schema_check.sql`, which ends with
+`ALL CHECKS PASSED`. The checks assert the claims above that a reader would otherwise have to
+take on faith: that a partial index really does free an email on soft delete, that `row_version`
+really is bumped by the database rather than the caller, that a composite FK really does reject a
+member row pointing at another person's student record, that `applicant_history` counts two
+cycles as two applications. Needs Docker, and on Windows, Git Bash.
 
-To confirm the migration is safe to re-run, from `platform/db`:
+To apply for real, open the migration file in pgAdmin's Query Tool against the target database
+and execute it, or:
 
 ```sh
-just migrate-idempotent
+psql -U postgres -d new_algo_data -v ON_ERROR_STOP=1 -f 001_people_schema.sql
 ```
-
-Applies every file twice. Any error on the second pass is a real defect. Both recipes need Docker,
-and on Windows, Git Bash.
 
 ## Related
 
@@ -499,4 +483,4 @@ and on Windows, Git Bash.
   `libs/algosystem`.
 - `platform/db/migrations/001_people_schema.sql` — the schema itself. Every design decision
   summarized here is argued at length in its comments.
-- `platform/db/tests/test_people_schema.py` — the executable version of this document.
+- `platform/db/tests/sql/001_people_schema_check.sql` — the executable version of this document.
