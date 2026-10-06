@@ -4,8 +4,7 @@ import os
 from datetime import datetime, timedelta
 
 import pendulum
-from airflow.decorators import dag, task
-from airflow.operators.python import get_current_context
+from airflow.sdk import dag, get_current_context, task
 from data_ngin.application.orchestrator import Orchestrator
 from data_ngin.domain.services import StalenessChecker
 from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository

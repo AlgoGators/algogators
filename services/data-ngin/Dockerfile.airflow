@@ -3,7 +3,10 @@
 # it lives only here, in the deploy image.
 # Build context is the REPO ROOT:
 #   docker build -f services/data-ngin/Dockerfile.airflow .
-FROM apache/airflow:2.10.3-python3.11
+ARG AIRFLOW_VERSION=3.3.2
+FROM apache/airflow:${AIRFLOW_VERSION}-python3.11
+# Re-declared so the pip pin below can see it (FROM-scope ARGs end at FROM).
+ARG AIRFLOW_VERSION
 
 USER root
 RUN apt-get update && apt-get install -y \
@@ -16,10 +19,13 @@ USER airflow
 WORKDIR /opt/airflow
 
 # Install the service package (and its workspace lib) into Airflow's
-# environment so the DAGs can `import data_ngin`.
+# environment so the DAGs can `import data_ngin`. apache-airflow is pinned in
+# the same install so a service dependency can never silently up- or
+# downgrade Airflow away from the base image's version.
 COPY --chown=airflow:root platform/db /opt/deps/platform-db
 COPY --chown=airflow:root services/data-ngin /opt/deps/data-ngin
 RUN pip install --no-cache-dir \
+    "apache-airflow==${AIRFLOW_VERSION}" \
     /opt/deps/platform-db \
     /opt/deps/data-ngin
 
