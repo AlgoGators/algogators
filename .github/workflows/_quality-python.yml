@@ -44,8 +44,62 @@ permissions:
   contents: read
 
 jobs:
+  # The caller's path filter has to list uv.lock and the root pyproject.toml,
+  # so any lock change fans out to every Python member. Most lock changes touch
+  # one member's dependencies; this skips the matrix for the others. See
+  # platform/ci/quality_needed.py for the exact rule. It fails open: anything
+  # it cannot determine runs the matrix.
+  detect:
+    name: needs quality?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Pull requests check out the merge commit, whose first parent is
+          # the base branch tip, so HEAD^1..HEAD is exactly the PR's change.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Decide
+        id: decide
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          # In a called workflow, workflow_ref names the caller:
+          # owner/repo/.github/workflows/<file>.yml@ref
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          MEMBER_PATH: ${{ inputs.path }}
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          workflow="${WORKFLOW_REF#"$REPO"/}"
+          workflow="${workflow%@*}"
+          base=""
+          case "$EVENT" in
+            pull_request) base="$(git rev-parse HEAD^1)" ;;
+            push)
+              if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+                 && git fetch --no-tags --depth=1 "$SERVER/$REPO" "$BEFORE" 2>/dev/null; then
+                base="$BEFORE"
+              fi
+              ;;
+          esac
+          uv run --no-project --with pyyaml python platform/ci/quality_needed.py \
+            --workflow "$workflow" --member-path "$MEMBER_PATH" --base "$base" \
+            | tee -a "$GITHUB_OUTPUT"
+          grep '^reason=' "$GITHUB_OUTPUT" | tail -1 | sed 's/^reason=/### Quality matrix: /' >> "$GITHUB_STEP_SUMMARY"
+
   quality:
     name: py${{ matrix.python }} · ${{ matrix.os }}
+    needs: detect
+    if: ${{ needs.detect.outputs.run == 'true' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
