@@ -9,7 +9,7 @@ from data_ngin.ops.dag_failure_notifier import notify_dag_failure
 # continuously. pandas/databento/psycopg2 load inside the tasks, at run time
 # (see data_ngin.application.pipeline_tasks).
 
-CONFIG_NAME = "config.yaml"
+CONFIG_NAME = "config_tiingo.yaml"
 
 local_tz = pendulum.timezone("America/New_York")
 
@@ -25,7 +25,7 @@ default_args = {
 
 
 @task
-def run_pipeline() -> None:
+def run_tiingo_pipeline() -> None:
     dag_run = get_current_context().get("dag_run")
     conf = (dag_run.conf if dag_run else None) or {}
     pipeline_tasks.run_pipeline(CONFIG_NAME, run_type=conf.get("run_type", "scheduled"))
@@ -38,17 +38,19 @@ def staleness_check() -> None:
 
 
 @dag(
-    dag_id="data_pipeline_dag",
+    dag_id="tiingo_data_dag",
     default_args=default_args,
-    description="Daily Databento futures ingestion into algo_data",
-    schedule="0 7 * * *",  # 07:00 ET daily
+    description="Daily Tiingo equity OHLCV ingestion into new_algo_data",
+    schedule="15 7 * * 1-5",
+    # Weekdays 07:15 ET, staggered after the Databento runs to ease memory
+    # pressure on the t2.micro.
     start_date=datetime(2024, 12, 1, tzinfo=local_tz),
     catchup=False,
-    tags=["data_pipeline"],
+    tags=["tiingo", "equity", "data_pipeline"],
     max_active_runs=1,
 )
-def data_pipeline_dag():
-    run_pipeline() >> staleness_check()
+def tiingo_data_dag():
+    run_tiingo_pipeline() >> staleness_check()
 
 
-data_pipeline_dag()
+tiingo_data_dag()

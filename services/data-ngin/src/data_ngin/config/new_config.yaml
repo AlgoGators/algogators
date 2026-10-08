@@ -1,10 +1,11 @@
-# Databento futures pipeline (data_pipeline_dag) -> algo_data.futures_data.
+# Databento futures pipeline, full contract list (new_data_pipeline_dag)
+# -> new_algo_data.futures_data.
 loader:
   class: "CSVLoader"
   module: "loader.csv_loader"
   # Relative paths resolve against DATA_NGIN_CONTRACTS_DIR, else the
   # contracts/ directory packaged with data_ngin.
-  file_path: "contract_valid.csv"
+  file_path: "new_full_contracts.csv"
 
 inserter:
   class: "OhlcvRepository"
@@ -40,7 +41,7 @@ back_adjustment:
 
 # Database configuration. db_name selects the database (falls back to DB_NAME).
 database:
-  db_name: "algo_data"
+  db_name: "new_algo_data"
   target_schema: "futures_data"
   raw_table: "ohlcv_1d_raw"
   table: "ohlcv_1d"

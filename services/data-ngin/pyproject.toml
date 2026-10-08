@@ -20,6 +20,8 @@ dependencies = [
     "tzdata>=2024.2",
     "prometheus-fastapi-instrumentator>=7.0.0",
     "slowapi>=0.1.9",
+    "aiohttp>=3.9",
+    "requests>=2.32",
 ]
 # apache-airflow is deliberately NOT a dependency: only dags/ (a deploy-time
 # artifact for the Airflow image) imports it, and Airflow's pins conflict with

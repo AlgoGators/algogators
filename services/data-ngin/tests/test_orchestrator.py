@@ -203,9 +203,10 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
         mock_fetcher = MagicMock()
         mock_fetcher.retrieve = AsyncMock(
             return_value=MagicMock(
+                empty=False,
                 to_dict=MagicMock(
                     return_value=[{"time": "2023-01-01", "symbol": "ES", "open": 100.5}]
-                )
+                ),
             )
         )
         mock_cleaner = MagicMock()
@@ -238,6 +239,28 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
             table="ohlcv_1d",
         )
         mock_inserter.close.assert_called_once()
+
+    @patch("data_ngin.application.orchestrator.get_instance")
+    async def test_retrieve_and_process_data_skips_empty_fetch(
+        self, mock_get_instance: MagicMock
+    ) -> None:
+        """An empty fetch (holiday window, already up to date) is a success
+        that touches neither the cleaner nor the database."""
+        mock_fetcher = MagicMock()
+        mock_fetcher.retrieve = AsyncMock(return_value=MagicMock(empty=True))
+        mock_cleaner = MagicMock()
+        mock_inserter = MagicMock()
+        mock_get_instance.side_effect = [MagicMock(), mock_fetcher, mock_cleaner, mock_inserter]
+
+        orchestrator = Orchestrator(config=self.mock_config)
+        result = await orchestrator.retrieve_and_process_data(
+            {"dataSymbol": "ES", "instrumentType": "FUTURE"}, "2023-01-01", "2023-01-02"
+        )
+
+        self.assertTrue(result)
+        mock_cleaner.clean.assert_not_called()
+        mock_inserter.connect.assert_not_called()
+        mock_inserter.insert_data.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ from data_ngin.ops.dag_failure_notifier import notify_dag_failure
 # continuously. pandas/databento/psycopg2 load inside the tasks, at run time
 # (see data_ngin.application.pipeline_tasks).
 
-CONFIG_NAME = "config.yaml"
+CONFIG_NAME = "new_config.yaml"
 
 local_tz = pendulum.timezone("America/New_York")
 
@@ -38,17 +38,17 @@ def staleness_check() -> None:
 
 
 @dag(
-    dag_id="data_pipeline_dag",
+    dag_id="new_data_pipeline_dag",
     default_args=default_args,
-    description="Daily Databento futures ingestion into algo_data",
-    schedule="0 7 * * *",  # 07:00 ET daily
+    description="Daily Databento futures ingestion (full contract list) into new_algo_data",
+    schedule="5 7 * * *",  # 07:05 ET daily, after data_pipeline_dag
     start_date=datetime(2024, 12, 1, tzinfo=local_tz),
     catchup=False,
-    tags=["data_pipeline"],
+    tags=["new_data_pipeline"],
     max_active_runs=1,
 )
-def data_pipeline_dag():
+def new_data_pipeline_dag():
     run_pipeline() >> staleness_check()
 
 
-data_pipeline_dag()
+new_data_pipeline_dag()
