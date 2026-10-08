@@ -77,15 +77,17 @@ jobs:
         env:
           IMAGE_REF: ghcr.io/algogators/data-ngin-airflow@${{ needs.airflow-image.outputs.digest }}
         run: |
-          docker run --rm \
+          # -i: without it stdin is not attached and `python -` exits 0 on EOF.
+          docker run -i --rm \
             -e AIRFLOW__CORE__LOAD_EXAMPLES=False \
             -e AIRFLOW_OIDC_SECRET=ci-placeholder \
             "$IMAGE_REF" python - <<'EOF'
           import runpy
-          from airflow.models.dagbag import DagBag
+          # Airflow 3 location (airflow.models.dagbag is the 2.x path).
+          from airflow.dag_processing.dagbag import DagBag
 
           runpy.run_path("/opt/airflow/webserver_config.py")
-          bag = DagBag(dag_folder="/opt/airflow/dags", include_examples=False)
+          bag = DagBag(dag_folder="/opt/airflow/dags")
           for path, err in bag.import_errors.items():
               print(f"ERROR {path}: {err}")
           expected = {"data_pipeline_dag", "new_data_pipeline_dag", "tiingo_data_dag"}

@@ -55,4 +55,16 @@ cd ~/algogators/services/data-ngin/deploy
 ./deploy.sh "$(cat ~/.config/algogators/data-ngin.previous-image)"
 ```
 
-Or re-run an earlier successful run of the publish workflow.
+Or re-run an earlier successful run of the deploy workflow.
+
+**Back to the pre-monorepo stack** (only until it is retired): the first deploy
+replaced containers that ran from the standalone repo checkout in `~/data-ngin`,
+using the `data-ngin-airflow:local` image with the source bind-mounted. That
+image has no `data_ngin` code of its own, so do not pass it to `deploy.sh`.
+Instead:
+
+```bash
+cd ~/data-ngin && docker compose up -d
+sudo rm /etc/cron.d/algogators-data-ngin
+crontab -e   # restore: 0 2 * * 1,4 /home/ubuntu/pg_backup.sh >> /home/ubuntu/pg_backup.log 2>&1
+```
