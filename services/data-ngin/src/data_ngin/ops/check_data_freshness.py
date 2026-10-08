@@ -11,9 +11,11 @@ Exit status is 0 when every table is fresh, 1 when any table is stale, empty,
 or could not be queried (including an unreachable database). On failure it
 files or updates a `data-freshness` GitHub issue (see github_issues).
 
-The threshold defaults to 72 hours, not 24: OHLCV data does not update on
-weekends or holidays, so 24h would false-alarm every Saturday and Sunday after
-a normal Friday close. Override with STALE_THRESHOLD_HOURS.
+The threshold defaults to 96 hours, not 24: OHLCV data does not update on
+weekends or holidays. Rows are stamped at 00:00 UTC of the bar's day and the
+check runs at 13:00 UTC, so on a Monday the newest bar (Friday's) is already
+85 hours old. 96h covers a normal weekend; a Monday holiday can still alarm
+on the Tuesday. Override with STALE_THRESHOLD_HOURS.
 """
 
 import logging
@@ -115,7 +117,7 @@ def find_stale_tables(
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    threshold_hours = int(os.environ.get("STALE_THRESHOLD_HOURS", "72"))
+    threshold_hours = int(os.environ.get("STALE_THRESHOLD_HOURS", "96"))
 
     latest = get_latest_timestamps(monitored_tables())
     for table, ts in latest.items():
