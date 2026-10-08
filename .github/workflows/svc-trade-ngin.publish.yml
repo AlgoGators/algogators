@@ -53,4 +53,8 @@ jobs:
       digest: ${{ needs.image.outputs.digest }}
       remote-path: /opt/algogators/trade-ngin
       service-name: trade-ngin
+    # _deploy-ssh pulls the image on the host with this run's token.
+    permissions:
+      contents: read
+      packages: read
     secrets: inherit

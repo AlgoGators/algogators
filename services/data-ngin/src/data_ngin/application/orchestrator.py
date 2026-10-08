@@ -97,6 +97,17 @@ class Orchestrator:
                 batch_config=batch_config,
             )
 
+            if raw_data.empty:
+                # A holiday-only window, or a symbol already up to date. The
+                # cleaners reject empty frames, so skip rather than fail.
+                logging.warning(
+                    "No data returned for %s between %s and %s; skipping.",
+                    symbol["dataSymbol"],
+                    start_date,
+                    end_date,
+                )
+                return True
+
             # Connect to the database
             inserter.connect()
 

@@ -1,0 +1,91 @@
+# Production Airflow stack for data-ngin on the algocloud EC2 box.
+#
+# Nothing is built here. deploy.sh exports IMAGE_REF (ghcr.io/...@sha256:...),
+# the digest CI built, tested and pushed, and this file only pulls and runs it.
+# The DAGs, the data_ngin package and webserver_config.py are baked into the
+# image, so a source checkout on the box carries only this directory.
+#
+# Secrets come from DATA_NGIN_ENV_FILE, which lives OUTSIDE the checkout
+# (default /home/ubuntu/.config/algogators/data-ngin.env) so a `git pull` can
+# never touch it. It holds the DB_*, DATABENTO_API_KEY, TIINGO_API_KEY_*,
+# GITHUB_TOKEN and AIRFLOW_* values; see deploy/README.md.
+#
+# The project name, service names and container names match the stack that
+# ran from the standalone data-ngin repo, so the first deploy replaces those
+# containers in place and keeps the data-ngin_airflow_logs volume.
+name: data-ngin
+
+x-airflow-common: &airflow-common
+  image: ${IMAGE_REF:?IMAGE_REF is unset -- deploy.sh sets it to the CI-built digest}
+  env_file:
+    - ${DATA_NGIN_ENV_FILE:?DATA_NGIN_ENV_FILE is unset}
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_DB_CONN:?AIRFLOW_DB_CONN is unset}
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: "120"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    # t2.micro (1 GB RAM): every task is a separate Python process that imports
+    # pandas. Two at a time is what the box can hold next to trade-ngin.
+    AIRFLOW__CORE__PARALLELISM: "2"
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "1"
+    # Keep the FAB auth manager (Airflow 3 defaults to the dev-only simple
+    # one) so existing users carry over and Dex OIDC works.
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    # Airflow 3 task processes report back through the API server, not the DB.
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-apiserver:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?AIRFLOW_JWT_SECRET is unset}
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY:?AIRFLOW_SECRET_KEY is unset}
+    AIRFLOW__API__EXPOSE_CONFIG: "non-sensitive-only"
+    # Public URL, used for login redirects and links.
+    AIRFLOW__API__BASE_URL: ${AIRFLOW_BASE_URL:-http://localhost:8080}
+    AIRFLOW_LOGIN: ${AIRFLOW_LOGIN:-dex}
+    # Trust X-Forwarded-* only from the nginx reverse proxy on the monitoring
+    # box, so OAuth callbacks are built as https://airflow.algogators.com/...
+    FORWARDED_ALLOW_IPS: ${AIRFLOW_PROXY_IPS:-127.0.0.1}
+    # Issues for failed DAG runs and stale tables are filed here.
+    GITHUB_REPO: AlgoGators/algogators
+  volumes:
+    - airflow_logs:/opt/airflow/logs
+
+services:
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    command: >
+      bash -c "airflow db migrate &&
+               airflow connections create-default-connections"
+
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: airflow-apiserver
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    command: ["airflow", "api-server", "--proxy-headers"]
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    command: ["airflow", "scheduler"]
+
+  # Airflow 3 parses DAG files in its own process; the scheduler no longer does.
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: airflow-dag-processor
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    command: ["airflow", "dag-processor"]
+
+volumes:
+  airflow_logs:

@@ -14,9 +14,11 @@ on:
   workflow_call:
     inputs:
       environment:
-        description: GitHub Environment holding the host secrets and any required reviewers.
+        description: >
+          GitHub Environment holding the host secrets and any required
+          reviewers. Empty uses the repository-level SSH_* secrets.
         type: string
-        required: true
+        default: ''
       image:
         description: Image name without registry, e.g. algogators/data-ngin
         type: string
@@ -26,9 +28,23 @@ on:
         type: string
         required: true
       remote-path:
-        description: Directory on the host holding the compose file.
+        description: >
+          Directory on the host holding the compose file. With deploy-script,
+          the path of a sparse checkout of this repo that is cloned on first
+          use and fast-forwarded to the commit being deployed.
         type: string
         required: true
+      deploy-script:
+        description: >
+          Repo-relative script to run (with the image ref as its argument)
+          from the checkout at remote-path, instead of the built-in compose
+          pull/up. The script, not this workflow, then owns the roll.
+        type: string
+        default: ''
+      sparse-paths:
+        description: Space-separated paths kept in the deploy-script checkout.
+        type: string
+        default: ''
       compose-file:
         type: string
         default: docker-compose.prod.yml
@@ -53,6 +69,8 @@ on:
 
 permissions:
   contents: read
+  # Pull the image from GHCR on the host with this run's token.
+  packages: read
 
 jobs:
   deploy:
@@ -67,14 +85,32 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
-          command_timeout: 20m
-          envs: IMAGE_REF,REMOTE_PATH,COMPOSE_FILE,SERVICE_NAME,GHCR_ACTOR,GHCR_TOKEN
+          command_timeout: ${{ inputs.timeout-minutes }}m
+          envs: IMAGE_REF,REMOTE_PATH,COMPOSE_FILE,SERVICE_NAME,GHCR_ACTOR,GHCR_TOKEN,DEPLOY_SCRIPT,SPARSE_PATHS,REPO_URL,DEPLOY_REF,DEPLOY_SHA
           script_stop: true
           script: |
             set -euo pipefail
-            cd "$REMOTE_PATH"
 
             echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_ACTOR" --password-stdin
+
+            if [ -n "$DEPLOY_SCRIPT" ]; then
+              # git-pull deploy: the checkout carries the compose file, cron
+              # jobs and deploy script; the image carries the code.
+              if [ ! -d "$REMOTE_PATH/.git" ]; then
+                git clone --filter=blob:none --no-checkout --branch "$DEPLOY_REF" "$REPO_URL" "$REMOTE_PATH"
+                git -C "$REMOTE_PATH" sparse-checkout set $SPARSE_PATHS
+              fi
+              cd "$REMOTE_PATH"
+              git fetch origin "$DEPLOY_REF"
+              git checkout -q "$DEPLOY_REF"
+              # Exactly the commit CI built, never a newer push that raced it.
+              git merge --ff-only "$DEPLOY_SHA"
+              trap 'docker logout ghcr.io >/dev/null' EXIT
+              bash "$DEPLOY_SCRIPT" "$IMAGE_REF"
+              exit 0
+            fi
+
+            cd "$REMOTE_PATH"
 
             # Record what is running now, so a rollback does not need archaeology.
             docker compose -f "$COMPOSE_FILE" config --images > .previous-images || true
@@ -92,6 +128,11 @@ jobs:
           SERVICE_NAME: ${{ inputs.service-name }}
           GHCR_ACTOR: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_SCRIPT: ${{ inputs.deploy-script }}
+          SPARSE_PATHS: ${{ inputs.sparse-paths }}
+          REPO_URL: https://github.com/${{ github.repository }}.git
+          DEPLOY_REF: ${{ github.ref_name }}
+          DEPLOY_SHA: ${{ github.sha }}
 
       - name: Health check
         if: ${{ inputs.health-url != '' }}
