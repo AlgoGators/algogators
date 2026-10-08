@@ -1,0 +1,117 @@
+name: data-ngin · deploy
+
+# A push to `prod` is a production deploy of the Airflow stack on the algocloud
+# box: quality gate, build and push the Airflow image, prove its DAGs import
+# inside that exact image, then SSH in, fast-forward the box's prod checkout
+# (`git pull` of compose file + cron jobs) and roll to the new digest with
+# services/data-ngin/deploy/deploy.sh. See services/data-ngin/deploy/README.md.
+#
+# Kept apart from svc-data-ngin.publish.yml, which stays tag-scoped: `prod` is
+# a deploy branch, not a release, and this workflow is the only thing that
+# builds on a branch push.
+
+on:
+  push:
+    branches: [prod]
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: true
+      deploy:
+        description: Deploy after building (only honoured on the prod branch).
+        type: boolean
+        default: false
+
+# One prod deploy at a time, and never cancel one mid-roll.
+concurrency:
+  group: svc-data-ngin-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-python.yml
+    with:
+      path: services/data-ngin
+      coverage-min: 70
+    secrets: inherit
+
+  airflow-image:
+    needs: quality
+    uses: ./.github/workflows/_publish-container.yml
+    with:
+      path: services/data-ngin
+      dockerfile: Dockerfile.airflow
+      # repo-root context: the image installs workspace libs (platform-db, ...)
+      context: .
+      image: algogators/data-ngin-airflow
+      push: ${{ !(inputs.dry-run || false) }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    secrets: inherit
+
+  verify-dags:
+    # Parse every DAG and the Dex login config inside the image that will be
+    # deployed: Airflow cannot be installed in the Windows/uv dev environment,
+    # so this is the only place the real Airflow 3 import path is exercised.
+    if: ${{ !(inputs.dry-run || false) && needs.airflow-image.result == 'success' }}
+    needs: airflow-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: DagBag has the three prod DAGs and no import errors
+        env:
+          IMAGE_REF: ghcr.io/algogators/data-ngin-airflow@${{ needs.airflow-image.outputs.digest }}
+        run: |
+          docker run --rm \
+            -e AIRFLOW__CORE__LOAD_EXAMPLES=False \
+            -e AIRFLOW_OIDC_SECRET=ci-placeholder \
+            "$IMAGE_REF" python - <<'EOF'
+          import runpy
+          from airflow.models.dagbag import DagBag
+
+          runpy.run_path("/opt/airflow/webserver_config.py")
+          bag = DagBag(dag_folder="/opt/airflow/dags", include_examples=False)
+          for path, err in bag.import_errors.items():
+              print(f"ERROR {path}: {err}")
+          expected = {"data_pipeline_dag", "new_data_pipeline_dag", "tiingo_data_dag"}
+          missing = expected - set(bag.dag_ids)
+          if bag.import_errors or missing:
+              raise SystemExit(f"import errors: {len(bag.import_errors)}, missing DAGs: {sorted(missing)}")
+          print(f"OK: {sorted(bag.dag_ids)}")
+          EOF
+          docker run --rm "$IMAGE_REF" python -c "import data_ngin.ops.check_data_freshness"
+
+  deploy:
+    if: >-
+      ${{ github.ref == 'refs/heads/prod'
+          && !(inputs.dry-run || false)
+          && (github.event_name == 'push' || inputs.deploy) }}
+    needs: [airflow-image, verify-dags]
+    uses: ./.github/workflows/_deploy-ssh.yml
+    with:
+      image: algogators/data-ngin-airflow
+      digest: ${{ needs.airflow-image.outputs.digest }}
+      remote-path: /home/ubuntu/algogators
+      deploy-script: services/data-ngin/deploy/deploy.sh
+      sparse-paths: services/data-ngin/deploy
+      timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    secrets: inherit
+

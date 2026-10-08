@@ -24,11 +24,19 @@ WORKDIR /opt/airflow
 # downgrade Airflow away from the base image's version.
 COPY --chown=airflow:root platform/db /opt/deps/platform-db
 COPY --chown=airflow:root services/data-ngin /opt/deps/data-ngin
+# The FAB provider (auth manager + Dex OAuth login, which needs authlib) and
+# the postgres provider are named explicitly: the prod compose selects the
+# FAB auth manager and webserver_config.py logs in through Dex.
 RUN pip install --no-cache-dir \
     "apache-airflow==${AIRFLOW_VERSION}" \
+    "apache-airflow-providers-fab>=3.9.0" \
+    "apache-airflow-providers-postgres>=5.10" \
+    "authlib>=1.3" \
     /opt/deps/platform-db \
     /opt/deps/data-ngin
 
 COPY --chown=airflow:root services/data-ngin/dags /opt/airflow/dags
+# Dex (GitHub) login for the UI; AIRFLOW_LOGIN=db falls back to local users.
+COPY --chown=airflow:root services/data-ngin/webserver_config.py /opt/airflow/webserver_config.py
 
 EXPOSE 8080
