@@ -31,12 +31,6 @@ def run_pipeline() -> None:
     pipeline_tasks.run_pipeline(CONFIG_NAME, run_type=conf.get("run_type", "scheduled"))
 
 
-@task(trigger_rule="all_done")
-def staleness_check() -> None:
-    # all_done: runs (and only warns) even when the pipeline task failed.
-    pipeline_tasks.check_staleness(CONFIG_NAME)
-
-
 @dag(
     dag_id="new_data_pipeline_dag",
     default_args=default_args,
@@ -48,7 +42,11 @@ def staleness_check() -> None:
     max_active_runs=1,
 )
 def new_data_pipeline_dag():
-    run_pipeline() >> staleness_check()
+    # The pipeline task is the only task, so a failed run_* is a failed DAG
+    # run (and a GitHub issue via on_failure_callback). A trailing
+    # always-run task (a trigger rule that ignores upstream failures) would
+    # turn that into a green run.
+    run_pipeline()
 
 
 new_data_pipeline_dag()

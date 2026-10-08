@@ -3,6 +3,7 @@ date-range seeding, and the DAG task bodies."""
 
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from data_ngin.application import pipeline_tasks
@@ -138,12 +139,13 @@ class TestPipelineTasks(unittest.TestCase):
         config = mock_orchestrator_cls.call_args.kwargs["config"]
         self.assertEqual(config["fetcher"]["class"], "TiingoFetcher")
 
-    @patch("data_ngin.infrastructure.repository.ohlcv_repository.OhlcvRepository")
-    def test_check_staleness_warns_without_raising(self, mock_repo_cls: MagicMock) -> None:
-        mock_repo_cls.return_value.get_latest_date.return_value = "2020-01-01"
-        with self.assertLogs(level="WARNING"):
-            pipeline_tasks.check_staleness("config.yaml")
-        mock_repo_cls.return_value.close.assert_called_once()
+    def test_dags_have_no_all_done_tasks(self) -> None:
+        # Airflow takes a run's state from its leaf tasks. A leaf with
+        # trigger_rule="all_done" succeeds after the pipeline task fails, which
+        # marks the whole run green and hides the failure.
+        dags = Path(__file__).resolve().parents[1] / "dags"
+        for dag_file in sorted(dags.glob("*_dag.py")):
+            self.assertNotIn("all_done", dag_file.read_text(encoding="utf-8"), dag_file.name)
 
 
 if __name__ == "__main__":
