@@ -1,0 +1,15 @@
+# Host cron jobs for data-ngin on the algocloud box. This file is the source of
+# truth: deploy.sh renders @REPO_DIR@ and installs it as
+# /etc/cron.d/algogators-data-ngin on every deploy, so edit it here, never on
+# the box. The Airflow DAG schedules (data ingestion) live in dags/, not here.
+#
+# Times are UTC (the box's timezone).
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Postgres -> S3 backup of algo_data and new_algo_data, Monday and Thursday.
+0 2 * * 1,4 ubuntu @REPO_DIR@/services/data-ngin/deploy/cron/pg_backup.sh >> /home/ubuntu/pg_backup.log 2>&1
+
+# Data freshness check, daily ~9am ET, after the 07:00-07:15 ET ingestion
+# window. Files or updates a GitHub issue when a table is stale.
+0 13 * * * ubuntu @REPO_DIR@/services/data-ngin/deploy/cron/check_data_freshness.sh >> /home/ubuntu/data_freshness.log 2>&1

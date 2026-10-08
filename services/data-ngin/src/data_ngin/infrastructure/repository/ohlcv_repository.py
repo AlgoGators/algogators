@@ -2,7 +2,7 @@ import contextlib
 import logging
 import os
 import threading
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar
 
 import psycopg2
 from platform_db import DatabaseConfig
@@ -34,10 +34,13 @@ class OhlcvRepository(Inserter):
     once per process (see `_diagnostics_logged`), not once per connect().
     """
 
-    _pool: Optional["psycopg2_pool.ThreadedConnectionPool"] = None
+    # One pool per database: a config's `database.db_name` picks the database
+    # (algo_data for the futures pipeline, new_algo_data for the equities and
+    # new-futures pipelines), so a single process can talk to more than one.
+    _pools: ClassVar[dict[str | None, "psycopg2_pool.ThreadedConnectionPool"]] = {}
     _pool_lock = threading.Lock()
     _diagnostics_logged: bool = False
-    _verified_tables: ClassVar[set[tuple[str, str]]] = set()
+    _verified_tables: ClassVar[set[tuple[str | None, str, str]]] = set()
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config=config)
@@ -45,20 +48,33 @@ class OhlcvRepository(Inserter):
         self.logger.setLevel(logging.INFO)
 
     @classmethod
-    def _get_pool(cls) -> "psycopg2_pool.ThreadedConnectionPool":
-        if cls._pool is None:
+    def _get_pool(cls, db_name: str | None = None) -> "psycopg2_pool.ThreadedConnectionPool":
+        """
+        Returns the shared pool for `db_name`, building it on first use.
+        `db_name=None` means the database named by the DB_NAME env var.
+        """
+        pool = cls._pools.get(db_name)
+        if pool is None:
             with cls._pool_lock:
-                if cls._pool is None:
+                pool = cls._pools.get(db_name)
+                if pool is None:
                     # DB_* credentials go through the shared DatabaseConfig so
                     # they are validated (missing/blank vars raise instead of
                     # silently building a pool with None values); the pool
                     # sizing knobs stay a local concern.
-                    cls._pool = psycopg2_pool.ThreadedConnectionPool(
+                    env = dict(os.environ)
+                    if db_name:
+                        env["DB_NAME"] = db_name
+                    pool = psycopg2_pool.ThreadedConnectionPool(
                         int(os.getenv("DB_POOL_MIN_CONN", "1")),
                         int(os.getenv("DB_POOL_MAX_CONN", "10")),
-                        **DatabaseConfig.from_env().connect_kwargs(),
+                        **DatabaseConfig.from_env(env).connect_kwargs(),
                     )
-        return cls._pool
+                    cls._pools[db_name] = pool
+        return pool
+
+    def _db_name(self) -> str | None:
+        return (self.config.get("database") or {}).get("db_name") or None
 
     @classmethod
     def reset_pool_for_testing(cls) -> None:
@@ -69,10 +85,10 @@ class OhlcvRepository(Inserter):
         tests that patch psycopg2.connect need a clean slate per test rather
         than reusing whatever pool an earlier test's mock built.
         """
-        if cls._pool is not None:
+        for pool in cls._pools.values():
             with contextlib.suppress(Exception):
-                cls._pool.closeall()
-        cls._pool = None
+                pool.closeall()
+        cls._pools = {}
         cls._diagnostics_logged = False
         cls._verified_tables = set()
 
@@ -88,7 +104,7 @@ class OhlcvRepository(Inserter):
             ConnectionError: If a connection cannot be acquired.
         """
         try:
-            self.connection = self._get_pool().getconn()
+            self.connection = self._get_pool(self._db_name()).getconn()
             self.connection.autocommit = True
 
             if not OhlcvRepository._diagnostics_logged:
@@ -150,7 +166,7 @@ class OhlcvRepository(Inserter):
         # for the process's lifetime, not on every insert -- these don't
         # change between calls, and the orchestrator calls insert_data twice
         # per symbol (raw + cleaned tables) for every symbol in a run.
-        table_key = (schema, table)
+        table_key = (self._db_name(), schema, table)
         if table_key not in OhlcvRepository._verified_tables:
             schema_exists_sql = """
             SELECT 1 FROM information_schema.schemata WHERE schema_name = %s
@@ -213,7 +229,7 @@ class OhlcvRepository(Inserter):
         """
         if self.connection:
             try:
-                self._get_pool().putconn(self.connection)
+                self._get_pool(self._db_name()).putconn(self.connection)
                 self.logger.info("Connection returned to pool.")
             except Exception:
                 # Pool may be unusable (e.g. already closed) -- fall back to

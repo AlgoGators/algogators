@@ -155,11 +155,14 @@ def determine_date_range(config: dict[str, Any]) -> tuple[str, str]:
     Raises:
         ValueError: If neither the config nor the database can determine the start_date.
     """
-    # Check if 'start_date' exists in the config
-    if config["time_range"].get("start_date"):
-        start_date = config["time_range"]["start_date"]
+    time_range = config["time_range"]
+
+    if time_range.get("start_date"):
+        # Explicit start_date: fixed-window / manual backfill mode.
+        start_date = time_range["start_date"]
     else:
-        # Get the latest date from the database and add one day
+        # Incremental mode: fetch only the days after the latest row in THIS
+        # pipeline's own target table (and database).
         repository = OhlcvRepository(config)
         try:
             latest_date = repository.get_latest_date()
@@ -169,15 +172,23 @@ def determine_date_range(config: dict[str, Any]) -> tuple[str, str]:
             start_date = (datetime.strptime(latest_date, "%Y-%m-%d") + timedelta(days=1)).strftime(
                 "%Y-%m-%d"
             )
+        elif time_range.get("seed_start_date"):
+            # Table is empty (first run): seed from the configured start.
+            start_date = time_range["seed_start_date"]
         else:
             raise ValueError(
-                "Cannot determine start_date: No config date and no latest database date."
+                "Cannot determine start_date: no config start_date, no rows in the "
+                "target table, and no seed_start_date."
             )
 
-    # Check if 'end_date' exists in the config
-    if config["time_range"].get("end_date"):
-        end_date = config["time_range"]["end_date"]
+    if time_range.get("end_date"):
+        end_date = time_range["end_date"]
     else:
-        # Use today's date minus one day
+        # Yesterday: the most recent settled end-of-day data.
         end_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Once caught up, start can pass end -- clamp so the provider never gets an
+    # inverted range (re-fetches the last day, which the upsert makes idempotent).
+    if start_date > end_date:
+        start_date = end_date
     return start_date, end_date

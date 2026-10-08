@@ -50,4 +50,8 @@ jobs:
       digest: ${{ needs.image.outputs.digest }}
       remote-path: /opt/algogators/research-api
       service-name: research-api
+    # _deploy-ssh pulls the image on the host with this run's token.
+    permissions:
+      contents: read
+      packages: read
     secrets: inherit

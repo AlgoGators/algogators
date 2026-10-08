@@ -116,6 +116,8 @@ module = [
     "pyarrow.*",
     # dags/ ship to the Airflow image; airflow itself is not a workspace dep.
     "airflow.*",
+    # webserver_config.py (Dex login) also ships only to the Airflow image.
+    "flask_appbuilder.*",
     "pendulum.*",
     "seaborn.*",
     "scipy.*",

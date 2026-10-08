@@ -94,10 +94,12 @@ class DatabaseConfig:
         """Return a SQLAlchemy PostgreSQL connection URL.
 
         Credentials, host and database name are ``quote_plus``-escaped so a
-        password containing ``@``, ``/`` or ``:`` cannot break the DSN.
+        password containing ``@``, ``/`` or ``:`` cannot break the DSN. The
+        driver is explicit because SQLAlchemy 2.1 made bare ``postgresql://``
+        mean psycopg 3, and the services install psycopg2.
         """
         return (
-            "postgresql://"
+            "postgresql+psycopg2://"
             f"{quote_plus(self.user)}:{quote_plus(self.password)}"
             f"@{quote_plus(self.host)}:{self.port}/{quote_plus(self.database)}"
         )

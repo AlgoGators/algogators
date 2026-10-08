@@ -1,5 +1,6 @@
 import logging
 import os
+from datetime import datetime, timedelta
 from typing import Any
 
 import databento as db
@@ -61,7 +62,14 @@ class DatabentoFetcher(Fetcher):
         if loaded_asset_type == "FUTURE":
             roll_type: str = self.config["provider"]["roll_type"]
             contract_type: str = self.config["provider"]["contract_type"]
-            formatted_symbol: str = f"{symbol}.{roll_type}.{contract_type}"
+            # Remap BEFORE building the continuous symbol: Databento is asked for
+            # the Micro contract itself (MES.v.0, not ES.v.0), and that same
+            # string is what gets stored -- matching the rows already in
+            # futures_data, which carry the full continuous symbol.
+            base_symbol = self.symbol_remapper.remap(symbol)
+            if base_symbol != symbol:
+                self.logger.info(f"Remapping futures base symbol {symbol} -> {base_symbol}")
+            formatted_symbol: str = f"{base_symbol}.{roll_type}.{contract_type}"
             stype_in = db.SType.CONTINUOUS
             stype_out = db.SType.INSTRUMENT_ID
         elif loaded_asset_type == "EQUITY":
@@ -71,6 +79,12 @@ class DatabentoFetcher(Fetcher):
         else:
             raise ValueError(f"Unsupported asset type: {loaded_asset_type}")
 
+        # Databento's `end` is exclusive; shift by a day so the caller's
+        # end_date stays inclusive (otherwise the last requested day is dropped).
+        end_date_exclusive = (datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)).strftime(
+            "%Y-%m-%d"
+        )
+
         try:
             # Fetch data
             data = await self.client.timeseries.get_range_async(
@@ -78,19 +92,13 @@ class DatabentoFetcher(Fetcher):
                 symbols=formatted_symbol,
                 schema=db.Schema.from_str(schema),
                 start=start_date,
-                end=end_date,
+                end=end_date_exclusive,
                 stype_in=stype_in,
                 stype_out=stype_out,
             )
             # Convert to DataFrame
             df = data.to_df()
-
-            # --- Remap E-mini symbols to Micro equivalents for DB storage ---
-            mapped_symbol = self.symbol_remapper.remap(symbol)
-            if mapped_symbol != symbol:
-                self.logger.info(f"Fetched {symbol} data, remapping to {mapped_symbol} for storage")
-
-            df["symbol"] = mapped_symbol
+            df["symbol"] = formatted_symbol
 
             # Check if data is empty
             if df.empty:
