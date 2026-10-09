@@ -2,7 +2,7 @@
 
 Kept out of the DAG files, and free of Airflow imports, so they can be tested
 without Airflow and so the DAG files stay cheap to parse: the dag-processor
-re-parses every file continuously, and on a 1 GB host importing pandas,
+re-parses every file continuously, and on a small shared host importing pandas,
 databento and psycopg2 at parse time is what trips
 AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT. Heavy imports happen inside the functions,
 at task run time.
@@ -30,7 +30,7 @@ def run_pipeline(config_name: str, run_type: str = "scheduled") -> None:
     letting the rest finish (see Orchestrator.run).
 
     One task per pipeline rather than one per symbol: the Tiingo universe is
-    570+ symbols, and a task process per symbol on a t2.micro would run for
+    570+ symbols, and a task process per symbol on the shared box would run for
     hours. In-process asyncio concurrency is also what TiingoFetcher's key
     rotation and request throttling are built around.
     """
