@@ -25,10 +25,13 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
     AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: "120"
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-    # t2.micro (1 GB RAM): every task is a separate Python process that imports
-    # pandas. Two at a time is what the box can hold next to trade-ngin.
-    AIRFLOW__CORE__PARALLELISM: "2"
-    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "1"
+    # t2.medium (2 vCPU, 4 GB RAM), shared with Postgres, trade-ngin and
+    # AlgoLens. Every task is a separate Python process that imports pandas.
+    # Four at a time lets the 07:00/07:05/07:15 ET DAGs overlap and leaves
+    # headroom for the rest of the box. Each DAG is a single task, so the
+    # per-DAG cap only matters for manual reruns.
+    AIRFLOW__CORE__PARALLELISM: "4"
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "2"
     # Keep the FAB auth manager (Airflow 3 defaults to the dev-only simple
     # one) so existing users carry over and Dex OIDC works.
     AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager

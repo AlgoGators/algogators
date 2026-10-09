@@ -1,11 +1,12 @@
 # data-ngin production deploy
 
 data-ngin's Airflow stack runs on the **algocloud** EC2 box (`i-0fd5cfa45d7a13d0b`,
-t2.micro, Ubuntu 22.04), next to Postgres/TimescaleDB and trade-ngin.
+t2.medium: 2 vCPU, 4 GB RAM, Ubuntu 22.04), next to Postgres/TimescaleDB,
+trade-ngin and AlgoLens.
 
 ## How a deploy works
 
-Push to the `prod` branch. `.github/workflows/svc-data-ngin.publish.yml` then:
+Push to the `prod` branch. `.github/workflows/svc-data-ngin.deploy.yml` then:
 
 1. runs the data-ngin quality gate (tests, lint, coverage);
 2. builds `Dockerfile.airflow` and pushes `ghcr.io/algogators/data-ngin-airflow`;
@@ -21,8 +22,9 @@ Push to the `prod` branch. `.github/workflows/svc-data-ngin.publish.yml` then:
 and DAG registration, and installs the host cron jobs from `cron/` as
 `/etc/cron.d/algogators-data-ngin`.
 
-The box never builds anything (1 GB of RAM cannot build the Airflow image). The
-checkout carries only this directory; the code ships inside the image.
+The box never builds anything: CI builds and tests the image, and the box only
+pulls it by digest. The checkout carries only this directory; the code ships
+inside the image.
 
 Avoid pushing to `prod` between 11:00 and 12:30 UTC, the ingestion window. A
 deploy started then waits for the runs to finish before it restarts anything.
