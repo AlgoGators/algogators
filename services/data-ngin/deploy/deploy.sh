@@ -71,9 +71,9 @@ case "$previous" in
     *) rollback="cd ~/data-ngin && docker compose up -d, and restore the pg_backup line in 'crontab -e'" ;;
 esac
 
-# Stop the running Airflow processes before starting the new ones: the box
-# has ~200 MB free, and old and new Airflow side by side (plus `db migrate`)
-# would push the OOM killer toward Postgres or trade-ngin.
+# Stop the running Airflow processes before starting the new ones: old and
+# new Airflow side by side (plus `db migrate`) roughly doubles Airflow's
+# memory on a box shared with Postgres, trade-ngin and AlgoLens.
 log "stopping the running Airflow stack"
 compose stop airflow-apiserver airflow-scheduler airflow-dag-processor
 

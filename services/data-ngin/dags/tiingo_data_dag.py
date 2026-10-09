@@ -37,7 +37,7 @@ def run_tiingo_pipeline() -> None:
     description="Daily Tiingo equity OHLCV ingestion into new_algo_data",
     schedule="15 7 * * 1-5",
     # Weekdays 07:15 ET, staggered after the Databento runs to ease memory
-    # pressure on the t2.micro.
+    # pressure on the shared box.
     start_date=datetime(2024, 12, 1, tzinfo=local_tz),
     catchup=False,
     tags=["tiingo", "equity", "data_pipeline"],
