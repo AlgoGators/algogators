@@ -1,0 +1,30 @@
+{
+  "timestamp": "2024-06-15T12:30:45",
+  "results": [
+    {
+      "key": "db_footprint.table_bytes_test",
+      "status": "FAIL",
+      "value": 1000000,
+      "unit": "bytes",
+      "baseline": 500000,
+      "threshold": 150,
+      "action": "Investigate table growth"
+    },
+    {
+      "key": "db_footprint.raw_cleaned_ratio",
+      "status": "NO_DATA",
+      "value": 1.2,
+      "unit": "ratio",
+      "baseline": "unset",
+      "threshold": 130,
+      "action": "Monitor data quality"
+    }
+  ],
+  "summary": {
+    "total": 2,
+    "ok": 0,
+    "warn": 0,
+    "fail": 1,
+    "no_data": 1
+  }
+}
