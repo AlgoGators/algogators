@@ -37,7 +37,6 @@ The **data-ngin** is a modular pipeline designed to fetch, clean, store, and ana
 - **Modularity:** Designed with interchangeable components for fetchers, loaders, cleaners, and inserters
 
 ## Project Structure
-- **`src/main.py`**: Entry point for pipeline execution
 - **Primary Modules**:
   - **Loader**: Loads metadata and configuration (e.g., `CSVLoader`)
   - **Fetcher**: Fetches raw data (e.g., `DatabentoFetcher`)
@@ -62,7 +61,6 @@ The **data-ngin** is a modular pipeline designed to fetch, clean, store, and ana
 ├── src
 │   ├── config
 │   │   ├── config.yaml
-│   ├── main.py
 │   ├── modules
 │   │   ├── cleaner
 │   │   │   ├── cleaner.py
@@ -122,7 +120,7 @@ The **data-ngin** is a modular pipeline designed to fetch, clean, store, and ana
 
 1. **Clone the Repository:**
    ```bash
-   git clone https://github.com/AlgoGators/data-ngin.git
+   git clone https://github.com/AlgoGators/algogators.git
    cd data-ngin
    ```
 
@@ -158,11 +156,6 @@ The **data-ngin** is a modular pipeline designed to fetch, clean, store, and ana
    ```
 
 ## Usage
-
-### Run Pipeline Locally
-```bash
-poetry run python src/main.py
-```
 
 ### Access Airflow Web Interface
 1. Navigate to http://localhost:8080
@@ -435,19 +428,13 @@ task = PythonOperator(task_id="fetch_data", python_callable=orchestrator.run, da
 
 ## Common Development Tasks
 
-1. **Run the pipeline manually**
-
-```bash
-poetry run python src/main.py
-```
-
-2. **Check database contents**
+1. **Check database contents**
 
 ```sql
 SELECT * FROM futures_data.ohlcv_1d LIMIT 10;
 ```
 
-3. **Trigger Airflow DAG**
+2. **Trigger Airflow DAG**
 
 ```bash
 airflow dags trigger data_pipeline
