@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import databento as db
@@ -71,6 +71,21 @@ class DatabentoFetcher(Fetcher):
                 )
                 await asyncio.sleep(delay)
         raise AssertionError("unreachable")
+
+    def daily_availability(self) -> tuple[date, datetime]:
+        """
+        (last complete ohlcv-1d bar date, dataset end) for the configured
+        dataset, from Databento's metadata.get_dataset_range. The schema's
+        `end` is exclusive (00:00 UTC after the last full day); the dataset
+        `end` is how far intraday data reaches, so `D+1 00:00 - dataset end`
+        estimates how long until bar D is published.
+        """
+        dataset: str = self.config["provider"]["dataset"]
+        schema = str(self.config["provider"]["schema"]).lower().replace("_", "-")
+        result = self.client.metadata.get_dataset_range(dataset=dataset)
+        schema_end = pd.Timestamp(result["schema"][schema]["end"])
+        dataset_end = pd.Timestamp(result["end"]).to_pydatetime()
+        return schema_end.date() - timedelta(days=1), dataset_end
 
     async def fetch_data(
         self,

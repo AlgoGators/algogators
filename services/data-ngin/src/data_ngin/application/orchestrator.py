@@ -58,7 +58,11 @@ class Orchestrator:
         )
 
     async def retrieve_and_process_data(
-        self, symbol: dict[str, str], start_date: str, end_date: str
+        self,
+        symbol: dict[str, str],
+        start_date: str,
+        end_date: str,
+        update_existing: bool = False,
     ) -> bool:
         """
         Fetch, clean, and insert data for a single symbol.
@@ -67,6 +71,10 @@ class Orchestrator:
             symbol (Dict[str, str]): Metadata for the symbol.
             start_date (str): Start date for fetching data.
             end_date (str): End date for fetching data.
+            update_existing (bool): Overwrite rows already stored for the same
+                key with the fetched values (ON CONFLICT DO UPDATE) instead of
+                keeping them. The daily futures pipeline sets this so a re-pull
+                corrects a provisional bar.
 
         Returns:
             bool: True if the symbol was processed successfully.
@@ -84,6 +92,8 @@ class Orchestrator:
             self.config, "inserter", "class", expected_port=RepositoryPort
         )
         batch_config = self.config.get("batch_downloading", {})
+        # Only pass the flag when set, so inserters without it keep working.
+        conflict: dict[str, Any] = {"update_on_conflict": True} if update_existing else {}
 
         try:
             logging.info(
@@ -117,6 +127,7 @@ class Orchestrator:
                 data=raw_data.to_dict(orient="records"),
                 schema=self.config["database"]["target_schema"],
                 table=self.config["database"]["raw_table"],
+                **conflict,
             )
 
             # Clean data
@@ -129,6 +140,7 @@ class Orchestrator:
                 data=cleaned_data,
                 schema=self.config["database"]["target_schema"],
                 table=self.config["database"]["table"],
+                **conflict,
             )
 
             return True
@@ -198,28 +210,43 @@ class Orchestrator:
                 success even when every symbol failed).
         """
         meta = self.get_symbols_and_date_range()
-        symbols = meta["symbols"]
         start_date, end_date = meta["start_date"], meta["end_date"]
+        await self.process([(symbol, start_date, end_date) for symbol in meta["symbols"]])
 
-        # Fetch, clean, and insert data for all symbols
+    async def process(
+        self, jobs: list[tuple[dict[str, str], str, str]], update_existing: bool = False
+    ) -> None:
+        """
+        Fetch, clean and insert each (symbol, start_date, end_date) job
+        concurrently, then raise if any failed -- after letting the rest finish.
+
+        Raises:
+            RuntimeError: If any job failed, listing every failed symbol and
+                its error.
+        """
+        # The flag is passed only when set, keeping the plain call for run().
+        extra: dict[str, Any] = {"update_existing": True} if update_existing else {}
         results = await asyncio.gather(
-            *[self.retrieve_and_process_data(symbol, start_date, end_date) for symbol in symbols],
+            *[
+                self.retrieve_and_process_data(symbol, start, end, **extra)
+                for symbol, start, end in jobs
+            ],
             return_exceptions=True,
         )
 
         failures = [
             (symbol["dataSymbol"], result)
-            for symbol, result in zip(symbols, results, strict=False)
+            for (symbol, _start, _end), result in zip(jobs, results, strict=False)
             if isinstance(result, Exception)
         ]
 
         if failures:
             summary = "; ".join(f"{symbol}: {error}" for symbol, error in failures)
             logging.error(
-                f"Pipeline execution failed for {len(failures)}/{len(symbols)} symbol(s): {summary}"
+                f"Pipeline execution failed for {len(failures)}/{len(jobs)} symbol(s): {summary}"
             )
             raise RuntimeError(
-                f"Pipeline execution failed for {len(failures)}/{len(symbols)} symbol(s): {summary}"
+                f"Pipeline execution failed for {len(failures)}/{len(jobs)} symbol(s): {summary}"
             )
 
         logging.info("Pipeline execution completed successfully.")

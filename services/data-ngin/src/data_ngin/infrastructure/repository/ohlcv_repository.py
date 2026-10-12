@@ -2,6 +2,7 @@ import contextlib
 import logging
 import os
 import threading
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, ClassVar
 
 import psycopg2
@@ -9,6 +10,23 @@ from platform_db import DatabaseConfig
 from psycopg2 import pool as psycopg2_pool
 
 from data_ngin.infrastructure.inserter import Inserter
+
+# Unique keys of the OHLCV tables: (time, symbol) on the cleaned tables,
+# (ts_event, symbol) on the raw ones.
+CONFLICT_KEYS = (("time", "symbol"), ("ts_event", "symbol"))
+
+
+def upsert_clause(columns: list[str]) -> str:
+    """ON CONFLICT ... DO UPDATE for rows with these columns, keyed on whichever
+    OHLCV unique key the columns contain."""
+    key = next((k for k in CONFLICT_KEYS if all(c in columns for c in k)), None)
+    if key is None:
+        raise ValueError(f"No known unique key among columns {columns}")
+    updates = [c for c in columns if c not in key]
+    if not updates:
+        return f"ON CONFLICT ({', '.join(key)}) DO NOTHING"
+    assignments = ", ".join(f"{c} = EXCLUDED.{c}" for c in updates)
+    return f"ON CONFLICT ({', '.join(key)}) DO UPDATE SET {assignments}"
 
 
 class OhlcvRepository(Inserter):
@@ -140,7 +158,13 @@ class OhlcvRepository(Inserter):
         if not self.connection:
             self.connect()
 
-    def insert_data(self, data: list[dict[str, Any]], schema: str, table: str) -> None:
+    def insert_data(
+        self,
+        data: list[dict[str, Any]],
+        schema: str,
+        table: str,
+        update_on_conflict: bool = False,
+    ) -> None:
         """
         Inserts data into the specified TimescaleDB schema and table dynamically.
 
@@ -148,6 +172,10 @@ class OhlcvRepository(Inserter):
             data (List[Dict[str, Any]]): A list of dictionaries representing data rows.
             schema (str): The target schema in TimescaleDB.
             table (str): The target table in TimescaleDB.
+            update_on_conflict (bool): False (default) keeps an existing row
+                with the same key (ON CONFLICT DO NOTHING). True overwrites its
+                other columns with the new values (ON CONFLICT DO UPDATE), on
+                the table's (time, symbol) or (ts_event, symbol) unique key.
 
         Raises:
             RuntimeError: If the connection is missing or the insertion into the database fails.
@@ -199,10 +227,13 @@ class OhlcvRepository(Inserter):
         columns = list(data[0].keys())
         column_names = ", ".join(columns)
         placeholders = ", ".join([f"%({col})s" for col in columns])
+        conflict_clause = "ON CONFLICT DO NOTHING"
+        if update_on_conflict:
+            conflict_clause = upsert_clause(columns)
         query = f"""
         INSERT INTO {schema}.{table} ({column_names})
         VALUES ({placeholders})
-        ON CONFLICT DO NOTHING;
+        {conflict_clause};
         """.strip()
 
         try:
@@ -311,6 +342,35 @@ class OhlcvRepository(Inserter):
                 self.logger.info(f"Latest available date in the database: {row[0]}")
                 return row[0].strftime("%Y-%m-%d")
             return None
+
+    def get_bar_dates(
+        self,
+        symbols: list[str],
+        start_date: date,
+        end_date: date,
+        schema: str | None = None,
+        table: str | None = None,
+    ) -> set[tuple[str, date]]:
+        """
+        The (symbol, UTC bar date) pairs present for `symbols` between
+        `start_date` and `end_date`, both inclusive. Daily bars are stamped at
+        00:00 UTC of their day, so the bar date is the UTC date of `time`.
+        """
+        if not symbols:
+            return set()
+        self._ensure_connected()
+        schema, table = self._default_schema_table(schema, table)
+
+        query = f"""
+            SELECT symbol, (time AT TIME ZONE 'UTC')::date
+            FROM {schema}.{table}
+            WHERE time >= %s AND time < %s AND symbol = ANY(%s)
+        """
+        window_start = datetime.combine(start_date, time.min, tzinfo=UTC)
+        window_end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=UTC)
+        with self.connection.cursor() as cur:
+            cur.execute(query, (window_start, window_end, list(symbols)))
+            return {(row[0], row[1]) for row in cur.fetchall()}
 
     def get_latest_data(
         self, symbol: str, schema: str | None = None, table: str | None = None

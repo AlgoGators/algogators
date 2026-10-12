@@ -263,5 +263,30 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
         mock_inserter.insert_data.assert_not_called()
 
 
+class TestOrchestratorUpdateExisting(unittest.IsolatedAsyncioTestCase):
+    @patch("data_ngin.application.orchestrator.get_instance")
+    async def test_update_existing_upserts_both_tables(self, mock_get_instance: MagicMock) -> None:
+        import pandas as pd
+
+        fetcher, cleaner, inserter = MagicMock(), MagicMock(), MagicMock()
+        fetcher.retrieve = AsyncMock(return_value=pd.DataFrame([{"ts_event": 1, "symbol": "x"}]))
+        cleaner.clean.return_value = [{"time": 1, "symbol": "x"}]
+        mock_get_instance.side_effect = [MagicMock(), fetcher, cleaner, inserter]
+        config = {
+            "database": {"target_schema": "s", "raw_table": "r", "table": "t"},
+            "batch_downloading": {},
+        }
+        orchestrator = Orchestrator(config=config)
+
+        await orchestrator.process(
+            [({"dataSymbol": "6E", "instrumentType": "FUTURE"}, "2026-10-07", "2026-10-12")],
+            update_existing=True,
+        )
+
+        self.assertEqual(inserter.insert_data.call_count, 2)
+        for call in inserter.insert_data.call_args_list:
+            self.assertTrue(call.kwargs["update_on_conflict"])
+
+
 if __name__ == "__main__":
     unittest.main()
