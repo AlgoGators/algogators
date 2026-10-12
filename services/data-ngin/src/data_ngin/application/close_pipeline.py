@@ -9,18 +9,22 @@ run pulls bar date D:
    D-5 .. D its exchange traded on (see trading_calendar). The contracts that
    traded on D are D's expected set. If none did (a Saturday, Christmas), the
    run does nothing.
-2. Read which of those (contract, day) bars the target table already holds and
-   pull only the missing ones: one Databento range per contract, from its
-   earliest missing day to its latest. Writes are INSERT ... ON CONFLICT DO
-   NOTHING on (time, symbol), so re-pulling a bar that is already there is a
-   no-op.
+2. Log any expected (contract, day) bar the target table lacks (gap backfill),
+   wait for Databento to publish bar D (wait_for_bar_date), then re-pull every
+   expected bar in the window that Databento has published: one range per
+   contract. Writes are INSERT ... ON CONFLICT DO UPDATE on (time, symbol) /
+   (ts_event, symbol), so a provisional or partial bar is corrected by a later
+   run. (Back-adjustment is a no-op here: every fetched row carries the same
+   continuous symbol, so no roll is ever detected within a window.)
 3. Re-read D's bars and report which expected contracts are still missing.
 
 Heavy imports stay inside the functions (see pipeline_tasks).
 """
 
 import logging
-from collections.abc import Iterable
+import os
+import time as time_module
+from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -30,6 +34,8 @@ logger = logging.getLogger(__name__)
 
 DATASET = "futures_ohlcv_1d"
 BACKFILL_DAYS = 5
+DEFAULT_AVAILABILITY_WAIT_MINUTES = 60.0
+AVAILABILITY_POLL_SECONDS = 300.0
 
 CONTRACT_COLUMNS = ("dataSymbol", "instrumentType", "exchange", "underlying")
 
@@ -150,13 +156,85 @@ def _present_bars(
         repository.close()
 
 
+def repull_ranges(
+    expected_by_day: dict[date, list[dict[str, Any]]],
+) -> dict[str, tuple[date, date]]:
+    """
+    {dataSymbol: (first, last)} expected day in the window, per contract. Every
+    expected bar in the window is re-pulled, not only missing ones, so a bar
+    first fetched provisionally is overwritten by the vendor's later values.
+    """
+    ranges: dict[str, tuple[date, date]] = {}
+    for day in sorted(expected_by_day):
+        for contract in expected_by_day[day]:
+            symbol = contract["dataSymbol"]
+            first = ranges.get(symbol, (day, day))[0]
+            ranges[symbol] = (first, day)
+    return ranges
+
+
+def availability_wait_seconds() -> float:
+    """Longest a run waits for Databento to publish bar D (env, minutes)."""
+    value = os.getenv("DATABENTO_AVAILABILITY_WAIT_MINUTES", "").strip()
+    return 60 * (float(value) if value else DEFAULT_AVAILABILITY_WAIT_MINUTES)
+
+
+def wait_for_bar_date(
+    availability: Callable[[], tuple[date, datetime]],
+    bar_date: date,
+    max_wait_seconds: float,
+    poll_seconds: float = AVAILABILITY_POLL_SECONDS,
+    now: Callable[[], datetime] = lambda: datetime.now(UTC),
+    sleep: Callable[[float], None] = time_module.sleep,
+) -> date:
+    """
+    Poll Databento's dataset range until bar `bar_date` is published or the
+    wait budget runs out, and return the last published daily bar date.
+
+    Bar D is published once the dataset's intraday `end` passes D+1 00:00 UTC.
+    The dataset end trails the clock by a fixed delay (8 hours for AlgoGators'
+    licence, measured 2026-10-12), so `D+1 00:00 - dataset end` is how long the
+    wait would take. When that is longer than the remaining budget, return at
+    once instead of sleeping for nothing.
+    """
+    deadline = now() + timedelta(seconds=max_wait_seconds)
+    bar_end = datetime.combine(bar_date + timedelta(days=1), datetime.min.time(), tzinfo=UTC)
+    while True:
+        published_through, dataset_end = availability()
+        if published_through >= bar_date:
+            return published_through
+        eta = bar_end - dataset_end
+        if now() + eta > deadline:
+            logger.error(
+                "Databento has daily bars only through %s (data up to %s); bar %s needs "
+                "about %s more, past this run's %.0f-minute wait. Pulling what is published.",
+                published_through,
+                dataset_end,
+                bar_date,
+                eta,
+                max_wait_seconds / 60,
+            )
+            return published_through
+        logger.info(
+            "Waiting for Databento to publish bar %s (data up to %s)", bar_date, dataset_end
+        )
+        sleep(min(poll_seconds, max(1.0, eta.total_seconds())))
+
+
+def _availability_of(orchestrator: Any) -> Callable[[], tuple[date, datetime]] | None:
+    fetcher = getattr(orchestrator, "fetcher", None)
+    check = getattr(fetcher, "daily_availability", None)
+    return check if callable(check) else None
+
+
 def run_close_pipeline(
     config: dict[str, Any], bar_date: date, days: int = BACKFILL_DAYS
 ) -> dict[str, Any]:
     """
-    Pull bar date `bar_date` and fill gaps in the `days` before it. Returns a
-    JSON-able summary: {"bar_date", "skipped", "expected", "missing"} where
-    expected/missing are D's storage symbols.
+    Pull bar date `bar_date` and re-pull the `days` before it. Returns a
+    JSON-able summary: {"bar_date", "skipped", "expected", "missing",
+    "published_through"} where expected/missing are D's storage symbols and
+    published_through is the last daily bar Databento had published.
 
     Raises:
         RuntimeError: If any contract's fetch/insert failed (after the others
@@ -170,7 +248,13 @@ def run_close_pipeline(
     expected_today = expected_contracts(contracts, bar_date)
     if not expected_today:
         logger.info("No contract traded on %s (UTC); nothing to pull.", bar_date)
-        return {"bar_date": bar_date.isoformat(), "skipped": True, "expected": [], "missing": []}
+        return {
+            "bar_date": bar_date.isoformat(),
+            "skipped": True,
+            "expected": [],
+            "missing": [],
+            "published_through": None,
+        }
 
     def to_storage(symbol: str) -> str:
         return storage_symbol(config, symbol)
@@ -182,29 +266,41 @@ def run_close_pipeline(
     }
     all_symbols = sorted({to_storage(c["dataSymbol"]) for c in contracts})
     present = _present_bars(config, all_symbols, window[0], bar_date)
-    missing = find_missing_bars(expected_by_day, present, to_storage)
+    backfill = {
+        s: [d.isoformat() for d in ds if d != bar_date]
+        for s, ds in find_missing_bars(expected_by_day, present, to_storage).items()
+    }
+    backfill = {s: ds for s, ds in backfill.items() if ds}
+    if backfill:
+        logger.warning("Backfilling missing bars before %s: %s", bar_date, backfill)
 
+    orchestrator = Orchestrator(config=config)
+    availability = _availability_of(orchestrator)
+    published_through = bar_date
+    if availability is not None:
+        published_through = wait_for_bar_date(availability, bar_date, availability_wait_seconds())
+
+    # Never ask for a day Databento has not published: the request fails with
+    # 422 data_end_after_available_end.
     by_symbol = {c["dataSymbol"]: c for c in contracts}
     jobs = [
         (
             {"dataSymbol": symbol, "instrumentType": by_symbol[symbol]["instrumentType"]},
-            min(days_missing).isoformat(),
-            max(days_missing).isoformat(),
+            first.isoformat(),
+            min(last, published_through).isoformat(),
         )
-        for symbol, days_missing in missing.items()
+        for symbol, (first, last) in repull_ranges(expected_by_day).items()
+        if first <= published_through
     ]
-    backfill = {s: [d.isoformat() for d in ds if d != bar_date] for s, ds in missing.items()}
-    backfill = {s: ds for s, ds in backfill.items() if ds}
-    if backfill:
-        logger.warning("Backfilling missing bars before %s: %s", bar_date, backfill)
     logger.info(
-        "Bar date %s: %d expected contract(s), pulling %d contract(s)",
+        "Bar date %s: %d expected contract(s), re-pulling %d contract(s) through %s",
         bar_date,
         len(expected_today),
         len(jobs),
+        min(bar_date, published_through),
     )
     if jobs:
-        asyncio.run(Orchestrator(config=config).process(jobs))
+        asyncio.run(orchestrator.process(jobs, update_existing=True))
 
     expected_symbols = [to_storage(c["dataSymbol"]) for c in expected_today]
     present_today = {
@@ -218,6 +314,7 @@ def run_close_pipeline(
         "skipped": False,
         "expected": sorted(expected_symbols),
         "missing": still_missing,
+        "published_through": published_through.isoformat(),
     }
 
 
@@ -245,11 +342,15 @@ def write_readiness(
     return row
 
 
-def should_retry_for_missing(missing: list[str], try_number: int, max_tries: int) -> bool:
+def should_retry_for_missing(
+    missing: list[str], try_number: int, max_tries: int, published: bool = True
+) -> bool:
     """
     Whether a run that finished with D's bars still missing should fail so
-    Airflow retries it. Databento can lag right after 00:00 UTC, so retry while
-    retries remain; the last try succeeds and the readiness row says 'partial'.
+    Airflow retries it: only while retries remain (the last try succeeds and
+    the readiness row says 'partial'), and only when Databento had published
+    bar D. If it had not, the run already waited as long as it usefully could
+    (wait_for_bar_date), and a retry would only repeat that.
     Airflow's try_number starts at 1 and max_tries equals the task's retries.
     """
-    return bool(missing) and try_number <= max_tries
+    return bool(missing) and published and try_number <= max_tries

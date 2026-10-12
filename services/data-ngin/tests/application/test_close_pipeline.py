@@ -9,14 +9,17 @@ from zoneinfo import ZoneInfo
 
 from data_ngin.application import close_pipeline, pipeline_tasks
 from data_ngin.application.close_pipeline import (
+    availability_wait_seconds,
     backfill_days,
     bar_date_for_run,
     find_missing_bars,
     load_contracts,
     readiness_row,
+    repull_ranges,
     run_close_pipeline,
     should_retry_for_missing,
     storage_symbol,
+    wait_for_bar_date,
     write_readiness,
 )
 from data_ngin.utils.dynamic_loader import load_config
@@ -150,6 +153,8 @@ class TestReadiness(unittest.TestCase):
         self.assertTrue(should_retry_for_missing(["6E.v.0"], try_number=3, max_tries=3))
         self.assertFalse(should_retry_for_missing(["6E.v.0"], try_number=4, max_tries=3))
         self.assertFalse(should_retry_for_missing([], try_number=1, max_tries=3))
+        # Databento had not published D: waiting again would not help.
+        self.assertFalse(should_retry_for_missing(["6E.v.0"], 1, 3, published=False))
 
 
 class TestRunClosePipeline(unittest.TestCase):
@@ -166,7 +171,7 @@ class TestRunClosePipeline(unittest.TestCase):
         mock_present.assert_not_called()
         mock_orch.assert_not_called()
 
-    def test_pulls_missing_ranges_per_contract(self) -> None:
+    def _run(self, published_through: date) -> tuple[dict, MagicMock]:
         # Present: everything for Oct 7-9 and the Sunday FX bar. Missing: the
         # Sunday MES bar (backfill) and all of D.
         present = {
@@ -176,30 +181,105 @@ class TestRunClosePipeline(unittest.TestCase):
         } | {("6E.v.0", date(2026, 10, 11))}
         after = {("6E.v.0", self.D), ("MES.v.0", self.D)}
 
-        async def _process(jobs: list) -> None:
+        async def _process(jobs: list, update_existing: bool = False) -> None:
             return None
 
+        dataset_end = datetime.combine(published_through, datetime.min.time(), tzinfo=UTC)
         with (
             patch.object(close_pipeline, "load_contracts", return_value=[FX, ES, ZC]),
             patch.object(close_pipeline, "_present_bars", side_effect=[present, after]),
+            patch.object(close_pipeline, "availability_wait_seconds", return_value=0),
             patch("data_ngin.application.orchestrator.Orchestrator") as mock_orch,
         ):
+            mock_orch.return_value.fetcher.daily_availability.return_value = (
+                published_through,
+                dataset_end + timedelta(hours=16),
+            )
             mock_orch.return_value.process.side_effect = _process
             result = run_close_pipeline(CONFIG, self.D)
+        return result, mock_orch.return_value.process
 
-        jobs = mock_orch.return_value.process.call_args.args[0]
+    def test_repulls_the_whole_window_with_updates(self) -> None:
+        result, process = self._run(published_through=self.D)
+
+        jobs = process.call_args.args[0]
         ranges = {job[0]["dataSymbol"]: (job[1], job[2]) for job in jobs}
         self.assertEqual(
             ranges,
             {
-                "6E": ("2026-10-12", "2026-10-12"),
-                "ES": ("2026-10-11", "2026-10-12"),
-                "ZC": ("2026-10-12", "2026-10-12"),
+                "6E": ("2026-10-07", "2026-10-12"),
+                "ES": ("2026-10-07", "2026-10-12"),
+                "ZC": ("2026-10-07", "2026-10-12"),
             },
         )
+        self.assertTrue(process.call_args.kwargs["update_existing"])
         self.assertFalse(result["skipped"])
         self.assertEqual(result["expected"], ["6E.v.0", "MES.v.0", "ZC.v.0"])
         self.assertEqual(result["missing"], ["ZC.v.0"])
+        self.assertEqual(result["published_through"], "2026-10-12")
+
+    def test_never_requests_past_what_databento_published(self) -> None:
+        result, process = self._run(published_through=date(2026, 10, 11))
+
+        ranges = {job[0]["dataSymbol"]: job[2] for job in process.call_args.args[0]}
+        self.assertEqual(set(ranges.values()), {"2026-10-11"})
+        self.assertEqual(result["published_through"], "2026-10-11")
+        self.assertFalse(pipeline_tasks.should_retry_run(result, try_number=1, max_tries=3))
+
+
+class TestWaitForBarDate(unittest.TestCase):
+    D = date(2026, 10, 12)
+    MIDNIGHT = datetime(2026, 10, 13, tzinfo=UTC)
+
+    def test_returns_at_once_when_published(self) -> None:
+        sleep = MagicMock()
+        through = wait_for_bar_date(
+            lambda: (self.D, self.MIDNIGHT), self.D, 3600, sleep=sleep, now=lambda: self.MIDNIGHT
+        )
+        self.assertEqual(through, self.D)
+        sleep.assert_not_called()
+
+    def test_polls_until_published(self) -> None:
+        clock = [self.MIDNIGHT]
+        states = iter(
+            [
+                (self.D - timedelta(days=1), self.MIDNIGHT - timedelta(minutes=10)),
+                (self.D, self.MIDNIGHT + timedelta(minutes=1)),
+            ]
+        )
+
+        def sleep(seconds: float) -> None:
+            clock[0] += timedelta(seconds=seconds)
+
+        through = wait_for_bar_date(
+            lambda: next(states), self.D, 3600, poll_seconds=300, now=lambda: clock[0], sleep=sleep
+        )
+        self.assertEqual(through, self.D)
+        self.assertEqual(clock[0], self.MIDNIGHT + timedelta(minutes=5))
+
+    def test_gives_up_at_once_when_the_delay_exceeds_the_budget(self) -> None:
+        # The 8-hour historical delay: at 00:00 UTC data reaches only 16:00.
+        sleep = MagicMock()
+        with self.assertLogs("data_ngin.application.close_pipeline", "ERROR"):
+            through = wait_for_bar_date(
+                lambda: (self.D - timedelta(days=1), self.MIDNIGHT - timedelta(hours=8)),
+                self.D,
+                3600,
+                now=lambda: self.MIDNIGHT,
+                sleep=sleep,
+            )
+        self.assertEqual(through, self.D - timedelta(days=1))
+        sleep.assert_not_called()
+
+    def test_wait_budget_from_env(self) -> None:
+        with patch.dict(os.environ, {"DATABENTO_AVAILABILITY_WAIT_MINUTES": "5"}):
+            self.assertEqual(availability_wait_seconds(), 300)
+        with patch.dict(os.environ, {"DATABENTO_AVAILABILITY_WAIT_MINUTES": ""}):
+            self.assertEqual(availability_wait_seconds(), 3600)
+
+    def test_repull_ranges(self) -> None:
+        d1, d2 = date(2026, 10, 9), date(2026, 10, 12)
+        self.assertEqual(repull_ranges({d1: [FX, ZC], d2: [FX]}), {"6E": (d1, d2), "ZC": (d1, d1)})
 
 
 class TestLoadContracts(unittest.TestCase):

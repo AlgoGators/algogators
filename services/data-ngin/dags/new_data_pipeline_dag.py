@@ -20,8 +20,8 @@ default_args = {
     "depends_on_past": False,
     "email_on_failure": False,  # no SMTP on the box; failures open a GitHub issue
     "email_on_retry": False,
-    # 20:00 ET is 00:00 UTC in EDT, right as Databento's UTC day closes: a
-    # retry 15 minutes later picks up bars that were not published yet.
+    # Retries cover fetch/DB errors and bars missing after Databento said D
+    # was published; waiting for publication happens inside the task.
     "retries": RETRIES,
     "retry_delay": timedelta(minutes=15),
     # A run that fails for good still records ops.data_ready status 'failed',
@@ -36,9 +36,7 @@ def run_pipeline() -> dict:
     bar_date = pipeline_tasks.bar_date_from_context(context)
     result = pipeline_tasks.run_futures_close(CONFIG_NAME, bar_date)
     ti = context["ti"]
-    if pipeline_tasks.should_retry_for_missing(
-        result["missing"], ti.try_number, getattr(ti, "max_tries", RETRIES)
-    ):
+    if pipeline_tasks.should_retry_run(result, ti.try_number, getattr(ti, "max_tries", RETRIES)):
         raise RuntimeError(f"{bar_date}: bars still missing for {result['missing']}; retrying")
     return result
 

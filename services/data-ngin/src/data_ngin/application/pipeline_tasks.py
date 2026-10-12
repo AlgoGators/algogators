@@ -107,8 +107,11 @@ def write_futures_readiness(
     return write_readiness(load_config(config_path(config_name)), bar_date, run_id, failed=failed)
 
 
-def should_retry_for_missing(missing: list[str], try_number: int, max_tries: int) -> bool:
-    """See close_pipeline.should_retry_for_missing."""
-    from data_ngin.application.close_pipeline import should_retry_for_missing as decide
+def should_retry_run(result: dict[str, Any], try_number: int, max_tries: int) -> bool:
+    """Whether a futures run's result should fail the try so Airflow retries it
+    (see close_pipeline.should_retry_for_missing)."""
+    from data_ngin.application.close_pipeline import should_retry_for_missing
 
-    return decide(missing, try_number, max_tries)
+    published_through = result.get("published_through")
+    published = published_through is None or published_through >= result["bar_date"]
+    return should_retry_for_missing(result["missing"], try_number, max_tries, published)

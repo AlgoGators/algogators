@@ -9,7 +9,8 @@ any session of this product's calendar overlap UTC day D?". That is what makes:
   (22:00/23:00 UTC Sunday): FX, equity index, rates, energy, metals, crypto.
 - Sunday not count for grains (week opens 19:00 CT = 00:00/01:00 UTC Monday) or
   livestock (day session only).
-- Saturday never count.
+- Saturday not count, except for CME crypto futures, which trade 24/7 since
+  2026-06-13 (see CRYPTO_24_7_FROM).
 - A holiday count for a product that trades an abbreviated session that day
   (e.g. equity index futures on MLK Day), and not count for a product that is
   closed (e.g. grains on MLK Day).
@@ -31,6 +32,15 @@ logger = logging.getLogger(__name__)
 # contract CSVs is on one of these (dataSet GLOBEX).
 CME_GROUP_EXCHANGES = frozenset({"CME", "CBOT", "NYMEX", "COMEX"})
 
+CRYPTO_CALENDAR = "CME Globex Crypto"
+# CME crypto futures (MBT, BTC, MET, ETH, ...) moved to 24/7 trading. The
+# first UTC Saturday with a GLBX.MDP3 MBT bar in new_algo_data is 2026-06-13;
+# every Saturday since has one, and no Saturday before does. From this date
+# every UTC day is a trading day for them. pandas_market_calendars 5.4.0 still
+# models the old Sunday-Friday week and knows no 24/7 holiday closures, so the
+# rule is applied here rather than taken from the library.
+CRYPTO_24_7_FROM = date(2026, 6, 13)
+
 # Contract CSV `underlying` -> pandas_market_calendars calendar name.
 CALENDAR_BY_UNDERLYING: dict[str, str] = {
     "FX": "CMEGlobex_FX",
@@ -38,7 +48,7 @@ CALENDAR_BY_UNDERLYING: dict[str, str] = {
     "Bond": "CME_Rate",
     "OilGas": "CMEGlobex_Energy",
     "Metals": "CMEGlobex_Metals",
-    "Crypto": "CME Globex Crypto",
+    "Crypto": CRYPTO_CALENDAR,
 }
 
 # `underlying` "Ags" covers two product groups with different hours.
@@ -71,6 +81,8 @@ def _calendar(name: str) -> Any:
 
 def traded_on_utc_day(calendar_name: str, day: date) -> bool:
     """True when any session of `calendar_name` overlaps UTC day `day`."""
+    if calendar_name == CRYPTO_CALENDAR and day >= CRYPTO_24_7_FROM:
+        return True
     import pandas as pd
 
     day_start = pd.Timestamp(datetime.combine(day, time.min, tzinfo=UTC))

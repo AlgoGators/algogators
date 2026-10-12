@@ -11,6 +11,23 @@ from psycopg2 import pool as psycopg2_pool
 
 from data_ngin.infrastructure.inserter import Inserter
 
+# Unique keys of the OHLCV tables: (time, symbol) on the cleaned tables,
+# (ts_event, symbol) on the raw ones.
+CONFLICT_KEYS = (("time", "symbol"), ("ts_event", "symbol"))
+
+
+def upsert_clause(columns: list[str]) -> str:
+    """ON CONFLICT ... DO UPDATE for rows with these columns, keyed on whichever
+    OHLCV unique key the columns contain."""
+    key = next((k for k in CONFLICT_KEYS if all(c in columns for c in k)), None)
+    if key is None:
+        raise ValueError(f"No known unique key among columns {columns}")
+    updates = [c for c in columns if c not in key]
+    if not updates:
+        return f"ON CONFLICT ({', '.join(key)}) DO NOTHING"
+    assignments = ", ".join(f"{c} = EXCLUDED.{c}" for c in updates)
+    return f"ON CONFLICT ({', '.join(key)}) DO UPDATE SET {assignments}"
+
 
 class OhlcvRepository(Inserter):
     """
@@ -141,7 +158,13 @@ class OhlcvRepository(Inserter):
         if not self.connection:
             self.connect()
 
-    def insert_data(self, data: list[dict[str, Any]], schema: str, table: str) -> None:
+    def insert_data(
+        self,
+        data: list[dict[str, Any]],
+        schema: str,
+        table: str,
+        update_on_conflict: bool = False,
+    ) -> None:
         """
         Inserts data into the specified TimescaleDB schema and table dynamically.
 
@@ -149,6 +172,10 @@ class OhlcvRepository(Inserter):
             data (List[Dict[str, Any]]): A list of dictionaries representing data rows.
             schema (str): The target schema in TimescaleDB.
             table (str): The target table in TimescaleDB.
+            update_on_conflict (bool): False (default) keeps an existing row
+                with the same key (ON CONFLICT DO NOTHING). True overwrites its
+                other columns with the new values (ON CONFLICT DO UPDATE), on
+                the table's (time, symbol) or (ts_event, symbol) unique key.
 
         Raises:
             RuntimeError: If the connection is missing or the insertion into the database fails.
@@ -200,10 +227,13 @@ class OhlcvRepository(Inserter):
         columns = list(data[0].keys())
         column_names = ", ".join(columns)
         placeholders = ", ".join([f"%({col})s" for col in columns])
+        conflict_clause = "ON CONFLICT DO NOTHING"
+        if update_on_conflict:
+            conflict_clause = upsert_clause(columns)
         query = f"""
         INSERT INTO {schema}.{table} ({column_names})
         VALUES ({placeholders})
-        ON CONFLICT DO NOTHING;
+        {conflict_clause};
         """.strip()
 
         try:

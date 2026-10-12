@@ -62,8 +62,15 @@ by 20:00 ET in both EDT and EST (`application/close_pipeline.py`).
   calendar (pandas_market_calendars) whether it traded during UTC day D. Those
   contracts are D's expected set; if it is empty (Saturday, Christmas) the run
   does nothing.
-- Each run also re-pulls any expected (contract, day) bar missing from the
-  previous 5 days.
+- Each run re-pulls every expected bar for D and the previous 5 days with
+  `ON CONFLICT DO UPDATE`, so provisional bars get corrected and gaps filled.
+  CME crypto futures trade 24/7 from 2026-06-13, so they are expected on
+  Saturdays and holidays.
+- Before pulling, the run waits (up to `DATABENTO_AVAILABILITY_WAIT_MINUTES`,
+  default 60) for Databento's `get_dataset_range` to show bar D published, and
+  never requests past what is published. On 2026-10-12 the account's
+  historical GLBX.MDP3 data trailed real time by 8 hours, so bar D is
+  published around 08:00 UTC on D+1.
 - `new_data_pipeline_dag` then upserts `ops.data_ready` in new_algo_data
   (dataset `futures_ohlcv_1d`): `complete`, `partial` (with the missing
   symbols), or `failed` from the failure callback. That table is created by a

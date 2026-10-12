@@ -41,12 +41,22 @@ class TestTradingDayRule(unittest.TestCase):
         # Same in CST (23:00 UTC open).
         self.assertEqual(symbols(date(2026, 1, 11)), GLOBEX_OVERNIGHT)
 
-    def test_saturday_is_skipped(self) -> None:
-        self.assertEqual(symbols(date(2026, 10, 10)), set())
+    def test_saturday_only_crypto_trades(self) -> None:
+        # CME crypto futures trade 24/7 since 2026-06-13 (MBT has a bar every
+        # Saturday since); everything else is closed.
+        self.assertEqual(symbols(date(2026, 10, 10)), {"MBT"})
+        self.assertEqual(symbols(date(2026, 6, 13)), {"MBT"})
+
+    def test_saturday_before_crypto_went_24_7_is_skipped(self) -> None:
+        self.assertEqual(symbols(date(2026, 6, 6)), set())
 
     def test_full_holiday_closes_every_product(self) -> None:
-        # Christmas 2026 is a Friday: closed all day, reopening Sunday evening.
-        self.assertEqual(symbols(date(2026, 12, 25)), set())
+        # Christmas 2026 is a Friday: closed all day, reopening Sunday
+        # evening -- except 24/7 crypto, for which no holiday closures are
+        # known.
+        self.assertEqual(symbols(date(2026, 12, 25)), {"MBT"})
+        without_crypto = [c for c in ALL if c is not CRYPTO]
+        self.assertEqual(expected_contracts(without_crypto, date(2026, 12, 25)), [])
 
     def test_holiday_with_abbreviated_session(self) -> None:
         # Labor Day: Globex products trade an early-close session (a bar);
