@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -54,6 +55,19 @@ class TestDatabentoFetcher(unittest.IsolatedAsyncioTestCase):
         # Add cleanup
         for p in self.patches:
             self.addCleanup(p.stop)
+
+    def test_daily_availability(self) -> None:
+        fetcher = DatabentoFetcher(self.mock_config)
+        self.mock_client_instance.metadata.get_dataset_range.return_value = {
+            "end": "2026-10-12T13:16:01.639592000Z",
+            "schema": {"ohlcv-1d": {"end": "2026-10-12T00:00:00.000000000Z"}},
+        }
+        through, dataset_end = fetcher.daily_availability()
+        self.assertEqual(through, date(2026, 10, 11))
+        self.assertEqual(dataset_end.hour, 13)
+        self.mock_client_instance.metadata.get_dataset_range.assert_called_once_with(
+            dataset="GLBX.MDP3"
+        )
 
     async def test_fetch_data(self) -> None:
         """

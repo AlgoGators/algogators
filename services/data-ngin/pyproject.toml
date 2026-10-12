@@ -22,6 +22,8 @@ dependencies = [
     "slowapi>=0.1.9",
     "aiohttp>=3.9",
     "requests>=2.32",
+    "pandas-market-calendars==5.4.0",
+    "exchange-calendars==4.13.2",
 ]
 # apache-airflow is deliberately NOT a dependency: only dags/ (a deploy-time
 # artifact for the Airflow image) imports it, and Airflow's pins conflict with

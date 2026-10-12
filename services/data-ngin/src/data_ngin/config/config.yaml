@@ -45,6 +45,10 @@ database:
   raw_table: "ohlcv_1d_raw"
   table: "ohlcv_1d"
 
+# The Airflow DAG ignores time_range: it pulls its run's bar date plus any gaps
+# in the 5 days before (application/close_pipeline.py). time_range drives
+# `python -m data_ngin.main` (Orchestrator.run) only.
+#
 # Time range for data fetching, YYYY-MM-DD. end_date is INCLUSIVE (the fetcher
 # translates it to Databento's exclusive end internally). Leave both blank:
 # start_date then defaults to the day after the latest row in database.table
