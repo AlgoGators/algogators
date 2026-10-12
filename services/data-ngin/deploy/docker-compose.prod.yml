@@ -27,9 +27,10 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     # t2.medium (2 vCPU, 4 GB RAM), shared with Postgres, trade-ngin and
     # AlgoLens. Every task is a separate Python process that imports pandas.
-    # Four at a time lets the 07:00/07:05/07:15 ET DAGs overlap and leaves
-    # headroom for the rest of the box. Each DAG is a single task, so the
-    # per-DAG cap only matters for manual reruns.
+    # Four at a time lets the two 20:00 ET futures DAGs overlap (and the
+    # 07:15 ET Tiingo DAG run alone) with headroom for the rest of the box.
+    # Each DAG runs one task at a time, so the per-DAG cap only matters for
+    # manual reruns.
     AIRFLOW__CORE__PARALLELISM: "4"
     AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "2"
     # Keep the FAB auth manager (Airflow 3 defaults to the dev-only simple

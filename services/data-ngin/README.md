@@ -50,6 +50,27 @@ The **data-ngin** is a modular pipeline designed to fetch, clean, store, and ana
 - **`src/config/config.yaml`**: Defines global settings for the data engine
 - **`dags/data_pipeline_dag.py`**: Airflow DAG for automating daily data ingestion
 
+### After-close futures schedule (`data_pipeline_dag`, `new_data_pipeline_dag`)
+
+Both futures DAGs run at 20:00 America/New_York every day (an interim fixed
+schedule; event/request-driven orchestration is tracked in
+AlgoGators/trade-ngin#191, transport #192). A run pulls bar date D, the run's
+New York date: Databento ohlcv-1d bars are UTC-day bars and UTC day D has ended
+by 20:00 ET in both EDT and EST (`application/close_pipeline.py`).
+
+- Per contract, `application/trading_calendar.py` decides from its exchange
+  calendar (pandas_market_calendars) whether it traded during UTC day D. Those
+  contracts are D's expected set; if it is empty (Saturday, Christmas) the run
+  does nothing.
+- Each run also re-pulls any expected (contract, day) bar missing from the
+  previous 5 days.
+- `new_data_pipeline_dag` then upserts `ops.data_ready` in new_algo_data
+  (dataset `futures_ohlcv_1d`): `complete`, `partial` (with the missing
+  symbols), or `failed` from the failure callback. That table is created by a
+  trade-ngin migration, not here; data-ngin's DB_USER needs INSERT/UPDATE on it.
+- A manual run can pin the date: `airflow dags trigger new_data_pipeline_dag
+  --conf '{"bar_date": "2026-10-09"}'`.
+
 ```
 ├── .vscode.
 ├── DockerFile

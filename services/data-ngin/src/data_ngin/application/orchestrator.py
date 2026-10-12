@@ -198,28 +198,36 @@ class Orchestrator:
                 success even when every symbol failed).
         """
         meta = self.get_symbols_and_date_range()
-        symbols = meta["symbols"]
         start_date, end_date = meta["start_date"], meta["end_date"]
+        await self.process([(symbol, start_date, end_date) for symbol in meta["symbols"]])
 
-        # Fetch, clean, and insert data for all symbols
+    async def process(self, jobs: list[tuple[dict[str, str], str, str]]) -> None:
+        """
+        Fetch, clean and insert each (symbol, start_date, end_date) job
+        concurrently, then raise if any failed -- after letting the rest finish.
+
+        Raises:
+            RuntimeError: If any job failed, listing every failed symbol and
+                its error.
+        """
         results = await asyncio.gather(
-            *[self.retrieve_and_process_data(symbol, start_date, end_date) for symbol in symbols],
+            *[self.retrieve_and_process_data(symbol, start, end) for symbol, start, end in jobs],
             return_exceptions=True,
         )
 
         failures = [
             (symbol["dataSymbol"], result)
-            for symbol, result in zip(symbols, results, strict=False)
+            for (symbol, _start, _end), result in zip(jobs, results, strict=False)
             if isinstance(result, Exception)
         ]
 
         if failures:
             summary = "; ".join(f"{symbol}: {error}" for symbol, error in failures)
             logging.error(
-                f"Pipeline execution failed for {len(failures)}/{len(symbols)} symbol(s): {summary}"
+                f"Pipeline execution failed for {len(failures)}/{len(jobs)} symbol(s): {summary}"
             )
             raise RuntimeError(
-                f"Pipeline execution failed for {len(failures)}/{len(symbols)} symbol(s): {summary}"
+                f"Pipeline execution failed for {len(failures)}/{len(jobs)} symbol(s): {summary}"
             )
 
         logging.info("Pipeline execution completed successfully.")

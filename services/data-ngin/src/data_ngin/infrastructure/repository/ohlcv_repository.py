@@ -2,6 +2,7 @@ import contextlib
 import logging
 import os
 import threading
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, ClassVar
 
 import psycopg2
@@ -311,6 +312,35 @@ class OhlcvRepository(Inserter):
                 self.logger.info(f"Latest available date in the database: {row[0]}")
                 return row[0].strftime("%Y-%m-%d")
             return None
+
+    def get_bar_dates(
+        self,
+        symbols: list[str],
+        start_date: date,
+        end_date: date,
+        schema: str | None = None,
+        table: str | None = None,
+    ) -> set[tuple[str, date]]:
+        """
+        The (symbol, UTC bar date) pairs present for `symbols` between
+        `start_date` and `end_date`, both inclusive. Daily bars are stamped at
+        00:00 UTC of their day, so the bar date is the UTC date of `time`.
+        """
+        if not symbols:
+            return set()
+        self._ensure_connected()
+        schema, table = self._default_schema_table(schema, table)
+
+        query = f"""
+            SELECT symbol, (time AT TIME ZONE 'UTC')::date
+            FROM {schema}.{table}
+            WHERE time >= %s AND time < %s AND symbol = ANY(%s)
+        """
+        window_start = datetime.combine(start_date, time.min, tzinfo=UTC)
+        window_end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=UTC)
+        with self.connection.cursor() as cur:
+            cur.execute(query, (window_start, window_end, list(symbols)))
+            return {(row[0], row[1]) for row in cur.fetchall()}
 
     def get_latest_data(
         self, symbol: str, schema: str | None = None, table: str | None = None
