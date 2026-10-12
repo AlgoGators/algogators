@@ -27,7 +27,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     # t2.medium (2 vCPU, 4 GB RAM), shared with Postgres, trade-ngin and
     # AlgoLens. Every task is a separate Python process that imports pandas.
-    # Four at a time lets the two 20:00 ET futures DAGs overlap (and the
+    # Four at a time lets the two 04:30 ET futures DAGs overlap (and the
     # 07:15 ET Tiingo DAG run alone) with headroom for the rest of the box.
     # Each DAG runs one task at a time, so the per-DAG cap only matters for
     # manual reruns.

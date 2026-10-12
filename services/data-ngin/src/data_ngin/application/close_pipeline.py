@@ -1,9 +1,10 @@
-"""After-close futures ingestion: pull UTC day D's daily bars, plus any gaps.
+"""Daily futures ingestion: pull UTC day D's daily bars, plus any gaps.
 
-The futures DAGs run at 20:00 America/New_York. Databento's GLBX.MDP3 ohlcv-1d
-bars are UTC-calendar-day bars, and at 20:00 New York time (00:00 UTC in EDT,
-01:00 UTC in EST) the UTC day matching the New York date D has just ended. So a
-run pulls bar date D:
+The futures DAGs run at 04:30 America/New_York. Databento's GLBX.MDP3 ohlcv-1d
+bars are UTC-calendar-day bars, and AlgoGators' historical plan publishes them
+about 8 hours after the UTC day ends (around 08:00 UTC on D+1). A run at 04:30
+New York time (08:30 UTC in EDT, 09:30 UTC in EST) pulls bar date D, the UTC
+day that ended before it -- yesterday's New York date:
 
 1. Load the contract CSV and work out, per contract, which of the days
    D-5 .. D its exchange traded on (see trading_calendar). The contracts that
@@ -43,10 +44,10 @@ CONTRACT_COLUMNS = ("dataSymbol", "instrumentType", "exchange", "underlying")
 def bar_date_for_run(reference: datetime) -> date:
     """
     The bar date a run at `reference` pulls: the most recent UTC calendar day
-    that has fully ended by then. For the 20:00 America/New_York schedule this
-    is the run's New York calendar date, in both EDT (20:00 = 00:00 UTC next
-    day) and EST (20:00 = 01:00 UTC next day). An earlier manual run gets the
-    day before, never a UTC day still in progress. A naive `reference` is UTC.
+    that has fully ended by then. For the 04:30 America/New_York schedule this
+    is the New York date of the day before the run, in both EDT (04:30 = 08:30
+    UTC) and EST (04:30 = 09:30 UTC). Never a UTC day still in progress. A
+    naive `reference` is UTC.
     """
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=UTC)

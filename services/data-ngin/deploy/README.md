@@ -26,10 +26,10 @@ The box never builds anything: CI builds and tests the image, and the box only
 pulls it by digest. The checkout carries only this directory; the code ships
 inside the image.
 
-Avoid pushing to `prod` in the ingestion windows: 00:00-02:00 UTC (the
-20:00 ET futures DAGs, including their 15-minute retries) and 11:00-12:30 UTC
-(the 07:15 ET Tiingo DAG). A deploy started then waits for the runs to finish
-before it restarts anything.
+Avoid pushing to `prod` between 08:30 and 12:30 UTC, the ingestion window:
+the 04:30 ET futures DAGs (08:30 UTC in summer, 09:30 UTC in winter, plus their
+availability wait and 15-minute retries) and the 07:15 ET Tiingo DAG. A deploy
+started then waits for the runs to finish before it restarts anything.
 
 ## What lives where
 

@@ -41,13 +41,15 @@ def run_pipeline() -> dict:
 @dag(
     dag_id="data_pipeline_dag",
     default_args=default_args,
-    description="After-close Databento futures ingestion into algo_data",
-    # Interim fixed 20:00 ET schedule, every day: futures trade Sunday evening
-    # through Friday, and the trading calendar decides per contract whether
-    # UTC day D had a bar (Saturday pulls nothing). Event/request-driven
+    description="Daily Databento futures ingestion into algo_data",
+    # Interim fixed 04:30 ET schedule, every day, pulling the UTC day that
+    # ended before the run (yesterday's New York date). Fixed at 04:30 because
+    # our Databento historical plan lags real time by ~8 hours: bar D is
+    # published around 08:00 UTC on D+1 (03:00/04:00 ET). The trading calendar
+    # decides per contract whether UTC day D had a bar. Event/request-driven
     # orchestration is tracked in https://github.com/AlgoGators/trade-ngin/issues/191
     # (transport: https://github.com/AlgoGators/trade-ngin/issues/192).
-    schedule="0 20 * * *",
+    schedule="30 4 * * *",
     start_date=datetime(2024, 12, 1, tzinfo=local_tz),
     catchup=False,
     tags=["data_pipeline"],

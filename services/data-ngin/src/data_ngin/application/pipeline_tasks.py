@@ -53,7 +53,7 @@ def bar_date_from_context(context: Any) -> date:
     The bar date a futures DAG run pulls (see close_pipeline.bar_date_for_run).
 
     The reference time is the run's data_interval_end: for a scheduled run of a
-    cron DAG that is the scheduled 20:00 America/New_York tick under either
+    cron DAG that is the scheduled 04:30 America/New_York tick under either
     Airflow timetable (CronTriggerTimetable: logical_date == data_interval_end ==
     the tick; CronDataIntervalTimetable: the interval ends at the tick), and it
     does not move when the task is retried later. A manual run can pin the date
@@ -93,7 +93,7 @@ def run_futures_close(config_name: str, bar_date: date) -> dict[str, Any]:
     from data_ngin.utils.dynamic_loader import load_config
 
     path = config_path(config_name)
-    logging.info(f"Running after-close pipeline {config_name} for {bar_date}, config={path}")
+    logging.info(f"Running daily futures pipeline {config_name} for {bar_date}, config={path}")
     return run_close_pipeline(load_config(path), bar_date)
 
 

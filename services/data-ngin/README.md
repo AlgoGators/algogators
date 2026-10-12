@@ -50,13 +50,15 @@ The **data-ngin** is a modular pipeline designed to fetch, clean, store, and ana
 - **`src/config/config.yaml`**: Defines global settings for the data engine
 - **`dags/data_pipeline_dag.py`**: Airflow DAG for automating daily data ingestion
 
-### After-close futures schedule (`data_pipeline_dag`, `new_data_pipeline_dag`)
+### Futures schedule (`data_pipeline_dag`, `new_data_pipeline_dag`)
 
-Both futures DAGs run at 20:00 America/New_York every day (an interim fixed
+Both futures DAGs run at 04:30 America/New_York every day (an interim fixed
 schedule; event/request-driven orchestration is tracked in
-AlgoGators/trade-ngin#191, transport #192). A run pulls bar date D, the run's
-New York date: Databento ohlcv-1d bars are UTC-day bars and UTC day D has ended
-by 20:00 ET in both EDT and EST (`application/close_pipeline.py`).
+AlgoGators/trade-ngin#191, transport #192). A run pulls bar date D, the UTC day
+that ended before it (yesterday's New York date): Databento ohlcv-1d bars are
+UTC-day bars, and our historical plan publishes them about 8 hours after the
+UTC day ends, i.e. around 08:00 UTC; 04:30 ET is 08:30 UTC in EDT and 09:30 UTC
+in EST (`application/close_pipeline.py`).
 
 - Per contract, `application/trading_calendar.py` decides from its exchange
   calendar (pandas_market_calendars) whether it traded during UTC day D. Those
@@ -69,8 +71,8 @@ by 20:00 ET in both EDT and EST (`application/close_pipeline.py`).
 - Before pulling, the run waits (up to `DATABENTO_AVAILABILITY_WAIT_MINUTES`,
   default 60) for Databento's `get_dataset_range` to show bar D published, and
   never requests past what is published. On 2026-10-12 the account's
-  historical GLBX.MDP3 data trailed real time by 8 hours, so bar D is
-  published around 08:00 UTC on D+1.
+  historical GLBX.MDP3 data trailed real time by 8 hours, which is why the
+  schedule is 04:30 ET and not right after the UTC day ends.
 - `new_data_pipeline_dag` then upserts `ops.data_ready` in new_algo_data
   (dataset `futures_ohlcv_1d`): `complete`, `partial` (with the missing
   symbols), or `failed` from the failure callback. That table is created by a

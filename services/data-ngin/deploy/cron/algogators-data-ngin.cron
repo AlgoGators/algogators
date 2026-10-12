@@ -10,7 +10,7 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Postgres -> S3 backup of algo_data and new_algo_data, Monday and Thursday.
 0 2 * * 1,4 ubuntu @REPO_DIR@/services/data-ngin/deploy/cron/pg_backup.sh >> /home/ubuntu/pg_backup.log 2>&1
 
-# Data freshness check, daily ~9am ET: after the 20:00 ET futures runs (and
+# Data freshness check, daily ~9am ET: after the 04:30 ET futures runs (and
 # their retries) and the 07:15 ET Tiingo run. Files or updates a GitHub
 # issue when a table is stale.
 0 13 * * * ubuntu @REPO_DIR@/services/data-ngin/deploy/cron/check_data_freshness.sh >> /home/ubuntu/data_freshness.log 2>&1

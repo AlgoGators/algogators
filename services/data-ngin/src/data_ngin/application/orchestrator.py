@@ -73,7 +73,7 @@ class Orchestrator:
             end_date (str): End date for fetching data.
             update_existing (bool): Overwrite rows already stored for the same
                 key with the fetched values (ON CONFLICT DO UPDATE) instead of
-                keeping them. The after-close pipeline sets this so a re-pull
+                keeping them. The daily futures pipeline sets this so a re-pull
                 corrects a provisional bar.
 
         Returns:

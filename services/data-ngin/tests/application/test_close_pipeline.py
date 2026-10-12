@@ -1,4 +1,4 @@
-"""After-close futures pipeline: bar-date derivation, gap backfill, readiness."""
+"""Daily futures pipeline: bar-date derivation, gap backfill, readiness."""
 
 import os
 import unittest
@@ -37,20 +37,29 @@ def to_storage(symbol: str) -> str:
 
 
 class TestBarDate(unittest.TestCase):
-    def test_20_et_in_edt_pulls_that_new_york_date(self) -> None:
-        run = datetime(2026, 10, 12, 20, 0, tzinfo=NY)  # 00:00 UTC Oct 13
+    def test_0430_et_in_edt_pulls_yesterdays_new_york_date(self) -> None:
+        run = datetime(2026, 10, 13, 4, 30, tzinfo=NY)  # 08:30 UTC Oct 13
+        self.assertEqual(run.astimezone(UTC).hour, 8)
         self.assertEqual(bar_date_for_run(run), date(2026, 10, 12))
 
-    def test_20_et_in_est_pulls_that_new_york_date(self) -> None:
-        run = datetime(2026, 1, 12, 20, 0, tzinfo=NY)  # 01:00 UTC Jan 13
+    def test_0430_et_in_est_pulls_yesterdays_new_york_date(self) -> None:
+        run = datetime(2026, 1, 13, 4, 30, tzinfo=NY)  # 09:30 UTC Jan 13
+        self.assertEqual(run.astimezone(UTC).hour, 9)
         self.assertEqual(bar_date_for_run(run), date(2026, 1, 12))
 
-    def test_sunday_run_pulls_sunday(self) -> None:
+    def test_monday_run_pulls_sunday(self) -> None:
         self.assertEqual(
-            bar_date_for_run(datetime(2026, 10, 11, 20, 0, tzinfo=NY)), date(2026, 10, 11)
+            bar_date_for_run(datetime(2026, 10, 12, 4, 30, tzinfo=NY)), date(2026, 10, 11)
         )
 
-    def test_earlier_run_never_pulls_an_unfinished_utc_day(self) -> None:
+    def test_dst_change_days(self) -> None:
+        # 2026-03-08 and 2026-11-01: the 04:30 tick still lands after 00:00 UTC.
+        self.assertEqual(bar_date_for_run(datetime(2026, 3, 8, 4, 30, tzinfo=NY)), date(2026, 3, 7))
+        self.assertEqual(
+            bar_date_for_run(datetime(2026, 11, 1, 4, 30, tzinfo=NY)), date(2026, 10, 31)
+        )
+
+    def test_run_never_pulls_an_unfinished_utc_day(self) -> None:
         run = datetime(2026, 10, 12, 19, 59, tzinfo=NY)  # 23:59 UTC Oct 12
         self.assertEqual(bar_date_for_run(run), date(2026, 10, 11))
 
@@ -59,8 +68,8 @@ class TestBarDate(unittest.TestCase):
 
     def test_context_uses_data_interval_end(self) -> None:
         context = {
-            "data_interval_end": datetime(2026, 1, 12, 20, 0, tzinfo=NY),
-            "logical_date": datetime(2026, 1, 11, 20, 0, tzinfo=NY),
+            "data_interval_end": datetime(2026, 1, 13, 4, 30, tzinfo=NY),
+            "logical_date": datetime(2026, 1, 12, 4, 30, tzinfo=NY),
             "dag_run": SimpleNamespace(conf={}, run_id="scheduled__x"),
         }
         self.assertEqual(pipeline_tasks.bar_date_from_context(context), date(2026, 1, 12))
