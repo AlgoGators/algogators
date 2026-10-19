@@ -1,0 +1,85 @@
+{
+ "open_s": 0.031708399998024106,
+ "n_chunks": 48,
+ "runs": [
+  {
+   "workers": 1,
+   "wall_s": 39.52583749999758,
+   "rows": 165326292,
+   "sum_chunk_s": 38.83439679998264,
+   "shared_prep_s": 6.237327199996798,
+   "shared_fills_s": 3.931519600067986,
+   "per_strategy_s_excl_shared": {
+    "cells_Fa": 10.956398199952673,
+    "cells_Fb": 6.658553399975062,
+    "cells_Fc": 8.129422300014994,
+    "family_volume": 2.916101199996774
+   },
+   "peak_rss_gb_per_process": {
+    "41904": 7.453196288
+   },
+   "peak_rss_gb_sum_workers": 7.453196288,
+   "main_peak_rss_gb": 8.027369472,
+   "cells_rows": {
+    "cells_Fa": 8833620,
+    "cells_Fb": 7328878,
+    "cells_Fc": 7246582,
+    "family_volume": 57
+   }
+  },
+  {
+   "workers": 2,
+   "wall_s": 23.874641799993697,
+   "rows": 165326292,
+   "sum_chunk_s": 40.43302809992747,
+   "shared_prep_s": 4.137681600084761,
+   "shared_fills_s": 4.267539399952511,
+   "per_strategy_s_excl_shared": {
+    "cells_Fa": 12.33997499992256,
+    "cells_Fb": 7.316875400021672,
+    "cells_Fc": 9.049257199949352,
+    "family_volume": 3.316354599999613
+   },
+   "peak_rss_gb_per_process": {
+    "39852": 2.889777152,
+    "40232": 2.938085376
+   },
+   "peak_rss_gb_sum_workers": 5.827862528,
+   "main_peak_rss_gb": 9.981341696,
+   "cells_rows": {
+    "cells_Fa": 8833620,
+    "cells_Fb": 7328878,
+    "cells_Fc": 7246582,
+    "family_volume": 57
+   }
+  },
+  {
+   "workers": 3,
+   "wall_s": 17.482180300008622,
+   "rows": 165326292,
+   "sum_chunk_s": 42.955935000034515,
+   "shared_prep_s": 4.534874899996794,
+   "shared_fills_s": 4.463469300040742,
+   "per_strategy_s_excl_shared": {
+    "cells_Fa": 12.935640299954684,
+    "cells_Fb": 7.677593000014895,
+    "cells_Fc": 9.669169299973873,
+    "family_volume": 3.6697531000099843
+   },
+   "peak_rss_gb_per_process": {
+    "48048": 2.338209792,
+    "43432": 2.283405312,
+    "36440": 2.341384192
+   },
+   "peak_rss_gb_sum_workers": 6.962999296,
+   "main_peak_rss_gb": 9.984172032,
+   "cells_rows": {
+    "cells_Fa": 8833620,
+    "cells_Fb": 7328878,
+    "cells_Fc": 7246582,
+    "family_volume": 57
+   }
+  }
+ ],
+ "ram_sized_workers(per_worker_gb=1.5, budget_gb=6, max_workers=3)": 3
+}

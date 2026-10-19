@@ -1,0 +1,444 @@
+# Predict-Ngin Configuration
+# Override in config/local.yaml for your environment
+
+# =============================================================================
+# DATA (canonical: data/research)
+# =============================================================================
+# All data defaults to data/research. DB generation is deprecated.
+database:
+  path: "data/research" # Legacy; DB deprecated. Use parquet in data/research.
+  polymarket_trades_path: "data/research"
+  parquet_dir: "data/polymarket" # scripts append /prices and /trades (TradeStore serves trades.parquet)
+  backup_enabled: false
+  backup_interval_hours: 24
+
+# =============================================================================
+# DATA COLLECTION
+# =============================================================================
+data:
+  # Polymarket (fetched data written here; research uses data/research)
+  polymarket:
+    gamma_api: "https://gamma-api.polymarket.com"
+    clob_api: "https://clob.polymarket.com"
+    ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    data_dir: "data/research"
+
+    # Fetching
+    min_volume_24h: 1000
+    max_markets: 500
+    request_delay: 0.1
+    max_workers: 20
+
+  # Kalshi
+  kalshi:
+    api_url: "https://api.elections.kalshi.com/trade-api/v2"
+    data_dir: "data/kalshi"
+    min_volume: 0 # Minimum volume to fetch trades
+    request_delay: 0.1
+
+  # Manifold
+  manifold:
+    api_url: "https://api.manifold.markets/v0"
+    request_delay: 0.1
+    data_dir: "data/manifold"
+
+# =============================================================================
+# WHALE STRATEGY
+# =============================================================================
+whale_strategy:
+  # Identification method
+  method: "win_rate_60pct" # Options: volume_top10, volume_pct95, large_trades, win_rate_60pct, combo_vol_win, profit_proxy
+
+  # Whale mode (shared by backtest + find_whale_opportunities)
+  #  - volume_only: 95th percentile volume in market (rolling)
+  #  - surprise_only: volume whales with positive surprise (requires resolutions)
+  #  - default: identify_polymarket_whales (mid_price_accuracy or volume_top10)
+  whale_mode: "volume_only"
+
+  # Volume-only mode: percentile threshold
+  volume_percentile: 95.0
+
+  # Unfavored filter: only underdog trades (BUY <=40c, SELL >=60c)
+  unfavored_only: false
+  unfavored_max_price: 0.40
+
+  # Performance filter: require positive expected return (capital-weighted shrunk WR > market-implied WR).
+  require_positive_surprise: true
+
+  # Min trade size (USD) to count
+  min_usd: 100.0
+
+  # Filters
+  min_trades: 20
+  min_volume: 1000
+  min_extreme_trades: 10 # For win rate calculation
+
+  # Win rate threshold (for win_rate methods)
+  min_win_rate: 0.60
+
+  # Rolling identification
+  rolling_enabled: true
+  lookback_months: 3
+
+  # Signal generation
+  min_signal_usd: 100
+
+  # Entry price upper bound: skip near-resolved markets (YES > 0.98).
+  # At YES > 0.98 the NO payout is under $0.02/dollar — economically unviable.
+  # Derived from dust-exclusion principle, not backtest performance.
+  max_entry_yes_price: 0.98
+
+  # Multi-whale confirmation (1 = disabled)
+  min_confirmation_whales: 1
+  confirmation_window_days: 7
+
+  # Max hold days before force-closing at CLOB price (0 = disabled)
+  max_hold_days: 0
+
+  # Bayesian shrinkage: Beta-Binomial prior (α=4, β=4 → prior mean 0.50, effective sample 8)
+  bayes_prior_alpha: 4.0
+  bayes_prior_beta: 4.0
+
+  # Recency decay: exponential half-life for weighting historical trades (0 = disabled)
+  recency_halflife_days: 90.0
+
+  # Information Coefficient scoring (0.0 weight = disabled)
+  ic_horizon_days: 7
+  ic_min_trades: 5
+  ic_score_weight: 0.20
+
+  # Scheduled TTR filter: skip entries with fewer than N days to scheduled close (0 = disabled)
+  min_ttr_entry_days: 0
+
+  # Partial exit: close fraction of position when gain exceeds threshold (0 = disabled)
+  partial_exit_gain_threshold: 0.40
+  partial_exit_fraction: 0.50
+
+  # Per-category directional price gate overrides.
+  # Each entry: [min_buy_yes_price, max_sell_yes_price]
+  # Falls back to global min_buy_yes_price / max_sell_yes_price when category absent.
+  # Original 5 cats are safe at 0.70/0.30 (no losers in backtest).
+  # Politics had losers at YES 0.31-0.41 so kept at tight 0.80/0.20.
+  category_price_gates:
+    Art_and_Culture: [0.70, 0.30]
+    Climate_and_Science: [0.70, 0.30]
+    Economy: [0.70, 0.30]
+    Finance: [0.70, 0.30]
+    Geopolitics: [0.80, 0.20]
+    Other: [0.80, 0.20]
+    Politics: [0.80, 0.20]
+
+# =============================================================================
+# STRATEGIES
+# =============================================================================
+strategies:
+  # Smart Money
+  smart_money:
+    enabled: true
+    min_trade_size: 1000
+    aggregation_window_hours: 4
+    imbalance_threshold: 0.6
+    min_volume: 10000
+    min_trades: 3
+
+  # Breakout
+  breakout:
+    enabled: true
+    lookback_hours: 24
+    breakout_threshold: 0.05
+    min_range_width: 0.03
+    max_range_width: 0.20
+    volume_multiplier: 2.0
+
+  # Time Decay
+  time_decay:
+    enabled: true
+    reversion_threshold: 0.15
+    acceleration_threshold: 0.85
+    stale_hours: 24
+    min_days_to_expiry: 1
+    max_days_to_expiry: 30
+
+  # Sentiment
+  sentiment:
+    enabled: true
+    lookback_hours: 6
+    divergence_threshold: 0.3
+    price_change_threshold: 0.02
+    min_trades: 10
+    exhaustion_threshold: 0.8
+
+  # Mean Reversion
+  mean_reversion:
+    enabled: true
+    lookback_hours: 48
+    z_threshold: 2.0
+    price_bounds:
+      min: 0.10
+      max: 0.90
+
+  # Momentum
+  momentum:
+    enabled: true
+    lookback_hours: 24
+    min_return: 0.05
+    price_bounds:
+      min: 0.15
+      max: 0.85
+
+  # Cross Market (within single platform)
+  cross_market:
+    enabled: false # Experimental
+    z_score_threshold: 2.0
+    lookback_hours: 72
+    min_spread_pct: 0.05
+    max_spread_pct: 0.30
+
+  # Cross-Platform Arbitrage (Polymarket vs Kalshi)
+  arbitrage:
+    enabled: false # Experimental
+    entry_spread: 0.05 # Minimum spread to enter (5 cents)
+    exit_spread: 0.01 # Close when spread narrows to this
+    min_expected_profit: 0.02 # Minimum profit after fees
+    z_score_threshold: 1.5
+    lookback_periods: 30 # Rolling window for spread stats
+    max_holding_periods: null # No forced exit by default
+    min_match_confidence: 0.40 # Minimum market match score
+    resample_freq: "1D" # Daily spread sampling
+    # Fee assumptions
+    polymarket_profit_fee: 0.0
+    kalshi_profit_fee: 0.07
+
+# =============================================================================
+# ENSEMBLE
+# =============================================================================
+ensemble:
+  enabled: true
+  method: "sharpe_weighted" # Options: equal, sharpe_weighted, inverse_correlation, risk_parity
+
+  weights:
+    whale_following: 0.40
+    smart_money: 0.20
+    momentum: 0.15
+    mean_reversion: 0.10
+    breakout: 0.10
+    time_decay: 0.05
+
+# =============================================================================
+# RISK MANAGEMENT
+# =============================================================================
+risk:
+  # Position limits
+  max_position_size: 1000
+  max_total_exposure: 10000
+  max_positions: 20
+  max_position_per_market: 1
+
+  # Drawdown limits
+  max_daily_drawdown: 0.05
+  max_weekly_drawdown: 0.10
+  max_total_drawdown: 0.20
+
+  # Time limits
+  max_holding_hours: 48
+
+  # Exit triggers
+  stop_loss_pct: 0.20
+  take_profit_pct: 0.30
+
+  # Market quality filters
+  min_liquidity: 500
+  min_volume_24h: 1000
+  max_spread: 0.10
+
+# =============================================================================
+# COST MODEL
+# =============================================================================
+costs:
+  base_spread_bps: 200 # 2%
+  base_slippage_bps: 50 # 0.5%
+  impact_coefficient: 0.5
+  fee_rate_bps: 10 # 0.1%
+
+# =============================================================================
+# BACKTESTING
+# =============================================================================
+backtest:
+  # Data split
+  train_ratio: 0.70
+  # Default market for whale strategy: "polymarket" or "manifold"
+  default_market: "polymarket"
+  # Require polars for parquet IO and whale stats (fail fast if unavailable)
+  require_polars: true
+  # Max position size as % of market cumulative liquidity (Polymarket)
+  max_position_liquidity_pct: 0.05
+  # Optional out-of-sample window (overrides train_ratio if set)
+  # test_days: 90
+  # test_months: 3
+  # test_start: "2025-01-01"
+  # test_end: "2025-03-31"
+
+  # Capital & execution defaults
+  starting_capital: 10000
+  include_open: true
+  enforce_one_position_per_market: true
+  min_liquidity: 0
+  min_volume: 0
+
+  # Execution simulation
+  fill_latency_seconds: 60
+  max_holding_seconds: 172800 # 48 hours
+
+  # Position sizing
+  default_position_size: 250
+  position_sizes_to_test: [100, 250, 500, 1000, 2500, 5000, 10000]
+
+  # Reporting
+  output_dir: "data/research"
+  generate_html_report: true
+
+# =============================================================================
+# PAPER TRADING
+# =============================================================================
+paper_trading:
+  initial_capital: 10000
+  state_file: "data/paper_trading_state.json"
+  log_file: "data/paper_trading_log.jsonl"
+
+  # Limits (can be tighter than live)
+  max_position_size: 500
+  max_positions: 10
+
+  # Update interval
+  check_interval_seconds: 1
+  price_update_interval_seconds: 10
+
+# =============================================================================
+# LIVE TRADING
+# =============================================================================
+live_trading:
+  enabled: false # Safety: must explicitly enable
+  dry_run: true # Safety: simulate by default
+
+  # API credentials (use environment variables instead)
+  # api_key: ${POLYMARKET_API_KEY}
+  # api_secret: ${POLYMARKET_API_SECRET}
+  # passphrase: ${POLYMARKET_PASSPHRASE}
+
+  # Conservative limits for live
+  max_position_size: 100
+  max_total_exposure: 500
+  max_positions: 5
+
+  # Execution
+  order_type: "market" # Options: market, limit, adaptive
+  slippage_tolerance: 0.02
+
+# =============================================================================
+# MONITORING
+# =============================================================================
+monitoring:
+  # Position monitor
+  position_check_interval: 10
+
+  # Alerts
+  alerts:
+    console: true
+    telegram:
+      enabled: false
+      bot_token: ""
+      chat_id: ""
+    discord:
+      enabled: false
+      webhook_url: ""
+    slack:
+      enabled: false
+      webhook_url: ""
+
+  # Alert thresholds
+  alert_on_trade: true
+  alert_on_pnl_threshold: 100 # USD
+  alert_on_drawdown_warning: 0.03
+  alert_on_drawdown_critical: 0.05
+
+# =============================================================================
+# LOGGING
+# =============================================================================
+logging:
+  level: "INFO" # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+  # File logging
+  file:
+    enabled: true
+    path: "logs/predict-ngin.log"
+    max_bytes: 10485760 # 10MB
+    backup_count: 5
+
+  # Execution logging
+  execution:
+    enabled: true
+    path: "data/execution_log.jsonl"
+    db_path: "data/execution_metrics.db"
+
+# =============================================================================
+# RESEARCH
+# =============================================================================
+research:
+  output_dir: "data/research"
+
+  # Whale features
+  whale_features:
+    top_n_traders: 1000
+    min_trades: 20
+    min_volume: 1000
+
+  # Regime detection
+  regime:
+    freq: "1H"
+    volatility_percentiles: [33, 67]
+
+  # Ensemble research
+  ensemble:
+    forward_hours: 24
+
+# =============================================================================
+# LIQUIDITY
+# =============================================================================
+liquidity:
+  # Snapshot capture
+  capture_interval_minutes: 5
+  min_volume_to_capture: 1000
+  max_markets_to_capture: 500
+
+  # Depth levels
+  depth_percentages: [0.01, 0.05, 0.10]
+
+# =============================================================================
+# EXPERIMENTS (NEW)
+# =============================================================================
+experiments:
+  enabled: true
+  dir: "research/experiments"
+  auto_track: true
+  git_commit: true
+
+# =============================================================================
+# TAXONOMY (NEW)
+# =============================================================================
+taxonomy:
+  path: "config/taxonomy.yaml"
+  method: "hybrid" # keyword, ml, hybrid
+  cache_classifications: true
+
+# =============================================================================
+# VALIDATION (NEW)
+# =============================================================================
+validation:
+  run_before_backtest: true
+  fail_on_error: true
+  checks:
+    - completeness
+    - date_gaps
+    - duplicates
+    - outliers

@@ -1,0 +1,52 @@
+# Workstream `quiver` (2026-10-14): does the Quiver Quantitative "Trader" API add value for prediction-market research?
+# Source: docs/QUIVER_SCREEN.md (scripts/research/quiver_*.py, data/vendor/quiver/ - local only, Quiver ToS no redistribution)
+- strategy_id: quiver_attention_mentions
+  name: Quiver attention data (Wikipedia / WSB / Twitter) predicting Kalshi mention and entertainment outcomes
+  venue: kalshi
+  status: rejected
+  evidence: "docs/QUIVER_SCREEN.md"
+  verdict: "Untestable with Quiver, so a null on Quiver's value: the Wikipedia endpoints return 404 (retired), Twitter history is empty (last row 2023-08), WSB history stops at 2025-02-21 and covers stock tickers only (not people or topics). The free Wikimedia pageviews API is the only usable attention source; Quiver adds nothing."
+  key_numbers: {quiver_wikipedia_status: 404, wsb_history_end: "2025-02-21", twitter_rows: 0}
+  gaps: "The free-Wikimedia version of the hypothesis was not run (out of scope for a Quiver screen)."
+  next_tests: "If wanted: Wikimedia pageviews (free) for the speakers in KXTRUMPMENTION / KXNFLMENTION etc. vs mention outcomes beyond price, train < 2025-12-01."
+  retest_if: "Quiver restores a person/topic-level attention history endpoint."
+- strategy_id: quiver_politics_policy
+  name: Quiver lobbying / gov-contract / congress-trading / bill-status features predicting Kalshi policy markets
+  venue: kalshi
+  status: rejected
+  evidence: "docs/QUIVER_SCREEN.md"
+  verdict: "Gate failed. Quiver legislation is a snapshot of 119th-Congress bill actions from 2025-03-03 to 2025-12-18 with no history parameter. Kalshi bill-specific policy markets are ~1 event per bill (SAVE Act, Epstein bill, reconciliation, border bill), well under 30 independent mappable events. All of Quiver's inputs (congress.gov, Senate LDA, STOCK Act PTRs, USAspending) are free at source. There is no economic channel from congressional stock trades to bill or shutdown outcomes that N could support."
+  key_numbers: {quiver_legislation_rows: 9896, legislation_action_dates: "2025-03-03..2025-12-18", kalshi_bill_shutdown_events: 147, kalshi_confirm_events: 53, kalshi_tariff_events: 65}
+  gaps: "No per-bill mapping attempted because of the gate; shutdown and tariff events depend on executive decisions that none of these feeds measure."
+  next_tests: "None with Quiver. congress.gov API (free) bill-status timing vs Kalshi bill markets is the only version worth a look."
+  retest_if: "Kalshi lists >= 30 bill-passage markets per year with liquid books."
+- strategy_id: quiver_kpi_altdata
+  name: Quiver alt-data (app ratings, flights, jobs, web traffic) predicting Kalshi company KPI markets
+  venue: kalshi
+  status: rejected
+  evidence: "docs/QUIVER_SCREEN.md"
+  verdict: "Untestable on this plan. App ratings are a rolling last-7-days snapshot (no history endpoint, historical/appratings 404); flights are frozen at 2025-07-23 (historical empty); jobs and web traffic return 404. No point-in-time series exists to backtest against the KPI ladders (FIN-D already found no stable KPI-ladder bias)."
+  key_numbers: {appratings_history_days: 7, appratings_apps: 1817, flights_last_date: "2025-07-23"}
+  gaps: "A forward log of daily app review counts (Quiver or free App Store scraping) could be collected for KXHOOD / app-download KPI series."
+  next_tests: "Optional: start a daily forward log of /beta/live/appratings for tickers with Kalshi KPI series; revisit after >= 4 release cycles."
+  retest_if: "A year of logged app review counts covers >= 20 Kalshi KPI events."
+- strategy_id: quiver_pm_large_trades
+  name: Follow Polymarket large (>= ~$10k) trades from Quiver's polymarkettrades feed
+  venue: polymarket_intl
+  status: rejected
+  evidence: "docs/QUIVER_SCREEN.md"
+  verdict: "No edge even at the whale's own execution price, before fees. 152,680 trades from 2025-10-02 to 2026-10-14; 147,026 resolved. Train (< 2026-04-01): event-mean -2.2%/$ (t -3.2), $-weighted -0.9% [-2.7, +1.0]. Test: -2.5% (t -3.6), $-weighted +0.6% [-1.8, +3.1]. Non-sports, >= $50k, BUY and SELL subsets are also null or negative. The tradeable version (H4b) was not run under the pre-registered stop rule; Quiver uploads trades in hourly batches with a 31-min median lag, and Polymarket's free data-api gives the same filter in real time. Confirms whale_follow_category."
+  key_numbers: {trades: 152680, resolved_trades: 147026, markets: 30184, train_ev_ret: -0.022, train_t: -3.21, train_usd_ret: -0.009, test_ev_ret: -0.025, test_usd_ret: 0.006, upload_lag_min_median: 31.4, sportslike_share: 0.79, pnl_yr_1k: 0}
+  gaps: "Resolved-only universe (96% of trades); ignores the wallet-stat columns (user_position_rank etc.) as conditioning features."
+  next_tests: "None."
+  retest_if: "Never on this feed; only a PIT wallet-skill model on the full Dune tape (see whale_follow_category retest_if)."
+- strategy_id: quiver_subscription_value
+  name: Quiver Quantitative Trader API as a prediction-market research data source (overall screen)
+  venue: kalshi
+  status: rejected
+  evidence: "docs/QUIVER_SCREEN.md"
+  verdict: "No value for prediction-market research. There is no Kalshi or PredictIt data and no Polymarket price, book or resolution history. The only prediction-market item is a lagged large-trade Polymarket feed (free elsewhere; no signal). Wikipedia, jobs and web traffic return 404; WSB, Twitter and flights are frozen; app ratings are a 7-day snapshot. Political endpoints repackage free government data, and Kalshi policy markets are too few to test. 'events beta' odds are stale 2020-election values."
+  key_numbers: {endpoints_probed: 67, endpoints_200: 57, endpoints_400_needs_params: 1, endpoints_403: 3, endpoints_404: 6, hypotheses: 5, testable: 1, pnl_yr_1k: 0}
+  gaps: "Free Wikimedia attention test (H1) not run; app-ratings forward log not started."
+  next_tests: "Optional free-data study: Wikimedia pageviews vs Kalshi mention outcomes."
+  retest_if: "Quiver adds Kalshi/Polymarket price history or restores attention/alt-data history endpoints."

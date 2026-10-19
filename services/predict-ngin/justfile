@@ -1,0 +1,28 @@
+# predict-ngin's own quality recipes (the root justfile dispatches here; they run in this folder).
+#
+# CI installs the workspace without extras, so every recipe asks for the ones it needs:
+# research (pandas-heavy research code the tests import), dev (import-linter) and viz
+# (streamlit, plotly). `uv run` adds them to the environment without removing anything.
+#
+# lint: ruff with predict-ngin's own config (it lints the predict_ngin package; the legacy
+# src/ and scripts/ trees are excluded) plus the import-layer contracts in .importlinter.
+# There is no `ruff format --check`: the code predates the formatter.
+
+extras := "--package predict-ngin --extra research --extra dev --extra viz"
+
+lint:
+    uv run ruff check .
+    uv run {{ extras }} lint-imports
+
+# mypy reads the workspace's [tool.mypy] only when run from the repo root. Only the
+# predict_ngin package is checked: scripts/ has duplicate module names (two dashboard.py).
+typecheck:
+    cd ../.. && uv run {{ extras }} mypy services/predict-ngin/predict_ngin
+
+# Tests marked `data` need local data files and skip themselves; -m drops them outright.
+test:
+    uv run {{ extras }} pytest -m "not data" \
+        --cov=predict_ngin \
+        --cov-report=xml:coverage.xml \
+        --cov-report=term-missing:skip-covered \
+        --cov-fail-under="${COVERAGE_MIN:-0}"

@@ -31,6 +31,7 @@ members = [
     "libs/research-core",
     "services/data-ngin",
     "services/research-api",
+    "services/predict-ngin",
     "apps/algoterminal",
 ]
 
@@ -130,6 +131,8 @@ module = [
     # algoterminal's terminal plotting and cointegration deps.
     "plotext.*",
     "statsmodels.*",
+    # predict-ngin's viz pages.
+    "plotly.*",
 ]
 ignore_missing_imports = true
 
