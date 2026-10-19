@@ -39,6 +39,10 @@
     "platform/db": {
       "release-type": "python",
       "package-name": "platform-db"
+    },
+    "services/predict-ngin": {
+      "release-type": "python",
+      "package-name": "predict-ngin"
     }
   }
 }
