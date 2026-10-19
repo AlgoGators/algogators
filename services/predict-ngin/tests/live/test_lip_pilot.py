@@ -207,8 +207,9 @@ def test_duplicate_client_order_id_409_adopts_existing_order():
     t = next(iter(pilot.markets))
     # first attempt lands, response lost -> client retries -> exchange says 409
     orig = ex._route
+    _state = {"n": 0}
 
-    def lossy(method, path, params, body, _state={"n": 0}):
+    def lossy(method, path, params, body):
         r = orig(method, path, params, body)
         if method == "POST" and _state["n"] == 0:
             _state["n"] += 1

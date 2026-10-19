@@ -152,6 +152,8 @@ def main():
         result = tuner.random_search(n_iterations=args.n_iterations)
     elif args.method == "bayesian_optimization":
         result = tuner.bayesian_optimization(n_iterations=args.n_iterations)
+    else:
+        raise ValueError(f"Unknown method: {args.method}")
     
     # Save results
     save_tuning_result(result, args.output)

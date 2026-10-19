@@ -68,7 +68,8 @@ def months(base: Optional[Path] = None) -> List[str]:
     i = md.schema.to_arrow_schema().get_field_index("timestamp")
     lo = min(md.row_group(r).column(i).statistics.min for r in range(md.num_row_groups))
     hi = max(md.row_group(r).column(i).statistics.max for r in range(md.num_row_groups))
-    out, y, m = [], *map(int, dt.datetime.fromtimestamp(lo, dt.timezone.utc).strftime("%Y %m").split())
+    out = []
+    y, m = map(int, dt.datetime.fromtimestamp(lo, dt.timezone.utc).strftime("%Y %m").split())
     end = dt.datetime.fromtimestamp(hi, dt.timezone.utc).strftime("%Y-%m")
     while f"{y:04d}-{m:02d}" <= end:
         out.append(f"{y:04d}-{m:02d}")

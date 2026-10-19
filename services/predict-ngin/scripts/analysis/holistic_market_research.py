@@ -48,6 +48,7 @@ def load_market_data(
     
     print("Loading market data...")
     markets_df = pd.DataFrame()
+    trades_df = None
     
     # 1. Use DB only when explicitly requested
     if use_db:
@@ -277,7 +278,7 @@ def load_market_data(
         print("  WARNING: No markets with volume found!")
         return pd.DataFrame(), pd.DataFrame()
     
-    return markets_df, trades_df if use_trades and 'trades_df' in locals() else pd.DataFrame()
+    return markets_df, trades_df if use_trades and trades_df is not None else pd.DataFrame()
 
 
 def categorize_markets(markets_df: pd.DataFrame) -> pd.DataFrame:

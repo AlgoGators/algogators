@@ -2,10 +2,11 @@
 """
 Derive Polymarket L2 API credentials from your private key.
 Run once after updating POLYMARKET_PRIVATE_KEY in .env.
-Prints the values to add to .env.
+Writes the values to .env (never prints them).
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -41,10 +42,17 @@ print("Deriving API credentials...")
 client = ClobClient(HOST, key=pk, chain_id=CHAIN_ID)
 creds = client.create_or_derive_api_key()
 
-print("\nAdd these to your .env file:")
-print(f"POLYMARKET_API_KEY={creds.api_key}")
-print(f"POLYMARKET_API_SECRET={creds.api_secret}")
-print(f"POLYMARKET_API_PASSPHRASE={creds.api_passphrase}")
+_env_path = _root / ".env"
+env_text = _env_path.read_text() if _env_path.exists() else ""
+for key, value in (("POLYMARKET_API_KEY", creds.api_key),
+                   ("POLYMARKET_API_SECRET", creds.api_secret),
+                   ("POLYMARKET_API_PASSPHRASE", creds.api_passphrase)):
+    env_text, n = re.subn(rf"^{re.escape(key)}=.*", lambda _m: f"{key}={value}", env_text,
+                          flags=re.MULTILINE)
+    if n == 0:
+        env_text = env_text.rstrip() + f"\n{key}={value}\n"
+_env_path.write_text(env_text)
+print(f"\nWrote POLYMARKET_API_KEY, POLYMARKET_API_SECRET, POLYMARKET_API_PASSPHRASE to {_env_path}")
 
 # Also check balance via CLOB
 print("\nChecking balance via CLOB API...")

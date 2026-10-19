@@ -59,7 +59,8 @@ def top(m):
 def audio_proc(url):
     import imageio_ffmpeg
     ff = imageio_ffmpeg.get_ffmpeg_exe()
-    if "youtube.com" in url or "youtu.be" in url:
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if host in ("youtu.be", "youtube.com") or host.endswith(".youtube.com"):
         src = subprocess.run([str(YTDLP), "-g", "-f", "bestaudio/best", url], capture_output=True, text=True,
                              check=True).stdout.strip().splitlines()[0]
     else:

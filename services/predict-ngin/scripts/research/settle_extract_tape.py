@@ -19,8 +19,8 @@ for p in pd.period_range("2021-06", pd.Timestamp.now(tz="UTC").strftime("%Y-%m")
                          m0, m1)).to_arrow_table()
     tk = t.column("ticker")
     m = None
-    for p in PREF:
-        x = pc.starts_with(tk, p)
+    for pref in PREF:
+        x = pc.starts_with(tk, pref)
         m = x if m is None else pc.or_(m, x)
     t = t.filter(m)
     out.append(t.to_pandas())

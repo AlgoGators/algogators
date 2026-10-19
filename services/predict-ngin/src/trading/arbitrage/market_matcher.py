@@ -340,6 +340,7 @@ class MarketMatcher:
 
         # Optionally precompute n-gram vectors for chunked similarity
         poly_ng = kalshi_ng = None
+        w = 0.0
         if self.use_ngrams:
             poly_ngrams = [_ngrams(t, 3) for t in poly_tokens]
             kalshi_ngrams = [_ngrams(t, 3) for t in kalshi_tokens]

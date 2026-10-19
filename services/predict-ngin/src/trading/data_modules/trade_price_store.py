@@ -59,7 +59,8 @@ class TradeBasedPriceStore(PriceStore):
                       - price (preferred) OR usd_amount + token_amount (to calculate)
             cache_size: LRU cache size for price histories
         """
-        # Don't call super().__init__() - we don't use file-based storage
+        # Base init only sets attributes (no file IO); we don't use file-based storage
+        super().__init__(cache_size=cache_size)
         self.base_dir = None
         
         # Store only market volume summary for metadata (much smaller than full trades)

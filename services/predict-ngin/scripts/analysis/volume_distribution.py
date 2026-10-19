@@ -315,6 +315,7 @@ def analyze_volume_distribution(
     volumes = df["volume_24hr"].values
     
     # Skewness and Kurtosis
+    scipy_stats = None
     try:
         from scipy import stats as scipy_stats
         SCIPY_AVAILABLE = True

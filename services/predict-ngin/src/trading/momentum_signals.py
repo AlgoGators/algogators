@@ -102,8 +102,7 @@ def generate_momentum_signals_parquet(
             continue
         if "outcome" in df.columns:
             df = df.filter(pl.col("outcome").cast(pl.Utf8).str.to_uppercase() == outcome.upper())
-        else:
-            df = df  # assume YES
+        # else: assume YES
 
         if df.is_empty():
             continue

@@ -254,6 +254,7 @@ def save_backtest_result(
                 json.dump(config, f, indent=2)
     
     # Save results
+    summary_dict = None
     if summary:
         # Save summary as JSON
         summary_dict = {

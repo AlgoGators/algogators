@@ -350,6 +350,7 @@ def main() -> int:
     # Charts
     if HAS_PLOT and not args.no_charts:
         sns.set_style("whitegrid")
+        cat_agg = summary_df[summary_df["category"] != "ALL"]
         if not pu_global.empty:
             fig, axes = plt.subplots(2, 2, figsize=(12, 10))
             if pu_global["holding_duration_avg_sec"].notna().any():
@@ -370,7 +371,6 @@ def main() -> int:
                 axes[1, 0].hist(np.log10(at + 1), bins=50, edgecolor="black", alpha=0.7)
             axes[1, 0].set_xlabel("Log10(avg trade USD + 1)")
             axes[1, 0].set_title("Avg trade size")
-            cat_agg = summary_df[summary_df["category"] != "ALL"]
             if not cat_agg.empty:
                 x = range(len(cat_agg))
                 axes[1, 1].bar([i - 0.2 for i in x], cat_agg["mean_markets_per_user"].fillna(0), width=0.35, label="Markets/user")

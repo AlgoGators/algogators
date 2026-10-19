@@ -48,7 +48,7 @@ except ImportError:
             pass
         def update(self, n=1):
             pass
-        def set_postfix(self, **kwargs):
+        def set_postfix(self, *args, **kwargs):
             pass
     tqdm = FakeTqdm
 

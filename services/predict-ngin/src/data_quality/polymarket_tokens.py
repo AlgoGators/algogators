@@ -393,6 +393,7 @@ def normalize_trades(
     if schema in ("onchain", "quant"):
         ns = out["nonusdc_side"].astype(str)
         oi_ns = pd.Series(np.where(ns.eq("token1"), 0.0, np.where(ns.eq("token2"), 1.0, np.nan)), index=out.index)
+        oi_real = None
         if schema == "quant":
             # Price, nonusdc_side and directions already expressed for token1 (YES); asset_id is the real token.
             already_yes = True

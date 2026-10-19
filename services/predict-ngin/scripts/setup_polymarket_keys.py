@@ -58,9 +58,8 @@ passphrase = creds.api_passphrase
 print("\n" + "=" * 60)
 print("  L2 credentials created — writing to .env")
 print("=" * 60)
-print(f"  POLYMARKET_API_KEY={api_key}")
-print(f"  POLYMARKET_API_SECRET={secret}")
-print(f"  POLYMARKET_API_PASSPHRASE={passphrase}")
+# names only: the values are secrets and go straight to .env, never to the terminal or a log
+print("  POLYMARKET_API_KEY, POLYMARKET_API_SECRET, POLYMARKET_API_PASSPHRASE")
 
 # ── write back to .env ────────────────────────────────────────────────────────
 env_text = _env_path.read_text()
