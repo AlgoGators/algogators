@@ -441,6 +441,7 @@ def main():
     parser.add_argument("--resolutions-only", action="store_true")
     parser.add_argument("--markets-only",     action="store_true")
     args = parser.parse_args()
+    all_sources = not (args.trades_only or args.resolutions_only or args.markets_only)
 
     # Staleness check
     if args.max_age_hours > 0:
@@ -455,7 +456,6 @@ def main():
                 print(f"  {k}: {v:.1f}h old")
             return
 
-    all_sources = not (args.trades_only or args.resolutions_only or args.markets_only)
     session = _session()
 
     print(f"\n{'='*55}")
