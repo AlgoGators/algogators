@@ -1,0 +1,22 @@
+# Long-dated tail-NO carry with Kalshi APY (user brief #6), causal fills.
+# Source: docs/TAILCARRY_LONG_DATED_NO_APY.md (scripts/research/tailcarry_*.py, data/vendor/tailcarry/)
+- strategy_id: tailcarry_long_dated_tail_no_highgap
+  name: Kalshi resting NO bids in Entertainment/World/Social when YES <= 8c for >= 7 days and > 30 days to latest expiration; exit when YES > 20c; 2%/event, 25%/category; APY on positions
+  venue: kalshi
+  status: rejected
+  evidence: docs/TAILCARRY_LONG_DATED_NO_APY.md
+  verdict: "Rejected on the pre-registered rule. The edge per contract is negative under every causal fill model, in both train (2021-07..2025-06) and test (2025-07..2026-03): test Fa -2.1c [-4.8, -0.5], Fb -3.0c [-6.0, -0.9], Fc -0.8c [-3.2, +0.7] (event-cluster CIs). The 2% event cap deploys $2.3-3.1k at $10k but loses $13-380/yr (Fb -$207, CI [-624, +147]); DSR is 0. The exit rule does the damage: 20-26% of fills are stopped out at a median NO price of 87-91c, yet 87-93% of those markets settle NO anyway. Without the exit (post hoc), High-gap hold-to-settlement is about 0c [-4, +2]. APY adds 3.5-4.5pp on deployed capital, but Kalshi pays the same rate on idle cash, so it is not incremental. The high-gap premise is inverted: low-gap Politics/Elections tail NO held to settlement is +1.2c/contract in test (CI > 0 under all three models; train +2.4-2.8c), but holds last 180-280 days, 30-65% of the test fills are still unresolved, and the position-sized book is -$451 to +$218/yr at $10k."
+  key_numbers: {test_fa_c: -2.14, test_fb_c: -2.98, test_fb_ci: "[-6.0, -0.9]", test_fc_c: -0.80, train_fb_c: -1.43, test_fb_pnl_yr_10k: -207, test_fb_ci_10k: "[-624, 147]", test_fb_avg_dep_10k_netted: 2455, test_fb_avg_dep_10k_gross: 3052, test_fc_pnl_yr_10k: -13, exit_share: "0.20-0.26", exited_settled_no: "0.87-0.93", hold_edge_test_fb_c_H: -0.70, hold_edge_test_fb_c_L: 1.16, apy_pp_on_deployed: "3.5-4.6", dsr: 0.0, n_trials: 8536}
+  gaps: "Tape fills (no book) and Q0 from 4 days of recorder tail books; horizon from latest_expiration_time (actual-close horizon is worse, so the proxy does not flatter); rules text and expiration fields are current versions; APY change dates assumed between published points; 1,855 still-open markets marked at last price; exits after 2026-03-01 unobservable (held)."
+  next_tests: "None for the high-gap categories. Fold the Politics/Elections hold-to-settlement observation into a fair-value study only if a settlement-wedge model is built."
+  retest_if: "An extended tape (>= 2026-09) shows Entertainment tail NO hold-to-settlement > +2c/contract under Fb with event-CI > 0 over >= 150 events, or Kalshi stops paying APY on idle cash while paying it on positions."
+- strategy_id: tailcarry_politics_tail_no_hold_posthoc
+  name: (post hoc) Politics/Elections tail NO (YES <= 8c >= 7d, > 30d left) held to settlement, no exit, causal fills
+  venue: kalshi
+  status: rejected
+  evidence: docs/TAILCARRY_LONG_DATED_NO_APY.md
+  verdict: "Post-hoc diagnostic, not pre-registered. Per contract it is positive in both splits (train +2.4 to +2.8c, test +1.2c, CI > 0 under Fa/Fb/Fc). It does not survive sizing: at $10k it makes -$451 (Fa), -$13 (Fb) and +$218 (Fc) per year, with CIs spanning 0. Holds last 180-280 days, so even +1.2c on 96c is about 2%/yr on deployed capital, below Kalshi's APY on idle cash. 30-65% of test fills are in markets that are still open (marked at last price)."
+  key_numbers: {train_hold_c: "2.4-2.8", test_hold_c: "1.16-1.28", test_pnl_yr_10k: "-451 to 218", hold_days_med: "177-282"}
+  gaps: "Post hoc; unresolved markets marked to market."
+  next_tests: "Re-score once the 2026 election markets settle (Nov 2026 onward)."
+  retest_if: "After the Nov-2026 settlements, test fills show >= +2c/contract under Fb with event-CI > 0 AND the sized book at $10k has CI > 0."

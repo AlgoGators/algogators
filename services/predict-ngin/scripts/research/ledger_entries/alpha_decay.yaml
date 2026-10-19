@@ -1,0 +1,11 @@
+# Arb alpha decay and liquidity scaling. Source: docs/ARB_ALPHA_DECAY.md
+- strategy_id: arb_alpha_decay_slow_taker
+  name: Slow (>=1s) arb harvesting in less-liquid markets (cross-venue, NegRisk, Kalshi ladders)
+  venue: kalshi+polymarket_intl
+  status: rejected
+  evidence: docs/ARB_ALPHA_DECAY.md
+  verdict: Cross-venue and Kalshi-ladder arb decay with ~8-month half-life (cross-venue 8.6 mo [5.5, 19.8]; 2026 quotes 2.7 mo); about 86% of the 2025H2-2026H2 cross-venue drop is Polymarket's 2026 taker fee, the rest is gaps compressing below the fee hurdle. NegRisk is not decaying (YES baskets +13.9%/month). Opportunities got smaller and rarer, not shorter (net-of-fee cross median 11s, unchanged). Thin markets keep crosses longer (duration ~ ADV^-0.52) but $ per opportunity scales ~1:1 with depth, so no liquidity bucket pays a $1k-$10k account at >=1s on real books (best +$3.4/wk at 1s; +$17/wk at 50ms; NegRisk sell +$16/wk at 250ms).
+  key_numbers: {half_life_xvenue_mo: 8.6, half_life_xvenue_2026_mo: 2.7, half_life_ladder_sell_mo: 7.6, negrisk_yes_trend_pm: 0.139, fee_share_of_drop: 0.86, net_cross_median_s: 11.3, elast_duration_adv: -0.52, elast_dollars_depth: 0.96, best_wk_1s: 3.4, best_wk_50ms: 17, negrisk_best_wk_250ms: 16}
+  gaps: One week of sub-second books; 622-pair 2026 sample with weights up to 25x; Kalshi quotes 218 events at 1-min resolution; maker counts only for NegRisk; data/polymarket/trades.parquet timestamps are wrong (2.000 s/block assumed vs ~2.14 s actual; 26% off by >1h) - repaired only for this study.
+  next_tests: Second every-change book week (Jan or Jun 2026); regress duration on PM active-maker counts; regenerate data/polymarket/trades.parquet timestamps from true block times.
+  retest_if: Polymarket sports taker fee < 0.02 or Kalshi fee cut; a new venue pair shows gross pre-game gaps > 2c more than 1% of the time; measured end-to-end latency <= 50ms.

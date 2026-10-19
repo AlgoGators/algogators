@@ -1,0 +1,11 @@
+# Workstream `mgdelt` (round 6, 2026-10-16). Source: docs/MGDELT_NEWS_ATTENTION.md
+- strategy_id: kalshi_mention_gdelt_news_attention
+  name: "GDELT speaker-and-term news co-mention intensity (NB residual z) and source breadth/HHI predicting Kalshi speaker-mention outcomes beyond price (momentum / fade branches)"
+  venue: kalshi
+  status: rejected
+  evidence: "docs/MGDELT_NEWS_ATTENTION.md; scripts/research/mgdelt_gkg.py; scripts/research/mgdelt_gkg_features.py; scripts/research/mgdelt_gate.py; data/vendor/mgdelt/gate_train.json"
+  verdict: "Null on train; stopped per pre-registration (no test fetch, no strategy). Decision 24-48h before event end (D 00:15 UTC), 3,007 markets / 179 events, 63 single-speaker series. z_w (winsorised NB residual, 3-day vs 56-day baseline with exposure + DOW): +0.043/SD, t=0.80, CV log-loss gain -0.00002 [-0.00101, 0.00103]. Breadth log1p(domains): +0.135/SD, t=1.61, CV gain CI incl 0. HHI t=-1.82 (secondary). Measured from raw GDELT GKG (titles/entities/quotes) because the DOC full-text API was throttled; the proxy misses common-noun terms (DOC-vs-GKG z Spearman 0.12 on 36 mkts)."
+  key_numbers: {train_markets: 3007, train_events: 179, z_t: 0.80, z_cv_dll_ci: "[-0.00101, 0.00103]", breadth_t: 1.61, breadth_cv_dll_ci: "[-0.00366, 0.00501]", hhi_t: -1.82, compliant_markets: 1293, compliant_z_t: 0.23, yes_minus_price_pp: -7.9, doc_gkg_z_spearman: 0.12, pnl_yr_1k: 0}
+  gaps: "GKG has no full text: term hits come from page titles, named entities and quotations, so policy jargon / slogans (Fed words, 'America First') are under-measured; DOC 2.0 full-text timelines were throttled (~1 response per 10 min from this IP). 1-in-4 hourly time subsample. GDELT outage 2025-06-14..07-01 drops 398 markets. ev_end from all closes in the event (mild timing look-ahead)."
+  next_tests: none
+  retest_if: "DOC 2.0 full-text timelines become pullable for the ~1,548 train (speaker, term) pairs (throttle lifts or a 1-2 day slow fetch is accepted; mgdelt_fetch.py resumes) - re-run the same frozen gate on z_w and breadth from DOC counts."

@@ -1,0 +1,12 @@
+# Workstream `whale_pit` (2026-10-17): whale following with a point-in-time wallet-skill score on the full on-chain tape.
+# Source: docs/WHALE_PIT_WALLET_SKILL.md (scripts/research/whale_pit_*.py; outputs data/research/whale_pit/, local only)
+- strategy_id: whale_follow_pit_wallet_skill
+  name: Follow Polymarket whale trades (>= $1k-25k) of wallets with a point-in-time skill score (24h markout or resolution), full lake tape
+  venue: polymarket_intl
+  status: rejected
+  evidence: "docs/WHALE_PIT_WALLET_SKILL.md"
+  verdict: "No edge. 0 of 48 pre-registered train (2024) configs has an event-clustered CI above 0. Frozen best (mk score, >= $25k, S >= 0.02, hold to resolution) on 2025: -4.1%/$ [-6.9, -1.4] after 60 s delay, 1-2c spread and taker fees; -0.35% [-3.1, +2.4] even at the whale's own price with no delay or cost. Below random activity-matched wallets (16th pctile) and score-shuffled (24th pctile); DSR ~0 (N=54). PIT scores rank resolution returns only weakly (top-bottom decile +4.1pp, from the worst wallets losing); a post-hoc fade of the worst decile loses 11-15%/$ after costs. Second out-of-sample year (pre-registered 2026-10-17, same frozen rule, signals 2026-01-01..10-16, fee era): -5.0%/$ [-6.6, -3.4] on 9,779 positions; -0.7% [-2.4, +0.9] at the whale's own price; random activity-matched wallets -5.3% (72nd pctile), shuffle 83rd pctile; $5k book -$4.5k/yr."
+  key_numbers: {train_configs: 48, train_configs_ci_above_0: 0, test_positions: 2902, test_events: 1850, test_ret_per_usd: -0.041, test_ci_lo: -0.069, test_ci_hi: -0.014, whale_price_gross_ret: -0.0035, no_fee_ret: -0.024, random_wallet_ret: -0.029, shuffle_ret: -0.031, canary_future_score_ret: 0.036, dsr: 0.0, n_trials: 54, book_5k_pnl_yr: -3946, decile_spread_mk: 0.041, test2026_positions: 9779, test2026_ret_per_usd: -0.0499, test2026_ci_lo: -0.0658, test2026_ci_hi: -0.0337, test2026_whale_price_gross_ret: -0.0072, test2026_book_5k_pnl_yr: -4480}
+  gaps: "Public resolution time proxied by last fill + 1 day; spread/depth proxied from prints (no 2024-25 books); 2026 fee schedule applied to 2024-25 (no-fee line still negative); crypto up/down and mention markets excluded; 2026 open markets (unresolved at 2026-10-16) marked at last print less 2c."
+  next_tests: "None. Wallet identity on Polymarket does not carry tradable skill at the follower's price."
+  retest_if: "Never as a follow signal. Only if a different information source identifies wallets (e.g. off-chain identity of known insiders) - out of scope and MNPI-sensitive."

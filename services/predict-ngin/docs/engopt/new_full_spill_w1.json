@@ -1,0 +1,38 @@
+{
+ "spill": true,
+ "open_s": 0.032877399993594736,
+ "n_chunks": 48,
+ "runs": [
+  {
+   "workers": 1,
+   "wall_s": 43.49687180000183,
+   "rows": 165326292,
+   "sum_chunk_s": 42.94858680006291,
+   "shared_prep_s": 3.5660466000117594,
+   "shared_fills_s": 5.3494273999967845,
+   "per_strategy_s_excl_shared": {
+    "cells_Fa": 12.89184170003864,
+    "cells_Fb": 8.426088299995172,
+    "cells_Fc": 9.857591400010278,
+    "family_volume": 2.852542800028459
+   },
+   "peak_rss_gb_per_process": {
+    "25088": 4.325371904
+   },
+   "peak_rss_gb_sum_workers": 4.325371904,
+   "main_peak_rss_gb": 4.325371904,
+   "peak_private_gb_per_process": {
+    "25088": 1.899065344
+   },
+   "peak_private_gb_sum_workers": 1.899065344,
+   "main_peak_private_gb": 1.899065344,
+   "cells_rows": {
+    "cells_Fa": 48,
+    "cells_Fb": 48,
+    "cells_Fc": 48,
+    "family_volume": 57
+   }
+  }
+ ],
+ "ram_sized_workers(per_worker_gb=1.5, budget_gb=6, max_workers=3)": 3
+}

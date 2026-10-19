@@ -1,0 +1,35 @@
+name: svc-predict-ngin · publish
+
+on:
+  push:
+    tags: ['predict-ngin/v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-python.yml
+    with:
+      path: services/predict-ngin
+    secrets: inherit
+
+  image:
+    needs: quality
+    uses: ./.github/workflows/_publish-container.yml
+    with:
+      path: services/predict-ngin
+      image: algogators/predict-ngin
+      environment: ghcr
+      push: ${{ !(inputs.dry-run || false) }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    secrets: inherit

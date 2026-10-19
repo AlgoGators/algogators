@@ -1,0 +1,61 @@
+# Kalshi daily temperature markets vs free forecasts and observations. Source: docs/WX_KALSHI_TEMPERATURE.md
+- strategy_id: wx_model_taker_kalshi
+  name: Kalshi temperature brackets, taker vs calibrated GFS/ECMWF/NBM fair value (day before / morning)
+  venue: kalshi
+  status: rejected
+  evidence: docs/WX_KALSHI_TEMPERATURE.md
+  verdict: "Market beats the point-in-time model at every decision time (Brier D-1 0.133 vs 0.160; D 08h 0.111 vs 0.152). Taker at print-confirmed quotes loses OOS -0.7 to -1.3c/contract, CI < 0 at every theta and capital (2025-07 to 2026-02). Train profit was top-5-event concentrated (89%). Confirms the outside kalshi-edge null."
+  key_numbers: {test_c_per_contract_th6: -0.67, test_pnl_yr_10k_th6: -58487, brier_mkt_d08: 0.111, brier_model_d08: 0.152, model_mae_lead1_F: 2.0}
+  gaps: Open-Meteo previous-runs only (IEM NBM text rate-limited); daily-lead granularity; tape ends 2026-02-11.
+  next_tests: None worth running unless a materially better forecast source appears.
+  retest_if: A forecast product beats the Kalshi price in Brier on a held-out month.
+- strategy_id: wx_model_maker_kalshi
+  name: Kalshi temperature maker quoting around calibrated forecast/nowcast fair value (causal fills)
+  venue: kalshi
+  status: rejected
+  evidence: docs/WX_KALSHI_TEMPERATURE.md
+  verdict: "Loses under all causal fill models (Fa 1c-inside 50%, Fb trade-through 25%, Fc join queue Q0=20 10%): test -1.6 to -2.3c/contract, CI < 0 at $1k and $10k, despite zero maker fee (quadratic fee_type). Adverse selection."
+  key_numbers: {test_c_per_contract_range: "-1.56..-2.28", test_pnl_yr_1k_range: "-21k..-27k", q0_contracts: 20}
+  gaps: Q0 from 1.5 days of recorder books; fair value is itself worse than the market.
+  next_tests: none
+  retest_if: A fair-value source beats the market price.
+- strategy_id: wx_flb_lateday_favourite_maker
+  name: Sell late-day temperature favourites (time-varying FLB, 0.5-0.95, 1-12h to close)
+  venue: kalshi
+  status: rejected
+  evidence: docs/WX_KALSHI_TEMPERATURE.md
+  verdict: "Print-weighted favourites look 5-14c overpriced in the last 1-6h (train and test), but the effect sits entirely in prints at the ask (+5.2c to the seller, test); at the bid it is -0.4c [-3.1,+2.4]. Resting sellers with causal queue fills lose -0.8 to -2.1c/contract. Polymarket's claimed late-favourite FLB does not transfer to Kalshi weather as a capturable edge."
+  key_numbers: {ask_prints_c: 5.17, bid_prints_c: -0.38, maker_test_c_range: "-0.8..-2.07"}
+  gaps: Tape ends 2026-02; no TWC-era trade tape.
+  next_tests: none
+  retest_if: Kalshi weather spreads widen persistently (median > 3c) with stable queue sizes.
+- strategy_id: wx_metar_convergence_taker_twc
+  name: Hit stale YES bids on brackets made impossible by the public METAR running max (TWC era)
+  venue: kalshi
+  status: rejected
+  evidence: docs/WX_KALSHI_TEMPERATURE.md
+  verdict: "In 2026-08-15..10-12 1-min candles, 0 of 1,968 METAR-dead brackets had a YES bid >= 2c at or after the METAR publication; the market converges first, off the faster 5-min feed. Tape-era (2024-11..2026-02) profits exist but concentrate in ~35 markets (warm-midnight carryover days) with METAR/CLI-mismatch tail losses; overlaps micro H2a (capacity_capped)."
+  key_numbers: {twc_dead_markets: 1968, twc_opportunities: 0, tape_test_c_per_contract: 10.0, tape_test_pnl_day: 18}
+  gaps: Candles have no sizes.
+  next_tests: none (superseded by wx_5min_feed_edge_taker)
+  retest_if: Market stops pricing off the 5-min feed (bids persist > 2c after METAR crossings).
+- strategy_id: wx_xcity_intraevent_consistency
+  name: Kalshi temperature intra-event (sum of brackets) and cross-city consistency
+  venue: kalshi
+  status: rejected
+  evidence: docs/WX_KALSHI_TEMPERATURE.md
+  verdict: "Locked buy-all/sell-all profit after fees in 6 of 139,845 event-minutes (18 cities, 2 months). Market-implied city differences track realised differences (corr 0.2-0.87); nothing tradable without a model that beats the market per city."
+  key_numbers: {lock_minutes: 6, event_minutes: 139845}
+  gaps: 1-min candles only.
+  next_tests: none
+  retest_if: Kalshi lists overlapping-station products (e.g. two contracts on the same CLI) with separate books.
+- strategy_id: wx_5min_feed_edge_taker
+  name: Sell YES on the bracket the free 5-min ASOS feed just crossed (5-min max overstates CLI by 1F ~25% of days)
+  venue: kalshi
+  status: unproven
+  evidence: docs/WX_KALSHI_TEMPERATURE.md
+  verdict: "Settlement mechanics: CLI = round(METAR incl. 6h max groups) 96-98%, but = 5-min-feed max only 71-77% (CLI = max5-1 on 18-25%). When the 5-min feed first crosses a bracket the market cuts its YES bid to ~8c, yet 14% still win. Hitting the YES bid 1 min after the (assumed 3-min-latency) feed crossing: +5.45c/contract, event-day CI [+3.1,+7.7], both halves positive, top-5 events 14%, 594 signals in 59 days (TWC era, no fitted parameters). Decays fast: +3.0c at 5 min, +1.9c (CI spans 0) at 15 min. ~ $4.4k/yr at 20 lots/signal with ~$155 average deployed: depth-limited, below the >= $1k deployed bar."
+  key_numbers: {c_per_contract_1m: 5.45, ci_lo: 3.08, ci_hi: 7.71, c_per_contract_5m: 2.98, signals_59d: 594, loss_rate: 0.145, pnl_yr_20lots: 4409, avg_deployed: 155, sharpe_paper: 11.2, dsr_7000: 0.995}
+  gaps: Real-time 5-min feed latency unmeasured (assumed 3 min); bid depth at signal unmeasured (candles have no size; recorder touch median ~20 contracts); 59 days, highs only, summer-autumn; the 5-min samples are reconstructed from the delayed 1-min archive.
+  next_tests: "Pre-register (bid >= 2c, act <= 1 min after feed obs, 20 lots max, highs, 18 recorder cities). Run a free api.weather.gov latest-obs collector (30 s polling) for 1-2 weeks alongside the recorder books; replay with real queue sizes and measured feed latency; paper-trade 4 weeks. Promote if >= +2c/contract with CI > 0 over >= 300 signals."
+  retest_if: Kalshi or TWC change the settlement value definition, or the market starts pricing 5-min crossings at < 2c.

@@ -1,0 +1,110 @@
+[project]
+name = "predict-ngin"
+version = "0.1.0"
+description = "Prediction-market research toolkit: data capture, tapes, costs and strategy evaluation for Kalshi and Polymarket."
+readme = "README.md"
+requires-python = ">=3.11"
+# Lower bounds only; uv.lock pins exact versions.
+# Derived from an AST scan of third-party imports in src/, scripts/ and tests/ (2026-10-15).
+dependencies = [
+    "aiohttp>=3.9",
+    "cryptography>=42",
+    "duckdb>=1.1",
+    "httpx>=0.27",
+    "huggingface-hub>=0.30",
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "pyarrow>=15",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+    "scipy>=1.11",
+    "websockets>=12",
+]
+
+[project.scripts]
+predict-ngin = "predict_ngin.lake.cli:main"
+
+[project.optional-dependencies]
+# Analysis/plotting/modelling libraries used by scripts/research and parts of src/.
+research = [
+    "brotli>=1.1",
+    "dash>=2.14",
+    "feedparser>=6.0",
+    "hmmlearn>=0.3",
+    "matplotlib>=3.8",
+    "numba>=0.59",
+    "plotly>=5.18",
+    "polars>=1.0",
+    "pytz>=2024.1",
+    "quantstats>=0.0.62",
+    "rich>=13",
+    "scikit-learn>=1.4",
+    "seaborn>=0.13",
+    "statsmodels>=0.14",
+    "tqdm>=4.66",
+    "xgboost>=2.0",
+    "yfinance>=0.2.40",
+    "zstandard>=0.22",
+]
+# Local data explorer: `uv run predict-ngin viz` (predict_ngin/viz).
+viz = [
+    "plotly>=5",
+    "streamlit>=1.30",
+]
+# Paper runners currently need only the core dependencies; reserved for paper-only libraries.
+paper = []
+dev = [
+    "import-linter>=2.0",
+    "pre-commit>=3.6",
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+desk = [
+    "playwright>=1.48",
+]
+# Deliberately NOT declared (each used by one or two scripts, heavy or account-bound):
+# databento, wrds, playwright, imageio-ffmpeg, openai,
+# sentence-transformers (torch), py-clob-client. Install ad hoc: `uv run --with <pkg> ...`.
+
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# `src` is the legacy package; installing it lets `from src.x import y` work without sys.path hacks.
+packages = ["predict_ngin", "src"]
+
+[tool.hatch.build.targets.sdist]
+include = ["predict_ngin", "src", "README.md", "pyproject.toml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Enforced on the new package only for now; legacy code is excluded.
+include = ["predict_ngin/**/*.py"]
+extend-exclude = ["src", "scripts", "tests", "research", "examples", "backtests", "run.py", "venv", ".venv", "data"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["predict_ngin", "src"]
+
+[tool.pyright]
+# Editor import resolution (Pylance / pyright) only; nothing here changes how code runs.
+# Scripts put scripts/research and src/ on sys.path at run time, which static analysis cannot see,
+# so their sibling (`import mkgap_common`) and legacy (`from trading import ...`) imports showed as
+# unresolved. Use the project venv, not a system Python without duckdb & co.
+venvPath = "../.."
+venv = ".venv"
+pythonVersion = "3.11"
+typeCheckingMode = "off"  # Pylance's default; a config file would otherwise switch to "standard"
+executionEnvironments = [
+    { root = "scripts/bench", extraPaths = ["scripts/research", "src"] },
+    { root = "scripts/research", extraPaths = ["src"] },
+    { root = "tests", extraPaths = ["src", "scripts/research", "scripts/live", "scripts"] },
+    { root = "scripts", extraPaths = ["src"] },
+    { root = "examples", extraPaths = ["src"] },
+    { root = "src", extraPaths = ["src"] },
+    { root = "." },
+]

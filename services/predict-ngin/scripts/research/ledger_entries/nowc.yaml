@@ -1,0 +1,23 @@
+# nowc (round 4): Kalshi jobless claims nowcast and earnings-mention base rates. Sources: docs/NOWC_JOBLESS_CLAIMS.md, docs/NOWC_EARNINGS_MENTION_BASERATE.md
+- strategy_id: kalshi_jobless_claims_nowcast
+  name: Kalshi KXJOBLESSCLAIMS ladder vs free DOL nowcast (NSA/seasonal-factor route, RW + 4wk blend), taker and causal maker
+  venue: kalshi
+  us_legal: true
+  status: rejected
+  evidence: docs/NOWC_JOBLESS_CLAIMS.md; docs/NOWC_CLAIMS_PREREG.md; scripts/research/nowc_claims_eval.py
+  verdict: "No edge. NSA forecast / published seasonal factor is worse than an SA random walk (log RMSE 9.0% vs 4.2%, blend weight 0); no free pre-release state data exists (state advance data comes out with the national print). Model beat thin 2025 prices in train (Brier 0.129 vs 0.136) but loses on the 2026-04..10 holdout (0.101 vs 0.080). Train-chosen taker (Wed noon, 3c margin) test -$459/yr at $1k (CI [-893,-128]); causal maker Fa/Fb/Fc test -$291/-$628/-$1,094 at $1k, worse at size. Avg deployed $1-410; events ~$12-16k notional."
+  key_numbers: {events: 59, test_events: 28, rmse_rw: 0.042, rmse_nsa_sf: 0.090, brier_mkt_test: 0.080, brier_model_test: 0.101, taker_test_pnl_yr_1k: -459, maker_fa_test_pnl_yr_1k: -291, maker_fc_test_pnl_yr_1k: -1094, avg_dep_max: 409, median_event_notional: 11989}
+  gaps: Google Trends untested (pytrends not installed; Trends re-normalises per pull); taker depth beyond first print unknown; 28 test events.
+  next_tests: none
+  retest_if: A free pre-release state-level NSA feed covering >= 40% of national claims with history appears.
+- strategy_id: kalshi_earnings_mention_baserate
+  name: Earnings-call mention markets vs press-release (EDGAR EX-99.1) and Kalshi prior-call base rates; base-rate-selected NO maker fade, taker YES/NO, same-quarter release lead-lag
+  venue: kalshi
+  us_legal: true
+  status: rejected
+  evidence: docs/NOWC_EARNINGS_MENTION_BASERATE.md; docs/NOWC_MENTION_PREREG.md; scripts/research/nowc_mention_eval.py
+  verdict: "Base rates are informative alone (said-last-call 77% vs 29%; in-last-release 75% vs 45%) but priced: logistic t = 0.56 (BR), 1.71 (pr_last), -0.57 (kb_last) beyond logit(price); test log-loss 0.5317 vs 0.5312 price-only. Coordinator framing (fade LOW-base-rate YES 10-40c words with causal NO bids) fails the kill rule: test -2.2c/contract Fa [-6.5,+2.0] on 1,658 fills, -$1.2k/yr at $1k (Fc -0.6c). Taker NO on LOW words (R3) +5.5c test but the unfiltered control earns +5.9c (period-wide YES overpricing, already-rejected family); R3 avg deployed $7, +$486/yr at $1k, DSR 0.04 vs 8,000 trials. Same-quarter release taker +2.0c, CI incl 0."
+  key_numbers: {markets: 5928, events: 437, test_events: 169, logit_t_br: 0.56, logit_t_pr_last: 1.71, test_ll_gain: -0.0005, r1_low_fa_test_edge_c: -2.2, r1_low_fa_test_fills: 1658, r1_low_fa_test_pnl_yr_1k: -1219, r3_test_edge_c: 5.5, r3_control_all_test_edge_c: 5.9, r3_test_pnl_yr_1k: 486, r3_avg_dep: 7, r3_dsr_8000: 0.04}
+  gaps: No full transcripts (Motley Fool ToS undecided; Seeking Alpha ~$240/yr); EDGAR coverage 92% (NVDA, AZO, TSM, etc. exhibit names unmatched); taker depth beyond first print unknown; print-based causal maker fills.
+  next_tests: "Optional: recorder-based depth check for T-24h NO taker on mention markets during the Oct-Nov 2026 earnings season (control vs LOW filter); the queued count-model study."
+  retest_if: Full free transcripts become usable AND a pre-registered transcript-count model improves test log-loss beyond price by >= 0.005 on >= 100 events.

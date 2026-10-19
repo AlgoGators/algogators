@@ -1,0 +1,16 @@
+# Copy to config/paper_monitor.local.yaml (gitignored) to add folders to the Paper trading page.
+# Every <data>/paper_trading/<name>/ folder with a status.json is found without this file.
+runs:
+  - name: my forward test
+    dir: data/research/my_study/forward   # relative to the repo root, or absolute
+    stale_hours: 26                         # flag it when nothing new was written for this long
+    performance:                            # optional: P&L for the Performance tab and the portfolio report
+      file: days/*.parquet                  # glob in the run folder (jsonl / csv / parquet / json)
+      time: [settle_ts, ts]                 # first non-null of these columns
+      pnl: pnl                              # summed per row; kind: pnl | cum_pnl | equity
+      costs: fee                            # cost columns (positive dollars)
+      costs_in_pnl: true                    # pnl is already net of costs
+      group: strategy                       # splits the book into strategies in the report
+      capital: 10000
+      # strategy_capital: {my_strategy: 2500}
+      # portfolio: false                    # leave this run out of the portfolio report

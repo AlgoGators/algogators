@@ -1,0 +1,9 @@
+# Optional machine-local storage settings. Copy to config/storage.local.yaml (gitignored) to use.
+#
+# cold_root: a slower or larger drive for rarely used data. scripts/data/storage_tier.py demote moves a data
+# folder there and leaves a link (a junction on Windows, a symlink elsewhere) at its old path, so code keeps
+# reading the same path. Leave it unset and everything stays in the repo's data/ folder (the default).
+# The PREDICT_NGIN_COLD environment variable overrides this file.
+#
+# cold_root: /mnt/archive/predict-ngin        # Linux / macOS example
+# cold_root: E:/predict-ngin-archive          # Windows example

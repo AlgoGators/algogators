@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2433; --muted: #6b7385; --line: #e3e6ec;
+  --accent: #2962ff; --pos: #0f9d6b; --neg: #d6455d; --warn-bg: #fff6e0; --warn-ink: #7a5300;
+  --chip: #eef1f6; --hover: #f0f3f9; --sel: #e6edff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1217; --panel: #161a21; --ink: #e6e9ef; --muted: #8a93a6; --line: #262c36;
+    --accent: #5b8cff; --pos: #2bbf8a; --neg: #ff6b81; --warn-bg: #2d2611; --warn-ink: #f3d27a;
+    --chip: #1f2530; --hover: #1c2129; --sel: #1d2a48;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.45 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+.app { display: grid; grid-template-columns: 290px 1fr; min-height: 100vh; }
+nav { border-right: 1px solid var(--line); background: var(--panel); padding: 16px 10px;
+  position: sticky; top: 0; height: 100vh; overflow: auto; }
+nav h1 { font-size: 15px; margin: 0 8px 4px; }
+nav .gen { color: var(--muted); font-size: 12px; margin: 0 8px 14px; }
+.tree a { display: flex; justify-content: space-between; gap: 8px; padding: 5px 8px;
+  border-radius: 6px; color: var(--ink); text-decoration: none; cursor: pointer; }
+.tree a:hover { background: var(--hover); }
+.tree a.sel { background: var(--sel); font-weight: 600; }
+.tree .l1 { padding-left: 20px; } .tree .l2 { padding-left: 36px; font-size: 13px; }
+.tree .v { font-variant-numeric: tabular-nums; font-size: 12px; }
+main { padding: 22px 28px 60px; min-width: 0; }
+.crumb { color: var(--muted); font-size: 12px; }
+.crumb a { color: var(--accent); cursor: pointer; text-decoration: none; }
+h2 { margin: 2px 0 2px; font-size: 22px; }
+.sub { color: var(--muted); margin-bottom: 14px; }
+.warn { background: var(--warn-bg); color: var(--warn-ink); border-radius: 8px; padding: 8px 12px;
+  margin: 0 0 14px; font-size: 13px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px;
+  margin-bottom: 18px; }
+.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.kpi .k { color: var(--muted); font-size: 12px; }
+.kpi .val { font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.kpi .d { color: var(--muted); font-size: 12px; }
+.pos { color: var(--pos); } .neg { color: var(--neg); }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 1100px) { .grid2 { grid-template-columns: 1fr; } .app { grid-template-columns: 1fr; }
+  nav { position: static; height: auto; } }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px 14px; margin-bottom: 14px; min-width: 0; }
+.card h3 { margin: 0 0 6px; font-size: 14px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted);
+  margin-bottom: 6px; }
+.legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; margin-right: 5px;
+  vertical-align: middle; }
+.chart { height: 260px; } .chart.tall { height: 340px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 13px; }
+th, td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--muted); font-weight: 500; cursor: pointer; user-select: none; position: sticky; top: 0;
+  background: var(--panel); }
+tbody tr.link { cursor: pointer; } tbody tr.link:hover { background: var(--hover); }
+.scroll { overflow-x: auto; }
+.muted { color: var(--muted); }
+.foot { color: var(--muted); font-size: 12px; margin-top: 28px; }
+.foot a { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="app">
+  <nav>
+    <h1>__TITLE__</h1>
+    <div class="gen" id="gen"></div>
+    <div class="tree" id="tree"></div>
+  </nav>
+  <main id="main"></main>
+</div>
+<script>__LWC__</script>
+<script>
+const DATA = __DATA__;
+const N = DATA.nodes;
+const dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const PALETTE = ['#2962ff', '#ff9800', '#0f9d6b', '#9c27b0', '#e91e63', '#00acc1', '#8d6e63',
+                 '#7cb342', '#5c6bc0', '#f4511e', '#26a69a', '#ab47bc'];
+let charts = [];
+
+const isNum = x => typeof x === 'number' && isFinite(x);
+const usd = x => !isNum(x) ? '–' : (x < 0 ? '−$' : '$') + Math.abs(x).toLocaleString(undefined,
+  {maximumFractionDigits: Math.abs(x) >= 100 ? 0 : 2});
+const pct = (x, d = 2) => !isNum(x) ? '–' : (x * 100).toFixed(d) + '%';
+const num = (x, d = 2) => x === 'inf' ? '∞' : !isNum(x) ? '–' : x.toFixed(d);
+const cls = x => !isNum(x) ? '' : x > 0 ? 'pos' : x < 0 ? 'neg' : '';
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+
+function tree() {
+  const t = document.getElementById('tree');
+  const row = (id, depth) => {
+    const n = N[id];
+    const v = n.metrics.net_pnl;
+    return `<a class="l${depth}" data-id="${esc(id)}"><span>${esc(n.name)}</span>` +
+           `<span class="v ${cls(v)}">${usd(v)}</span></a>` +
+           n.children.map(c => row(c, depth + 1)).join('');
+  };
+  t.innerHTML = row('portfolio', 0);
+  t.querySelectorAll('a').forEach(a => a.onclick = () => go(a.dataset.id));
+}
+
+function kpis(n) {
+  const m = n.metrics;
+  const items = [
+    ['Net P&L', usd(m.net_pnl), `gross ${usd(m.gross_pnl)}`, cls(m.net_pnl)],
+    ['Return', pct(m.total_return), n.capital ? `on ${usd(n.capital)}` : 'no capital set', cls(m.total_return)],
+    ['Ann. return', pct(m.ann_return), m.days < 7 ? 'needs 7+ days' : '', cls(m.ann_return)],
+    ['Sharpe (ann.)', num(m.sharpe), isNum(m.sharpe_se) ? `± ${num(m.sharpe_se)} SE` : '', cls(m.sharpe)],
+    ['Sortino', num(m.sortino), '', cls(m.sortino)],
+    ['P(Sharpe > 0)', pct(m.psr_gt0, 0), `t = ${num(m.t_stat)}`, ''],
+    ['Max drawdown', usd(m.max_drawdown), pct(m.max_drawdown_pct), 'neg'],
+    ['Ann. volatility', pct(m.ann_vol), '', ''],
+    ['Hit rate', pct(m.hit_rate, 0), `profit factor ${num(m.profit_factor)}`, ''],
+    ['Costs', usd(m.costs), isNum(m.costs_pct_gross) ? `${pct(m.costs_pct_gross, 0)} of |gross|` : '', ''],
+    ['Best / worst day', usd(m.best_period), usd(m.worst_period), ''],
+    ['Days', num(m.days, 0), `${m.periods} periods`, ''],
+  ];
+  if (isNum(m.diversification)) items.push(['Diversification', num(m.diversification), 'Σ child vol / vol', '']);
+  if (isNum(m.excess_return)) items.push(['vs benchmark', pct(m.excess_return), `bench ${pct(m.benchmark_return)}`, cls(m.excess_return)]);
+  return '<div class="kpis">' + items.map(([k, v, d, c]) =>
+    `<div class="kpi"><div class="k">${k}</div><div class="val ${c}">${v}</div><div class="d">${d}</div></div>`).join('') + '</div>';
+}
+
+function mkChart(el, opts = {}) {
+  const c = LightweightCharts.createChart(el, Object.assign({
+    autoSize: true,
+    layout: {background: {type: 'solid', color: 'transparent'}, textColor: css('--muted'), fontSize: 11},
+    grid: {vertLines: {color: css('--line')}, horzLines: {color: css('--line')}},
+    rightPriceScale: {borderColor: css('--line')},
+    timeScale: {borderColor: css('--line'), timeVisible: false},
+    crosshair: {mode: 0},
+    localization: {priceFormatter: p => Math.abs(p) >= 1e6 ? (p / 1e6).toFixed(2) + 'M'
+      : p.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})},
+  }, opts));
+  charts.push(c);
+  return c;
+}
+const pts = (dates, vals) => dates.map((t, i) => ({time: t, value: vals[i]})).filter(p => isNum(p.value));
+
+function legend(items) {
+  return '<div class="legend">' + items.map(([c, l]) => `<span><i style="background:${c}"></i>${esc(l)}</span>`).join('') + '</div>';
+}
+
+function syncTime(list) {
+  let busy = false;
+  list.forEach(src => src.timeScale().subscribeVisibleLogicalRangeChange(r => {
+    if (busy || !r) return; busy = true;
+    list.forEach(dst => { if (dst !== src) dst.timeScale().setVisibleLogicalRange(r); });
+    busy = false;
+  }));
+}
+
+function sortable(tbl) {
+  tbl.querySelectorAll('th').forEach((th, i) => th.onclick = () => {
+    const body = tbl.tBodies[0], rows = [...body.rows];
+    const dir = th.dataset.dir = th.dataset.dir === 'desc' ? 'asc' : 'desc';
+    rows.sort((a, b) => {
+      const x = a.cells[i].dataset.v, y = b.cells[i].dataset.v;
+      const nx = parseFloat(x), ny = parseFloat(y);
+      const r = (isNaN(nx) || isNaN(ny)) ? String(x).localeCompare(String(y)) : nx - ny;
+      return dir === 'asc' ? r : -r;
+    });
+    rows.forEach(r => body.appendChild(r));
+  });
+}
+
+function childTable(n) {
+  if (!n.children.length) return '';
+  const cols = [['Net P&L', 'net_pnl', usd], ['Gross', 'gross_pnl', usd], ['Costs', 'costs', usd],
+    ['Return', 'total_return', pct], ['Sharpe', 'sharpe', num], ['± SE', 'sharpe_se', num],
+    ['P(SR>0)', 'psr_gt0', x => pct(x, 0)], ['Sortino', 'sortino', num], ['Max DD', 'max_drawdown', usd],
+    ['Hit', 'hit_rate', x => pct(x, 0)], ['PF', 'profit_factor', num], ['Days', 'days', x => num(x, 0)]];
+  const share = id => { const t = n.metrics.net_pnl, v = N[id].metrics.net_pnl;
+    return isNum(t) && t !== 0 && isNum(v) ? v / Math.abs(t) : NaN; };
+  const head = `<tr><th>${n.level === 'portfolio' ? 'Book' : 'Strategy'}</th>` +
+    cols.map(c => `<th>${c[0]}</th>`).join('') + '<th>Share of net</th></tr>';
+  const rows = n.children.map(id => {
+    const m = N[id].metrics;
+    return `<tr class="link" data-id="${esc(id)}"><td data-v="${esc(N[id].name)}">${esc(N[id].name)}</td>` +
+      cols.map(([, k, f]) => `<td data-v="${isNum(m[k]) ? m[k] : ''}" class="${['net_pnl', 'total_return', 'sharpe'].includes(k) ? cls(m[k]) : ''}">${f(m[k])}</td>`).join('') +
+      `<td data-v="${share(id)}">${pct(share(id), 0)}</td></tr>`;
+  }).join('');
+  return `<div class="card"><h3>${n.level === 'portfolio' ? 'Books' : 'Strategies'} <span class="muted">(click a row to open; click a header to sort)</span></h3>` +
+    `<div class="scroll"><table id="kids"><thead>${head}</thead><tbody>${rows}</tbody></table></div></div>`;
+}
+
+function monthlyTable(n) {
+  const m = n.monthly;
+  if (!m.length) return '';
+  const years = [...new Set(m.map(r => r.month.slice(0, 4)))];
+  const months = ['01','02','03','04','05','06','07','08','09','10','11','12'];
+  const byKey = Object.fromEntries(m.map(r => [r.month, r]));
+  const cell = r => {
+    if (!r) return '<td></td>';
+    const v = r.return ?? r.net, f = r.return != null ? pct(r.return, 1) : usd(r.net);
+    const a = Math.min(0.85, Math.abs(v) / (r.return != null ? 0.05 : Math.max(1, Math.abs(n.metrics.best_period || 1) * 10)) + 0.08);
+    const bg = v > 0 ? `rgba(15,157,107,${a})` : v < 0 ? `rgba(214,69,93,${a})` : 'transparent';
+    return `<td style="background:${bg}">${f}</td>`;
+  };
+  return `<div class="card"><h3>Monthly ${n.capital ? 'returns' : 'net P&L'}</h3><div class="scroll"><table>` +
+    `<thead><tr><th>Year</th>${months.map(x => `<th>${x}</th>`).join('')}</tr></thead><tbody>` +
+    years.map(y => `<tr><td>${y}</td>${months.map(mm => cell(byKey[`${y}-${mm}`])).join('')}</tr>`).join('') +
+    '</tbody></table></div></div>';
+}
+
+function corrTable(n) {
+  const c = n.corr;
+  if (!c || !c.names.length) return '';
+  const head = '<tr><th></th>' + c.names.map(x => `<th>${esc(x)}</th>`).join('') + '</tr>';
+  const rows = c.names.map((r, i) => `<tr><td>${esc(r)}</td>` + c.values[i].map(v => {
+    if (!isNum(v)) return '<td>–</td>';
+    const a = Math.abs(v) * 0.75;
+    const bg = v > 0 ? `rgba(41,98,255,${a})` : `rgba(214,69,93,${a})`;
+    return `<td style="background:${bg}">${v.toFixed(2)}</td>`;
+  }).join('') + '</tr>').join('');
+  return `<div class="card"><h3>Correlation of daily net P&L</h3><div class="scroll"><table>` +
+    `<thead>${head}</thead><tbody>${rows}</tbody></table></div></div>`;
+}
+
+function crumb(id) {
+  const out = [];
+  for (let x = id; x; x = N[x].parent) out.unshift(x);
+  return out.map((x, i) => i === out.length - 1 ? esc(N[x].name) : `<a data-id="${esc(x)}">${esc(N[x].name)}</a>`).join(' › ');
+}
+
+function go(id) {
+  if (!N[id]) id = 'portfolio';
+  charts.forEach(c => c.remove()); charts = [];
+  const n = N[id], s = n.series, m = n.metrics;
+  document.querySelectorAll('.tree a').forEach(a => a.classList.toggle('sel', a.dataset.id === id));
+  const warn = [];
+  if (m.periods < 30) warn.push(`Only ${m.periods} days of data: Sharpe, Sortino and P(Sharpe>0) are noise at this length.`);
+  if (n.note) warn.push(esc(n.note));
+  if (!n.capital) warn.push('No capital set for this level: returns are blank; Sharpe uses daily P&L.');
+  const kidsLegend = n.children.map((c, i) => [PALETTE[i % PALETTE.length], N[c].name]);
+  const main = document.getElementById('main');
+  main.innerHTML =
+    `<div class="crumb">${crumb(id)}</div><h2>${esc(n.name)}</h2>` +
+    `<div class="sub">${n.level}${n.capital ? ' · capital ' + usd(n.capital) : ''} · ${s.dates[0] || ''} → ${s.dates[s.dates.length - 1] || ''}</div>` +
+    warn.map(w => `<div class="warn">${w}</div>`).join('') + kpis(n) +
+    `<div class="card"><h3>Equity</h3>${legend([[PALETTE[0], 'equity'], ...(s.benchmark ? [['#9e9e9e', 'benchmark']] : [])])}<div class="chart tall" id="c-eq"></div></div>` +
+    (n.children.length > 1 ? `<div class="card"><h3>Cumulative net P&L by ${n.level === 'portfolio' ? 'book' : 'strategy'}</h3>${legend(kidsLegend)}<div class="chart" id="c-kids"></div></div>` : '') +
+    `<div class="grid2"><div class="card"><h3>Drawdown</h3><div class="chart" id="c-dd"></div></div>` +
+    `<div class="card"><h3>Daily net P&L</h3><div class="chart" id="c-daily"></div></div></div>` +
+    `<div class="${s.rolling_sharpe ? 'grid2' : ''}"><div class="card"><h3>Transaction-cost drag</h3>${legend([['#0f9d6b', 'cumulative gross'], [PALETTE[0], 'cumulative net'], ['#d6455d', 'cumulative costs']])}<div class="chart" id="c-drag"></div></div>` +
+    (s.rolling_sharpe ? `<div class="card"><h3>Rolling Sharpe (${s.roll_window} days, annualised)</h3><div class="chart" id="c-roll"></div></div>` : '') + `</div>` +
+    childTable(n) + corrTable(n) + monthlyTable(n) +
+    `<div class="foot">Generated ${esc(DATA.generated)} by predict-ngin · charts: <a href="https://www.tradingview.com/" target="_blank" rel="noopener">TradingView Lightweight Charts™</a> (Apache 2.0)</div>`;
+  main.querySelectorAll('.crumb a').forEach(a => a.onclick = () => go(a.dataset.id));
+  main.querySelectorAll('tr.link').forEach(r => r.onclick = () => go(r.dataset.id));
+  const kt = document.getElementById('kids'); if (kt) sortable(kt);
+
+  const d = s.dates, synced = [];
+  const eq = mkChart(document.getElementById('c-eq'));
+  eq.addLineSeries({color: PALETTE[0], lineWidth: 2}).setData(pts(d, s.equity));
+  if (s.benchmark) eq.addLineSeries({color: '#9e9e9e', lineWidth: 1, lineStyle: 2}).setData(pts(d, s.benchmark));
+  eq.timeScale().fitContent(); synced.push(eq);
+  if (n.children.length > 1) {
+    const kc = mkChart(document.getElementById('c-kids'));
+    n.children.forEach((c, i) => kc.addLineSeries({color: PALETTE[i % PALETTE.length], lineWidth: 2})
+      .setData(pts(N[c].series.dates, N[c].series.cum_net)));
+    kc.timeScale().fitContent(); synced.push(kc);
+  }
+  const dd = mkChart(document.getElementById('c-dd'));
+  dd.addAreaSeries({lineColor: '#d6455d', topColor: 'rgba(214,69,93,0.05)', bottomColor: 'rgba(214,69,93,0.35)', lineWidth: 1, invertFilledArea: true}).setData(pts(d, s.drawdown));
+  dd.timeScale().fitContent(); synced.push(dd);
+  const dl = mkChart(document.getElementById('c-daily'));
+  dl.addHistogramSeries({}).setData(d.map((t, i) => ({time: t, value: s.net[i], color: s.net[i] >= 0 ? '#0f9d6b' : '#d6455d'})).filter(p => isNum(p.value)));
+  dl.timeScale().fitContent(); synced.push(dl);
+  const dg = mkChart(document.getElementById('c-drag'));
+  dg.addLineSeries({color: '#0f9d6b', lineWidth: 2}).setData(pts(d, s.cum_gross));
+  dg.addLineSeries({color: PALETTE[0], lineWidth: 2}).setData(pts(d, s.cum_net));
+  dg.addLineSeries({color: '#d6455d', lineWidth: 1}).setData(pts(d, s.cum_costs));
+  dg.timeScale().fitContent(); synced.push(dg);
+  if (s.rolling_sharpe) {
+    const rc = mkChart(document.getElementById('c-roll'));
+    rc.addLineSeries({color: '#9c27b0', lineWidth: 2}).setData(pts(d, s.rolling_sharpe));
+    rc.timeScale().fitContent(); synced.push(rc);
+  }
+  syncTime(synced);
+  history.replaceState(null, '', '#' + encodeURIComponent(id));
+}
+
+document.getElementById('gen').textContent = `Generated ${DATA.generated} · ${DATA.sources.join(', ')}`;
+tree();
+go(decodeURIComponent(location.hash.slice(1)) || 'portfolio');
+</script>
+</body>
+</html>

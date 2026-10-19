@@ -1,0 +1,41 @@
+[importlinter]
+root_packages =
+    predict_ngin
+    src
+    scripts
+include_external_packages = False
+
+[importlinter:contract:core-not-legacy]
+name = predict_ngin must not import legacy packages (D14) or research scripts
+type = forbidden
+source_modules =
+    predict_ngin
+forbidden_modules =
+    src.trading
+    src.whale_strategy
+    src.backtest
+    src.research
+    src.collection
+    src.storage
+    src.analysis
+    src.validation
+    src.tools
+    src.taxonomy
+    src.config
+    scripts
+
+[importlinter:contract:context-layers]
+name = predict_ngin bounded-context layers (higher may import lower, never the reverse)
+# viz (the Streamlit explorer) sits on top next to paper: it may import lake and below, and
+# nothing imports it.
+type = layers
+containers =
+    predict_ngin
+layers =
+    paper : viz
+    evaluation
+    lake : execution
+    costs : tapes : books : capture
+    venues
+    markets
+    shared

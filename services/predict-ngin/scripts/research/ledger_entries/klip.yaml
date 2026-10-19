@@ -1,0 +1,21 @@
+# Kalshi maker incentives (Liquidity Incentive Program). Source: docs/KLIP_KALSHI_MAKER_INCENTIVES.md
+- strategy_id: kalshi_lip_farming
+  name: Kalshi Liquidity Incentive Program (LIP) reward farming with small resting bids (causal fills, recorder books)
+  venue: kalshi
+  status: unproven
+  evidence: docs/KLIP_KALSHI_MAKER_INCENTIVES.md
+  verdict: "LIP is current (ends 2027-01-01), open to retail US members, listed by a public API (GET /incentive_programs). Pools grew from ~$6k/day (Oct 2025) to ~$297k/day (Oct 2026); 4,763-5,509 markets live on 2026-10-14. Target 1,000 contracts/side, DF 0.5/tick, whole crossing level counts (CFTC filing 2026-07-15). Reward to a small maker is large: ~0.8%/day of quoted capital in the causal replay, 1.45-1.9%/day on live books. Causal queue-tracked fills on 445 recorder markets (mentions, CPI, gas; 38 h, 23 events) eat it at the touch: -0.05% to -1.45%/day. Reference-level bids are the only non-negative family; best fixed config ref/1000 is +0.73%/day, CI [-0.8%, +2.3%] (+0.46% at 2x competition, +0.20% with 3 rivals, +1.27% at 25% fill share). Top-5 events carry 174% of net, and one CPI release went the quotes' way. Gas loses -2%/day. A point-in-time config selector (first 25% of each window) picks touch quotes that lose -3% to -6%/day out of sample (-$32/day at $1k)."
+  key_numbers: {pool_day_oct2026: 297406, pool_day_oct2025: 6142, active_programs: 5509, reward_per_capday_ref1000: 0.0083, net_per_capday_ref1000: 0.0073, net_ci_lo: -0.0082, net_ci_hi: 0.0231, net_comp2_ref1000: 0.0046, net_rival3_ref1000: 0.0020, net_share25_ref1000: 0.0127, top5_share_ref1000: 1.74, pit_oos_usd_day_1k: -32, usd_yr_1k_ref1000_hindsight: 2700, events: 23, sample_hours: 38}
+  gaps: "38 h of recorder books, 23 events, only 3 incentivised groups recorded (mentions, CPI, gas); the 15-min FX/crypto/commodity, Rotten Tomatoes, YouTube, weather and Treasury-rate pools (most of the money) have no causal fill data. Unsettled markets marked at last mid. Rewards computed from top-10 visible levels; payouts never verified with real orders. Probalytics Oct 6-12 books contain no incentivised markets (sports/Fed had no LIP). Event-level Sharpe meaningless at this sample; DSR ~0 against ~240 own variants and ~8,000 repo-wide."
+  next_tests: "(1) Extend the recorder to the top LIP series (KXRT, KXYTVIEWSW, KX*15M FX, KXRAIN, KX*YRRATEH, KXTEMPMIAH) and replay >= 14 days with klip_fill_sim.py; (2) pre-register: ref-level 1,000-contract bids, mentions/CPI only, pulled >= 24-72 h before close/event, fixed before looking at new data; (3) keep the 2-hourly read-only snapshot running to measure competition drift; (4) only then a <= $250 post-only pilot to verify payouts."
+  retest_if: "A >= 14-day causal replay of a rule fixed in advance shows net > 0.3%/day of capital with event-cluster CI excluding 0 and top-5 events < 50% of net, or Kalshi raises the discount factor / lowers target size, or a payout from a live pilot confirms the formula."
+- strategy_id: kalshi_volume_incentive_program
+  name: Kalshi Volume Incentive Program (pro-rata share of a per-market pool by executed volume)
+  venue: kalshi
+  status: rejected
+  evidence: docs/KLIP_KALSHI_MAKER_INCENTIVES.md
+  verdict: "Historical only. 22,360 volume programmes Sep 2025 - Sep 2026 ($932k in pools, last one ended 2026-09-20); Kalshi's CFTC filing of 2026-09-28 moved the end date to 2026-10-13 after the CFTC's 2026-08-12 advisory on volume-based incentives. Nothing to trade now; not tested."
+  key_numbers: {programmes: 22360, pools_usd: 931552, last_end: 20260920}
+  gaps: Not backtested (programme over).
+  next_tests: Watch GET /incentive_programs?type=volume for a relaunch.
+  retest_if: Kalshi relaunches a volume, margin_maker_volume or maker-rebate programme open to retail.
