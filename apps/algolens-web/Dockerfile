@@ -5,7 +5,8 @@
 #   docker build -f apps/algolens-web/Dockerfile --build-arg VITE_API_URL=https://algolens.algogators.com .
 FROM node:26-alpine AS build
 
-RUN corepack enable
+# Node 25+ no longer bundles corepack; the version matches package.json "packageManager".
+RUN npm install --global pnpm@9.15.0
 
 WORKDIR /repo
 
