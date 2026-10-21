@@ -2,6 +2,9 @@
 
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from research_api.infrastructure.config.qt import (
+    load_qt_settings,
+)
 from research_api.infrastructure.db.postgres import execute_query, get_db_connection
 from research_api.infrastructure.identity.dev_config import EnvironmentDevAuthConfig
 from research_api.infrastructure.identity.repositories import PostgresUserRepository
@@ -37,3 +40,32 @@ def create_portfolio_dependencies(connection_factory=None):
 
 def create_dev_auth_config():
     return EnvironmentDevAuthConfig()
+
+
+def create_screen_access_dependencies(connection_factory=None):
+    from research_api.infrastructure.identity.screen_access import (
+        PostgresScreenAccessRepository,
+    )
+
+    return PostgresScreenAccessRepository(connection_factory=connection_factory)
+
+
+def create_investor_dependencies(connection_factory=None):
+    """(strategy registry, investor repository) for the investor routes."""
+    from research_api.infrastructure.investor.repositories import PostgresInvestorRepository
+
+    registry = PostgresStrategyRegistry(connection_factory=connection_factory)
+    return registry, PostgresInvestorRepository(connection_factory=connection_factory)
+
+
+def create_desk_dependencies(connection_factory=None):
+    """(desk repository, desk gRPC client, QT settings) for the desk routes."""
+    from research_api.infrastructure.qt.desk_client import DeskClient
+    from research_api.infrastructure.qt.repositories import PostgresDeskRepository
+    from research_api.infrastructure.rpc import load_rpc_settings
+
+    settings = load_qt_settings()
+    rpc = load_rpc_settings()
+    repo = PostgresDeskRepository(connection_factory=connection_factory)
+    agent = DeskClient(rpc.engine_addr, timeout=rpc.timeout_seconds)
+    return repo, agent, settings

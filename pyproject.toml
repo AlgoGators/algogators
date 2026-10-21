@@ -71,7 +71,13 @@ dev = [
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-extend-exclude = ["platform/contracts/codegen/generated", "**/build", "**/dist"]
+extend-exclude = [
+    "platform/contracts/codegen/generated",
+    # protoc output, vendored from the engine's .proto files (scripts/gen_proto.sh)
+    "services/research-api/algogators",
+    "**/build",
+    "**/dist",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF"]
@@ -86,6 +92,13 @@ ignore = [
 # which is the only pattern that works on Windows; a context manager would
 # hold the handle open and break the reopen.
 "**/tests/**" = ["S101", "SIM115"]
+# The fake gRPC servicer must define the engine's CamelCase RPC method names.
+"services/research-api/tests/test_qt_desk_client.py" = ["N802"]
+# pytest idiom: a fixture imported from a shared module and then taken as a parameter.
+"services/research-api/tests/test_qt_integration.py" = ["F811"]
+# These files import after a skip/skipif guard or test unicode lookalike digits on purpose.
+"services/research-api/tests/test_qt_settings_domain.py" = ["E402"]
+"services/research-api/tests/test_qt_desk_domain.py" = ["RUF001"]
 # Sphinx requires a module-level `copyright` variable in conf.py.
 "**/docs/conf.py" = ["A001"]
 # Textual compose() methods nest `with` blocks to mirror the widget tree;
@@ -105,7 +118,7 @@ check_untyped_defs = true
 # quality workflow, which makes the root justfile pass --strict.
 strict = false
 # Sphinx docs and example scripts are not part of any package's API surface.
-exclude = ['/docs/', '/examples/']
+exclude = ['/docs/', '/examples/', 'services/research-api/tests/', 'services/research-api/algogators/']
 
 [[tool.mypy.overrides]]
 # Third-party packages in this stack that ship no type information.
@@ -148,6 +161,19 @@ module = [
     "tests.*",
 ]
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+# gRPC and protobuf ship no stubs in this stack; research-api talks to the engine through them.
+module = ["grpc", "grpc.*", "google.protobuf", "google.protobuf.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# protoc output (scripts/gen_proto.sh), regenerated from the engine's .proto files.
+module = ["algogators", "algogators.*"]
+# Skip, so every attribute of a generated module reads as Any (protoc builds them at import).
+follow_imports = "skip"
+ignore_missing_imports = true
+
 
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers --strict-config"
