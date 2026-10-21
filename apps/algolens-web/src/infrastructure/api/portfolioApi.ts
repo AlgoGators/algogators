@@ -1,9 +1,9 @@
 import type { Strategy, PortfolioData } from '../../domain/portfolio/portfolioData';
+import { fundTotals } from '../../domain/portfolio/fundTotals';
 import type { IncubatingStrategy, IncubationPerformance } from '../../domain/portfolio/incubationData';
-import {
-  aggregateEquityCurves,
-  computePortfolioTotals,
-} from '../../domain/portfolio/portfolioAggregation';
+import type { PortfolioList } from '../../domain/portfolio/portfolioRegistry';
+import type { PositionBook } from '../../domain/portfolio/bookLabel';
+import { bookQuery } from '../../domain/portfolio/portfolioRegistry';
 import { API_BASE_URL, fetchWithAuth, log } from './httpClient';
 
 export class PortfolioApiService {
@@ -77,6 +77,20 @@ export class PortfolioApiService {
     return data;
   }
 
+  /** The portfolio switcher: live portfolios grouped by portfolio_group. */
+  static async listPortfolios(): Promise<PortfolioList> {
+    const response = await fetchWithAuth(`${API_BASE_URL}/portfolio/portfolios`);
+    const data = await response.json();
+    return { groups: data.groups || [], deskEnabled: Boolean(data.deskEnabled) };
+  }
+
+  /** One portfolio's book by portfolio id; no book = qt with system fallback. */
+  static async getPortfolio(portfolioId: string, book: PositionBook | null): Promise<Strategy> {
+    const url = `${API_BASE_URL}/portfolio/portfolios/${encodeURIComponent(portfolioId)}${bookQuery(book)}`;
+    const response = await fetchWithAuth(url);
+    return response.json();
+  }
+
   static async getAllStrategies(): Promise<Strategy[]> {
     const response = await fetchWithAuth(`${API_BASE_URL}/portfolio/strategies`);
     const data = await response.json();
@@ -129,14 +143,11 @@ export class PortfolioApiService {
     );
     log('info', `All ${strategies.length} strategies fetched`);
 
-    // Calculate portfolio totals
+    // The fund's totals: every strategy is listed, but the QT desk book and its
+    // model twin are not added up (fundTotals.ts).
     log('info', 'Calculating portfolio totals...');
-    const { totalInvested, totalValue, totalReturn, totalReturnPercent } =
-      computePortfolioTotals(strategies);
-
-    // Aggregate historical data
-    log('info', 'Aggregating historical data...');
-    const historicalData = aggregateEquityCurves(strategies);
+    const { totalValue, totalInvested, totalReturn, totalReturnPercent, historicalData } =
+      fundTotals(strategies);
 
     const result = {
       totalValue,
