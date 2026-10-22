@@ -125,9 +125,18 @@ export class PortfolioApiService {
     log('info', 'Strategies data received:', strategiesData);
 
     const strategySummaries = strategiesData.strategies;
-    log('info', `Found ${strategySummaries?.length || 0} strategy summaries`);
+    if (!Array.isArray(strategySummaries)) {
+      const received =
+        strategySummaries === null || strategySummaries === undefined
+          ? String(strategySummaries)
+          : typeof strategySummaries;
+      throw new Error(
+        `Invalid /portfolio/strategies response: expected strategies to be an array, got ${received}`
+      );
+    }
+    log('info', `Found ${strategySummaries.length} strategy summaries`);
 
-    if (!strategySummaries || strategySummaries.length === 0) {
+    if (strategySummaries.length === 0) {
       log('warn', 'No strategies found in response');
     }
 

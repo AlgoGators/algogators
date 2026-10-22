@@ -149,6 +149,30 @@ describe('getPortfolioData', () => {
   });
 });
 
+
+  it('keeps a valid empty strategies array working', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ strategies: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const data = await PortfolioApiService.getPortfolioData();
+
+    expect(data.strategies).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([{}, { strategies: null }, { strategies: 'nope' }])(
+    'rejects a malformed strategies field without strategy-detail requests %#',
+    async (body) => {
+      const fetchMock = vi.fn().mockResolvedValue(jsonResponse(body));
+      vi.stubGlobal('fetch', fetchMock);
+
+      await expect(PortfolioApiService.getPortfolioData()).rejects.toThrow(
+        /expected strategies to be an array/
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    }
+  );
+
 describe('testConnectivity', () => {
   it('runs all three probes on the happy path', async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ status: 'ok' }));
