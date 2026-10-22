@@ -38,9 +38,10 @@ MIN_GAP = 1 / 0.3  # seconds between Predexon requests
 
 
 def key():
-    for l in open(".env"):
-        if l.startswith("PREDEXON_API_KEY"):
-            return l.split("=", 1)[1].strip().strip('"').strip("'")
+    with open(".env") as fh:
+        for l in fh:
+            if l.startswith("PREDEXON_API_KEY"):
+                return l.split("=", 1)[1].strip().strip('"').strip("'")
     raise SystemExit("PREDEXON_API_KEY missing")
 
 
@@ -190,7 +191,8 @@ def main():
                 for tok in toks:
                     fp = OUT / "raw" / f"{tok[:20]}_{d0:%Y%m%d}.json.gz"
                     if fp.exists():
-                        snaps = json.load(gzip.open(fp, "rt"))
+                        with gzip.open(fp, "rt") as fh:
+                            snaps = json.load(fh)
                     else:
                         snaps = px.day(tok, t0, t1)
                         with gzip.open(fp, "wt") as f:

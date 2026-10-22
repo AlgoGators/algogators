@@ -84,5 +84,6 @@ if __name__ == "__main__":
                         kurt=float(pd.Series(eb).kurt()))
     res["n_train_weeks"] = int(len(tr))
     print(json.dumps(res, indent=1))
-    json.dump(res, open(D / "claims_model_params.json", "w"), indent=1)
+    with open(D / "claims_model_params.json", "w") as fh:
+        json.dump(res, fh, indent=1)
     h.to_parquet(D / "claims_model_hist.parquet")
