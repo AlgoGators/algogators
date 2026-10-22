@@ -169,7 +169,11 @@ def test_health_reports_ok_when_database_reachable(client, monkeypatch):
     conn.close.assert_called_once()
 
 
-def test_health_degrades_with_error_detail_in_development(client, monkeypatch):
+def test_request_log_fields_cannot_add_lines():
+    assert app_factory._single_line_log("GET\r\nFAKE LOG") == "GET\\r\\nFAKE LOG"
+
+
+def test_health_degrades_without_exposing_error_detail_in_development(client, monkeypatch):
     def boom():
         raise RuntimeError("no database here")
 
@@ -180,7 +184,8 @@ def test_health_degrades_with_error_detail_in_development(client, monkeypatch):
     assert resp.status_code == 503
     body = resp.get_json()
     assert body["status"] == "degraded"
-    assert body["checks"]["database"] == "error: no database here"
+    assert body["checks"]["database"] == "error"
+    assert "no database here" not in resp.get_data(as_text=True)
 
 
 # --- JWT error loaders --------------------------------------------------------

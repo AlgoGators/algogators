@@ -465,6 +465,22 @@ def test_start_incubation_lifecycle_violation_maps_to_400(client, monkeypatch):
     assert response.get_json() == {"error": "Strategy is already incubating"}
 
 
+def test_start_incubation_hides_database_exception_detail(client, monkeypatch):
+    reader = RecordingReader(exc=IncubationError("Database error: private DSN"))
+    _patch_deps(monkeypatch, reader=reader)
+    csrf = _auth(client)
+
+    response = client.post(
+        "/portfolio/incubation/trendfollowing/start",
+        json={"mock_capital": 1000, "reason": "trial"},
+        headers={"X-CSRF-TOKEN": csrf},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "Unable to complete incubation request"}
+    assert "private DSN" not in response.get_data(as_text=True)
+
+
 def test_start_incubation_unexpected_error_returns_500(client, monkeypatch):
     reader = RecordingReader(exc=RuntimeError("db down"))
     _patch_deps(monkeypatch, reader=reader)

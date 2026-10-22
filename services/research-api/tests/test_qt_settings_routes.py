@@ -321,5 +321,9 @@ def test_nothing_is_saved_while_the_engine_cannot_check(client, settings_repo):
         json={"changes": [{"path": ["capital"], "value": 1}], "reason": "r"},
         headers=headers,
     )
-    assert response.status_code == 409 and "could not check" in response.get_json()["error"]
+    assert response.status_code == 409
+    assert (
+        response.get_json()["error"]
+        == "The desk action cannot proceed; check the current desk state"
+    )
     assert settings_repo.versions == []

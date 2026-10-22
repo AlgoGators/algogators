@@ -63,14 +63,14 @@ from research_api.infrastructure.config.dependencies import (
 desk_bp = Blueprint("desk", __name__)
 
 _ERRORS = (
-    (DeskRuleError, 400),
-    (SettingsRuleError, 400),
-    (DeskForbiddenError, 403),
-    (DeskNotFoundError, 404),
-    (DeskNotSeededError, 409),
-    (DeskConflictError, 409),
-    (DeskStaleError, 409),
-    (DeskGoneError, 410),
+    (DeskRuleError, 400, "Invalid desk request"),
+    (SettingsRuleError, 400, "Invalid desk settings"),
+    (DeskForbiddenError, 403, "This desk action is not permitted"),
+    (DeskNotFoundError, 404, "Desk resource not found"),
+    (DeskNotSeededError, 409, "The desk book is not ready"),
+    (DeskConflictError, 409, "The desk action cannot proceed; check the current desk state"),
+    (DeskStaleError, 409, "Desk quantities changed; refresh and retry"),
+    (DeskGoneError, 410, "This approval link has expired"),
 )
 
 # Override requests e-mail the VP and the President: at most this many per
@@ -118,9 +118,13 @@ def handled(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
-        except tuple(e for e, _ in _ERRORS) as exc:
-            status = next(code for error, code in _ERRORS if isinstance(exc, error))
-            body: dict[str, Any] = {"error": str(exc)}
+        except tuple(error for error, _, _ in _ERRORS) as exc:
+            # Domain exceptions can contain settings values or engine details.
+            # Only fixed messages cross the HTTP boundary.
+            status, message = next(
+                (code, message) for error, code, message in _ERRORS if isinstance(exc, error)
+            )
+            body: dict[str, Any] = {"error": message}
             if isinstance(exc, DeskStaleError):
                 body["changed"] = exc.symbols
             return jsonify(body), status
