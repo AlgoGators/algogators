@@ -67,7 +67,8 @@ AlgoLens (`services/research-api`, `apps/algolens-web`, `infra/algolens`, `libs/
    `apps/algolens-web` (eslint, tsc, vitest, build).
 2. **backend-image / frontend-image**: `_publish-container.yml` builds
    `services/research-api` and `apps/algolens-web` (repository root as the build context) and pushes
-   `ghcr.io/algogators/research-api` and `ghcr.io/algogators/algolens-web` tagged with the full SHA
+   `ghcr.io/algogators/algolens-backend` and `ghcr.io/algogators/algolens-frontend` (the names the box
+   already runs; the first monorepo deploy overrides them) tagged with the full SHA
    and `prod`, and outputs the **digest**. The
    frontend is built with `VITE_API_URL=https://algolens.algogators.com`
    (override with the repo variable `ALGOLENS_PUBLIC_URL`).
@@ -129,9 +130,9 @@ for its own box, so these carry an `ALGOLENS_` prefix. The `algolens-production`
 is optional and only adds protection rules (required reviewers). The old AlgoLens repository's
 secrets (`SSH_*`, `EC2_*`) are no longer used.
 
-GHCR pushes use `GITHUB_TOKEN`. The packages `research-api` and `algolens-web` are new, so the
-first push creates them under AlgoGators/algogators; if either was pushed by hand, grant
-AlgoGators/algogators **Write** under its *Package settings > Manage Actions access*.
+GHCR pushes use `GITHUB_TOKEN`. The packages `algolens-backend` and `algolens-frontend` were pushed
+by the old AlgoLens repository, so grant AlgoGators/algogators **Write** under each package's
+*Package settings > Manage Actions access*, or the first push returns 403.
 
 ## First-time bootstrap (trade-ngin box)
 

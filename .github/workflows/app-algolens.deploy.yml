@@ -65,7 +65,8 @@ jobs:
       path: services/research-api
       # repo-root context: the image installs the workspace libs (platform-db, research-core)
       context: .
-      image: algogators/research-api
+      # The image names the box already runs, so the first monorepo deploy overrides them.
+      image: algogators/algolens-backend
       push: ${{ !(inputs.dry-run || false) }}
     permissions:
       contents: read
@@ -81,7 +82,7 @@ jobs:
       path: apps/algolens-web
       # repo-root context: the app is a member of the pnpm workspace
       context: .
-      image: algogators/algolens-web
+      image: algogators/algolens-frontend
       # Baked into the static build; the site is same-origin behind the edge nginx.
       build-args: |
         VITE_API_URL=${{ vars.ALGOLENS_PUBLIC_URL || 'https://algolens.algogators.com' }}
@@ -105,9 +106,9 @@ jobs:
       # box's credentials are the ALGOLENS_SSH_* repository secrets below; the data-ngin deploy
       # uses SSH_* for its own box, so the two never share a name.
       environment: algolens-production
-      image: algogators/research-api
+      image: algogators/algolens-backend
       digest: ${{ needs.backend-image.outputs.digest }}
-      deploy-args: ghcr.io/algogators/algolens-web@${{ needs.frontend-image.outputs.digest }}
+      deploy-args: ghcr.io/algogators/algolens-frontend@${{ needs.frontend-image.outputs.digest }}
       remote-path: /home/ubuntu/algogators
       deploy-script: infra/algolens/deployment/deploy.sh
       sparse-paths: infra/algolens/deployment

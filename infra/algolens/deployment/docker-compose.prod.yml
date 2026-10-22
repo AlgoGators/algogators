@@ -72,6 +72,28 @@ services:
         aliases:
           - algolens-backend
 
+  # Queues and sends the daily report (research_api.infrastructure.reports.worker). Same image and
+  # env file as the backend. It does nothing unless REPORT_SEND_ENABLED=1 is in the env file, so
+  # deploying it changes nothing by itself. matplotlib needs more than the backend does: 256m.
+  report-worker:
+    image: ${BACKEND_IMAGE:?BACKEND_IMAGE is unset -- deploy.sh sets it to the CI-built digest}
+    container_name: algolens-report-worker
+    restart: unless-stopped
+    env_file:
+      - ${ALGOLENS_ENV_FILE:?ALGOLENS_ENV_FILE is unset}
+    command:
+      - python
+      - -m
+      - research_api.infrastructure.reports.worker
+      - --loop=60
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+    oom_score_adj: 800
+    logging: *logging
+    depends_on:
+      - backend
+
   frontend:
     image: ${FRONTEND_IMAGE:?FRONTEND_IMAGE is unset -- deploy.sh sets it to the CI-built digest}
     container_name: algolens-frontend
