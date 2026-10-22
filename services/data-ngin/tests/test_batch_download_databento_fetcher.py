@@ -69,13 +69,7 @@ class TestBatchDownloadDatabentoFetcher(unittest.IsolatedAsyncioTestCase):
         result = self.fetcher.generate_batches(
             start_date=start_date, end_date=end_date, unit=unit, max_units_allowed=max_units_allowed
         )
-        unit_lower = unit.lower()
-        if unit_lower == "daily":
-            time_unit = "D"
-        elif unit_lower == "hourly":
-            time_unit = "H"
-        elif unit_lower == "min":
-            time_unit = "min"
+        time_unit = {"daily": "D", "hourly": "H", "min": "min"}[unit.lower()]
         delta = pd.Timedelta(max_units_allowed, unit=time_unit)
         diff = pd.Timestamp(end_date) - pd.Timestamp(start_date)
         excepted = int(np.ceil(diff / delta))
