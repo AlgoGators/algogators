@@ -1,0 +1,311 @@
+# Market Taxonomy Configuration
+# Hierarchical categorization of prediction markets
+
+categories:
+  politics:
+    keywords:
+      - election
+      - president
+      - congress
+      - vote
+      - poll
+      - senate
+      - governor
+      - primary
+      - nominee
+      - campaign
+      - ballot
+      - legislation
+      - democrat
+      - republican
+    subcategories:
+      us_elections:
+        keywords:
+          - trump
+          - biden
+          - harris
+          - desantis
+          - electoral college
+          - swing state
+          - battleground
+      us_congress:
+        keywords:
+          - house
+          - senate
+          - midterm
+          - speaker
+          - majority
+      international:
+        keywords:
+          - uk
+          - france
+          - germany
+          - brazil
+          - mexico
+          - india
+          - prime minister
+          - parliament
+
+  crypto:
+    keywords:
+      - bitcoin
+      - btc
+      - ethereum
+      - eth
+      - crypto
+      - cryptocurrency
+      - blockchain
+      - token
+      - defi
+      - nft
+    subcategories:
+      price:
+        keywords:
+          - price
+          - above
+          - below
+          - reach
+          - hit
+          - ath
+          - all-time high
+      adoption:
+        keywords:
+          - etf
+          - approval
+          - regulation
+          - institutional
+          - reserve
+      altcoins:
+        keywords:
+          - solana
+          - cardano
+          - polkadot
+          - xrp
+          - dogecoin
+          - memecoin
+          - avalanche
+          - polygon
+          - arbitrum
+
+  sports:
+    keywords:
+      - nba
+      - nfl
+      - mlb
+      - nhl
+      - soccer
+      - football
+      - basketball
+      - baseball
+      - tennis
+      - ufc
+      - boxing
+      - championship
+      - playoffs
+      - super bowl
+      - world cup
+    subcategories:
+      us_sports:
+        keywords:
+          - nba
+          - nfl
+          - mlb
+          - nhl
+          - super bowl
+          - mvp
+          - draft
+      soccer:
+        keywords:
+          - premier league
+          - champions league
+          - uefa
+          - world cup
+          - fifa
+          - la liga
+          - bundesliga
+      combat:
+        keywords:
+          - ufc
+          - boxing
+          - mma
+          - heavyweight
+          - knockout
+
+  ai_tech:
+    keywords:
+      - ai
+      - artificial intelligence
+      - gpt
+      - llm
+      - machine learning
+      - chatgpt
+      - openai
+      - anthropic
+      - claude
+      - gemini
+      - deepmind
+    subcategories:
+      companies:
+        keywords:
+          - openai
+          - anthropic
+          - google
+          - microsoft
+          - meta
+          - nvidia
+          - apple
+      capabilities:
+        keywords:
+          - agi
+          - gpt-5
+          - multimodal
+          - reasoning
+          - benchmark
+      regulation:
+        keywords:
+          - ai safety
+          - regulation
+          - eu ai act
+          - governance
+
+  finance:
+    keywords:
+      - stock
+      - market
+      - spy
+      - s&p
+      - nasdaq
+      - dow
+      - fed
+      - interest rate
+      - inflation
+      - recession
+      - gdp
+      - earnings
+      - ipo
+    subcategories:
+      equity:
+        keywords:
+          - stock
+          - shares
+          - market cap
+          - earnings
+          - revenue
+      macro:
+        keywords:
+          - fed
+          - interest rate
+          - inflation
+          - cpi
+          - gdp
+          - recession
+          - unemployment
+      commodities:
+        keywords:
+          - gold
+          - silver
+          - oil
+          - crude
+          - commodity
+
+  geopolitics:
+    keywords:
+      - war
+      - conflict
+      - military
+      - invasion
+      - sanctions
+      - treaty
+      - nuclear
+      - nato
+    subcategories:
+      ukraine:
+        keywords:
+          - ukraine
+          - russia
+          - kyiv
+          - crimea
+          - zelensky
+          - putin
+      middle_east:
+        keywords:
+          - israel
+          - iran
+          - gaza
+          - hamas
+          - hezbollah
+          - saudi
+      asia:
+        keywords:
+          - china
+          - taiwan
+          - north korea
+          - xi jinping
+          - kim jong un
+
+  entertainment:
+    keywords:
+      - oscar
+      - emmy
+      - grammy
+      - netflix
+      - movie
+      - film
+      - tv
+      - album
+      - billboard
+      - box office
+    subcategories:
+      awards:
+        keywords:
+          - oscar
+          - emmy
+          - grammy
+          - golden globe
+          - nomination
+      streaming:
+        keywords:
+          - netflix
+          - disney
+          - hbo
+          - streaming
+          - subscriber
+
+  science:
+    keywords:
+      - nasa
+      - spacex
+      - mars
+      - moon
+      - climate
+      - vaccine
+      - fda
+      - drug
+      - trial
+      - research
+    subcategories:
+      space:
+        keywords:
+          - nasa
+          - spacex
+          - mars
+          - moon
+          - starship
+          - rocket
+          - satellite
+      health:
+        keywords:
+          - vaccine
+          - fda
+          - drug
+          - trial
+          - approval
+          - covid
+          - pandemic
+      climate:
+        keywords:
+          - climate
+          - temperature
+          - emission
+          - carbon
+          - renewable

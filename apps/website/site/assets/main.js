@@ -116,3 +116,31 @@
     el.textContent = new Date().getFullYear();
   });
 })();
+
+
+/* ── Application window ───────────────────────────────────────────────────
+   The only thing to edit for a new intake. `closes` drives which copy shows;
+   `term` and `closesLabel` are written into every place the page names them,
+   so the date and the semester are never typed into markup by hand.
+   Elements tagged [data-when="open"|"closed"] flip on the deadline with no
+   redeploy; closed variants ship `hidden`, so a visitor with JS disabled sees
+   the open copy rather than both and there is no flash on load. Reads the
+   visitor's clock, which is fine for an application deadline.              */
+var APPLICATIONS = {
+  term: 'Fall 2026',
+  closes: '2026-09-05T04:00:00Z',
+  closesLabel: 'September 4 · Midnight',
+};
+
+(function applicationWindow() {
+  var open = Date.now() < Date.parse(APPLICATIONS.closes);
+  document.querySelectorAll('[data-when]').forEach(function (el) {
+    el.hidden = (el.dataset.when === 'open') !== open;
+  });
+  document.querySelectorAll('[data-deadline]').forEach(function (el) {
+    el.textContent = APPLICATIONS.closesLabel;
+  });
+  document.querySelectorAll('[data-term]').forEach(function (el) {
+    el.textContent = APPLICATIONS.term;
+  });
+})();

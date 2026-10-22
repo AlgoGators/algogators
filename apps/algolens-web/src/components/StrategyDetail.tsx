@@ -7,17 +7,33 @@ import { FinancialAnalysis } from './FinancialAnalysis';
 import { PositionBreakdown } from './PositionBreakdown';
 import { TradingActivity } from './TradingActivity';
 import { AlphaAttribution } from './AlphaAttribution';
+import { describeServedBook } from '../domain/portfolio/bookLabel';
 
 interface StrategyDetailProps {
   strategy: Strategy;
   onBack: () => void;
+  backLabel?: string;
+  /** Rendered under the title, e.g. the book toggle of a portfolio view. */
+  headerExtra?: React.ReactNode;
+  /** The portfolio's name when it differs from the book's (D-24: a group shown as one). */
+  title?: string;
+  /** Rendered between the header and the chart, e.g. the QT desk panel. */
+  children?: React.ReactNode;
 }
 
-export function StrategyDetail({ strategy, onBack }: StrategyDetailProps) {
+export function StrategyDetail({
+  strategy,
+  onBack,
+  backLabel = 'Back to all portfolios',
+  headerExtra,
+  title,
+  children,
+}: StrategyDetailProps) {
   const [selectedPeriod, setSelectedPeriod] = useState('1M');
   const [selectedTab, setSelectedTab] = useState<'positions' | 'analysis' | 'activity'>('positions');
   const { theme } = useTheme();
   const periods = ['1W', '1M', '3M', '1Y', 'ALL'];
+  const bookLabel = describeServedBook(strategy);
 
   // Filter data based on selected period
   const filteredData = useMemo(() => {
@@ -73,23 +89,37 @@ export function StrategyDetail({ strategy, onBack }: StrategyDetailProps) {
           }`}
       >
         <ArrowLeft className="w-5 h-5" />
-        <span>Back to Strategies</span>
+        <span>{backLabel}</span>
       </button>
 
       <div className="mb-6">
         <div className="flex items-start justify-between">
           <div className="flex-1">
-            <h1 className="text-2xl md:text-3xl mb-1">{strategy.name}</h1>
+            <h1 className="text-2xl md:text-3xl mb-1">{title ?? strategy.name}</h1>
             <p className={theme === 'dark' ? 'text-gray-400' : 'text-gray-500'}>
               {strategy.description}
             </p>
             <div className={`text-sm mt-2 ${theme === 'dark' ? 'text-gray-400' : 'text-gray-500'
               }`}>
               Managed by {strategy.managers.join(' & ')} • {strategy.lastUpdate}
+              {bookLabel && (
+                <span
+                  data-testid="served-book"
+                  className={`ml-2 inline-block rounded px-2 py-0.5 text-xs ${strategy.fellBack
+                    ? theme === 'dark' ? 'bg-yellow-900/40 text-yellow-300' : 'bg-yellow-100 text-yellow-800'
+                    : theme === 'dark' ? 'bg-gray-800 text-gray-300' : 'bg-gray-100 text-gray-700'
+                    }`}
+                >
+                  {bookLabel}
+                </span>
+              )}
             </div>
+            {headerExtra && <div className="mt-3">{headerExtra}</div>}
           </div>
         </div>
       </div>
+
+      {children}
 
       <div className="mb-6">
         <div className="text-3xl md:text-4xl mb-2">
@@ -217,17 +247,6 @@ export function StrategyDetail({ strategy, onBack }: StrategyDetailProps) {
             )}
           </button>
         </div>
-
-        <button
-          onClick={onBack}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-colors ${theme === 'dark'
-              ? 'text-gray-300 hover:text-white hover:bg-gray-900'
-              : 'text-gray-700 hover:text-black hover:bg-gray-100'
-            }`}
-        >
-          <ArrowLeft className="w-5 h-5" />
-          <span>Back to Strategies</span>
-        </button>
       </div>
 
       {/* Tab Content */}

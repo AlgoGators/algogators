@@ -5,6 +5,22 @@ from typing import Any, ClassVar
 import pandas as pd
 from data_ngin.infrastructure.loader.loader import Loader
 
+# The contract CSVs ship inside the package (data_ngin/contracts/), so a
+# relative loader.file_path works the same in a source checkout and in an
+# installed image. DATA_NGIN_CONTRACTS_DIR points elsewhere without a rebuild.
+PACKAGE_CONTRACTS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "contracts"
+)
+
+
+def resolve_contract_path(file_path: str) -> str:
+    """Absolute paths are used as-is; relative ones resolve against
+    DATA_NGIN_CONTRACTS_DIR, else the packaged contracts directory."""
+    if os.path.isabs(file_path):
+        return file_path
+    base_dir = os.getenv("DATA_NGIN_CONTRACTS_DIR") or PACKAGE_CONTRACTS_DIR
+    return os.path.join(base_dir, file_path)
+
 
 class CSVLoader(Loader):
     """
@@ -34,7 +50,7 @@ class CSVLoader(Loader):
         """
         super().__init__(config=config)
         try:
-            self.contract_path: str = config["loader"]["file_path"]
+            self.contract_path: str = resolve_contract_path(config["loader"]["file_path"])
         except KeyError as e:
             logging.error(f"Missing required configuration key: {e}")
             raise KeyError(f"Missing required configuration key: {e}") from e

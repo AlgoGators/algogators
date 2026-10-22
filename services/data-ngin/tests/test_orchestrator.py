@@ -203,9 +203,10 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
         mock_fetcher = MagicMock()
         mock_fetcher.retrieve = AsyncMock(
             return_value=MagicMock(
+                empty=False,
                 to_dict=MagicMock(
                     return_value=[{"time": "2023-01-01", "symbol": "ES", "open": 100.5}]
-                )
+                ),
             )
         )
         mock_cleaner = MagicMock()
@@ -238,6 +239,53 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
             table="ohlcv_1d",
         )
         mock_inserter.close.assert_called_once()
+
+    @patch("data_ngin.application.orchestrator.get_instance")
+    async def test_retrieve_and_process_data_skips_empty_fetch(
+        self, mock_get_instance: MagicMock
+    ) -> None:
+        """An empty fetch (holiday window, already up to date) is a success
+        that touches neither the cleaner nor the database."""
+        mock_fetcher = MagicMock()
+        mock_fetcher.retrieve = AsyncMock(return_value=MagicMock(empty=True))
+        mock_cleaner = MagicMock()
+        mock_inserter = MagicMock()
+        mock_get_instance.side_effect = [MagicMock(), mock_fetcher, mock_cleaner, mock_inserter]
+
+        orchestrator = Orchestrator(config=self.mock_config)
+        result = await orchestrator.retrieve_and_process_data(
+            {"dataSymbol": "ES", "instrumentType": "FUTURE"}, "2023-01-01", "2023-01-02"
+        )
+
+        self.assertTrue(result)
+        mock_cleaner.clean.assert_not_called()
+        mock_inserter.connect.assert_not_called()
+        mock_inserter.insert_data.assert_not_called()
+
+
+class TestOrchestratorUpdateExisting(unittest.IsolatedAsyncioTestCase):
+    @patch("data_ngin.application.orchestrator.get_instance")
+    async def test_update_existing_upserts_both_tables(self, mock_get_instance: MagicMock) -> None:
+        import pandas as pd
+
+        fetcher, cleaner, inserter = MagicMock(), MagicMock(), MagicMock()
+        fetcher.retrieve = AsyncMock(return_value=pd.DataFrame([{"ts_event": 1, "symbol": "x"}]))
+        cleaner.clean.return_value = [{"time": 1, "symbol": "x"}]
+        mock_get_instance.side_effect = [MagicMock(), fetcher, cleaner, inserter]
+        config = {
+            "database": {"target_schema": "s", "raw_table": "r", "table": "t"},
+            "batch_downloading": {},
+        }
+        orchestrator = Orchestrator(config=config)
+
+        await orchestrator.process(
+            [({"dataSymbol": "6E", "instrumentType": "FUTURE"}, "2026-10-07", "2026-10-12")],
+            update_existing=True,
+        )
+
+        self.assertEqual(inserter.insert_data.call_count, 2)
+        for call in inserter.insert_data.call_args_list:
+            self.assertTrue(call.kwargs["update_on_conflict"])
 
 
 if __name__ == "__main__":

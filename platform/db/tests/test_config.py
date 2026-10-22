@@ -143,7 +143,7 @@ def test_config_is_frozen() -> None:
 
 def test_url_builds_sqlalchemy_dsn() -> None:
     config = _make()
-    assert config.url() == "postgresql://u:p@localhost:5432/db"
+    assert config.url() == "postgresql+psycopg2://u:p@localhost:5432/db"
 
 
 def test_url_escapes_reserved_characters() -> None:
@@ -151,7 +151,7 @@ def test_url_escapes_reserved_characters() -> None:
 
     url = config.url()
 
-    assert url == "postgresql://user%40corp:p%40ss%2Fw%3Ard%2B@localhost:5432/db"
+    assert url == "postgresql+psycopg2://user%40corp:p%40ss%2Fw%3Ard%2B@localhost:5432/db"
     # The unescaped password must not appear anywhere in the DSN.
     assert "p@ss/w:rd+" not in url
 

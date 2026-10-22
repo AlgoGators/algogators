@@ -1,0 +1,77 @@
+# LIP pilot configuration.
+#
+# SAFE DEFAULTS: dry_run: true, live: false. Live order entry needs ALL THREE gates:
+#   1. CLI flag --live
+#   2. env LIP_PILOT_LIVE=I_UNDERSTAND
+#   3. this file: live: true AND dry_run: false
+# Anything else is a dry run that only logs the orders it WOULD place.
+
+dry_run: true
+live: false
+
+api:
+  # Docs (2026-10) list https://external-api.kalshi.com/trade-api/v2; the repo's collectors use
+  # api.elections.kalshi.com. Both serve the same trade-api v2.
+  base_url: https://api.elections.kalshi.com/trade-api/v2
+  timeout_s: 15
+  read_rate_per_s: 5.0           # our own pacing (Basic tier allows 200 read tokens/s)
+  write_tokens_per_s: 20.0       # our own budget (Basic tier: 100 write tokens/s; order = 10, cancel = 2)
+  write_burst_tokens: 60.0
+  # Authenticated READ-ONLY GETs (positions/orders/fills/balance) in dry run. Off by default.
+  dry_run_account_reads: false
+
+selection:
+  series_prefix: KXAAAGAS
+  # lipx rule G (docs/LIPX_PREREG.md section 2, frozen book): 20 daily state gas series.
+  # Set to [] to use every KXAAAGAS* series (lipscan F1 universe).
+  series_allowlist: [KXAAAGASDOH, KXAAAGASDIN, KXAAAGASDIL, KXAAAGASDWI, KXAAAGASDCO, KXAAAGASDFL,
+                     KXAAAGASDNV, KXAAAGASDMI, KXAAAGASDNC, KXAAAGASDMA, KXAAAGASDCA, KXAAAGASDNJ,
+                     KXAAAGASDTN, KXAAAGASDMD, KXAAAGASDPA, KXAAAGASDAZ, KXAAAGASDOR, KXAAAGASDMN,
+                     KXAAAGASDVA, KXAAAGASDWA]
+  max_markets: 5                 # prereg section 6: <= 5 state gas markets
+  max_candidates_books: 40       # orderbooks fetched at selection (ranked by pool $/day first)
+  min_minutes_to_close: 120      # need >= pull + 60 min of quoting left at selection
+
+posture:
+  size_fraction_of_target: 0.25  # Target/4 (lipscan F1: 250 when Target = 1,000)
+  min_side_size: 10              # skip a side if the per-market cap allows fewer contracts
+  ticks_behind_best_bid: 1       # BB1
+  tick: 0.01
+  price_min: 0.03
+  price_max: 0.97
+  pull_minutes_before_close: 60
+  require_paid_snapshot: true    # quote a side only if our side incl. us and the other side's others reach Target
+  when_below_reference: skip     # skip | join_reference ; BB1 below the reference = a rival >= T/5 at the best bid
+  min_reprice_interval_s: 5
+  maker_fee_per_contract: 0.0    # KXAAAGAS has no maker fee as of 2026-10-14 (KQ doc); re-check before live
+
+caps:
+  max_total_at_risk_usd: 250
+  max_per_market_at_risk_usd: 50
+  max_markets: 5
+
+kill:
+  max_daily_loss_usd: 50
+  max_drawdown_usd: 100
+  max_total_loss_usd: 30         # prereg section 6: stop on a loss above $30
+  position_tolerance_contracts: 0
+  max_consecutive_api_errors: 3
+  max_api_errors_per_10min: 10
+  stale_book_s: 120
+  max_clock_skew_s: 5
+  # competition monitors
+  pennying_max_reprices: 6       # reprices of one side within pennying_window_s
+  pennying_window_s: 600
+  queue_ahead_fraction_of_target: 0.2   # new size strictly ahead of us >= T/5 ...
+  queue_ahead_persist_s: 300            # ... persisting this long
+  cusum_markout_horizon_s: 300
+  cusum_k: 0.10                  # $/contract allowance (audit: BB1 fills -0.148 at settlement)
+  cusum_h: 0.60                  # $/contract alarm threshold
+
+loop:
+  book_poll_s: 3
+  reconcile_every_s: 60
+  max_runtime_h: 16
+
+paths:
+  log_dir: data/live/lip_pilot

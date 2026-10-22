@@ -13,8 +13,11 @@ from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from research_api.adapters.http.api import api_bp
 from research_api.adapters.http.auth import auth_bp
+from research_api.adapters.http.desk import desk_bp
 from research_api.adapters.http.portfolio import portfolio_bp
+from research_api.adapters.http.sim import sim_bp, sim_mode_enabled
 from research_api.extensions import limiter
 from research_api.infrastructure.db.postgres import get_db_connection
 
@@ -95,10 +98,12 @@ def create_app():
             request.path,
             request.remote_addr,
         )
-        if request.get_json(silent=True):
-            data = request.get_json()
+        data = request.get_json(silent=True)
+        if isinstance(data, dict) and data:
             safe_data = {
-                key: ("***" if key in ["password"] else value) for key, value in data.items()
+                # The approval token is a credential: never logged.
+                key: ("***" if key in ["password", "token"] else value)
+                for key, value in data.items()
             }
             app.logger.debug("Request body: %s", safe_data)
 
@@ -196,9 +201,24 @@ def create_app():
 
     app.register_blueprint(auth_bp, url_prefix="/auth")
     app.register_blueprint(portfolio_bp, url_prefix="/portfolio")
+    app.register_blueprint(desk_bp, url_prefix="/portfolio/desk")
+    app.register_blueprint(api_bp, url_prefix="/api")
+    if sim_mode_enabled():
+        # Local simulator only (sim/): the banner's clock. Absent otherwise.
+        app.logger.warning("[SIM_MODE] SIM_MODE=1: GET /api/sim is on (simulator)")
+        app.register_blueprint(sim_bp, url_prefix="/api/sim")
+
+    @app.route("/health/live", methods=["GET"])
+    def liveness_check():
+        """Liveness: the process serves requests. No database: the container
+        healthcheck uses this, so a database outage does not mark the
+        backend unhealthy (and restart it) while the DB is the problem."""
+        return {"status": "ok"}, 200
 
     @app.route("/health", methods=["GET"])
     def health_check():
+        """Readiness: the backend can reach its database (503 when not).
+        deploy.sh gates a deploy on this."""
         app.logger.info("[HEALTH] Health check called")
 
         health_status: dict[str, Any] = {"status": "ok", "checks": {}}

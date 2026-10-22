@@ -181,10 +181,12 @@ def detail_handler(
             assert params is not None
             stream = params[2] if len(params) == 3 else None
             return equity.get(stream, [])
-        if "CURRENT_DATE" in sql:
-            return yesterday
-        if "latest_positions" in sql:
-            return positions
+        if "to_regclass" in sql:
+            return {"present": False}  # no contract metadata: sizes stay 1
+        if "SELECT 1 FROM trading.positions" in sql:
+            return {"?column?": 1}  # the requested book has rows
+        if "FROM trading.positions" in sql and "DISTINCT ON" in sql:
+            return yesterday if "AND date < (" in sql else positions
         if "FROM trading.executions" in sql:
             return executions
         raise AssertionError(f"Unexpected SQL: {sql}")
@@ -250,14 +252,13 @@ def test_fetch_detail_rows_assembles_all_sections_with_stream_scoping() -> None:
     assert result.yesterday_positions == yesterday
     assert conn.closed
 
-    # The column probe ran exactly once for the whole call (cached in-call).
-    assert len(cursor.calls_matching("information_schema.columns")) == 1
+    # The column probe runs for positions, live_results and executions (portfolio_type).
+    assert len(cursor.calls_matching("information_schema.columns")) == 3
     equity_params = [params for _, params in cursor.calls_matching("FROM trading.equity_curve")]
     assert equity_params == [
         ("LIVE_TREND_FOLLOWING", "MAIN", "qt"),  # primary curve
         ("LIVE_TREND_FOLLOWING", "MAIN", "qt"),  # per-stream pass
         ("LIVE_TREND_FOLLOWING", "MAIN", "system"),
-        ("LIVE_TREND_FOLLOWING", "MAIN", "benchmark"),
     ]
 
 

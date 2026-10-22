@@ -28,17 +28,26 @@ class InserterConfig(ComponentConfig):
 
 
 class ProviderConfig(BaseModel):
+    """
+    `name` and `asset` are common to every provider. The rest are
+    Databento-only (Tiingo needs none of them), so they are optional here and
+    DatabentoFetcher reads them by key, failing at fetch time if absent.
+    """
+
     name: str
     asset: str
-    dataset: str
-    schema_name: str = Field(alias="schema")
-    roll_type: str
-    contract_type: str
+    dataset: str | None = None
+    schema_name: str | None = Field(default=None, alias="schema")
+    roll_type: str | None = None
+    contract_type: str | None = None
 
     model_config = ConfigDict(populate_by_name=True)
 
 
 class DatabaseConfig(BaseModel):
+    # Which database the pipeline reads and writes. None falls back to the
+    # DB_NAME env var (see OhlcvRepository._get_pool).
+    db_name: str | None = None
     target_schema: str
     raw_table: str
     table: str
@@ -47,6 +56,8 @@ class DatabaseConfig(BaseModel):
 class TimeRangeConfig(BaseModel):
     start_date: str | None = None
     end_date: str | None = None
+    # First-run start when start_date is blank AND the target table is empty.
+    seed_start_date: str | None = None
 
 
 class MissingDataConfig(BaseModel):
