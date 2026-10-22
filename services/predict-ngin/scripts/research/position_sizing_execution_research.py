@@ -47,6 +47,7 @@ sys.path.insert(0, str(project_root))
 
 import argparse
 import json
+import math
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -132,7 +133,7 @@ class KellySizing(PositionSizingMethod):
         win_prob = min(0.95, max(0.5, signal_strength))
         
         # Simplified Kelly fraction
-        kelly = (win_prob - 0.5) / volatility if volatility > 0 else 0.1
+        kelly = 0.1 if math.isnan(volatility) else (win_prob - 0.5) / volatility
         kelly = max(0.0, min(0.5, kelly))  # Cap at 50%
         
         size = capital_available * kelly * self.kelly_fraction
@@ -184,7 +185,7 @@ class RiskParitySizing(PositionSizingMethod):
         available_risk = max(0.1, 1.0 - portfolio_heat)
         risk_budget = capital_available * available_risk * 0.1  # 10% risk budget
         
-        size = risk_budget / volatility if volatility > 0 else base_size
+        size = base_size if math.isnan(volatility) else risk_budget / volatility
         return max(base_size * 0.5, min(size, base_size * 2))
 
 
