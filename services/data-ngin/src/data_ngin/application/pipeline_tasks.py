@@ -107,6 +107,30 @@ def write_futures_readiness(
     return write_readiness(load_config(config_path(config_name)), bar_date, run_id, failed=failed)
 
 
+def write_contract_futures_readiness(
+    config_name: str,
+    bar_date: date,
+    run_id: str | None,
+    failed: bool = False,
+    expected: int | None = None,
+    loaded: int | None = None,
+    missing: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """Upsert ops.data_ready for `bar_date` under dataset 'futures_contract_ohlcv_1d'."""
+    from data_ngin.application.close_pipeline import write_contract_readiness
+    from data_ngin.utils.dynamic_loader import load_config
+
+    return write_contract_readiness(
+        load_config(config_path(config_name)),
+        bar_date,
+        run_id,
+        failed=failed,
+        expected=expected,
+        loaded=loaded,
+        missing=missing,
+    )
+
+
 def should_retry_run(result: dict[str, Any], try_number: int, max_tries: int) -> bool:
     """Whether a futures run's result should fail the try so Airflow retries it
     (see close_pipeline.should_retry_for_missing)."""
