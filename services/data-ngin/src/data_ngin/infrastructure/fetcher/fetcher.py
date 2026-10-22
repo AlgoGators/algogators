@@ -2,6 +2,8 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
+import pandas as pd
+
 
 class Fetcher(ABC):
     """
@@ -25,17 +27,20 @@ class Fetcher(ABC):
         self.logger.setLevel(logging.INFO)
 
     @abstractmethod
-    def fetch_data(self, symbol: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
+    async def fetch_data(
+        self, symbol: str, loaded_asset_type: str, start_date: str, end_date: str
+    ) -> pd.DataFrame:
         """
         Abstract method to fetch historical data for a given symbol over a specified date range.
 
         Args:
             symbol (str): The symbol for which to fetch data.
+            loaded_asset_type (str): Asset type used to select provider settings.
             start_date (str): Start date of the data in 'YYYY-MM-DD' format.
             end_date (str): End date of the data in 'YYYY-MM-DD' format.
 
         Returns:
-            List[Dict[str, Any]]: A list of dictionaries, each representing a row of data.
+            pd.DataFrame: Historical data for the requested asset and date range.
 
         Raises:
             NotImplementedError: If the subclass does not implement this method.

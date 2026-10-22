@@ -65,14 +65,15 @@ class RecordingCleaner(Cleaner):
         return data.assign(transformed=True)
 
 
-class SyncFetcher(Fetcher):
+class MinimalFetcher(Fetcher):
     """Minimal concrete Fetcher: implements the single abstract method."""
 
-    def fetch_data(self, symbol: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
-        return [
-            {"time": "2023-01-01", "close": 1.0},
-            {"time": "2023-01-03", "close": 2.0},
-        ]
+    async def fetch_data(
+        self, symbol: str, loaded_asset_type: str, start_date: str, end_date: str
+    ) -> pd.DataFrame:
+        return pd.DataFrame(
+            [{"time": "2023-01-01", "close": 1.0}, {"time": "2023-01-03", "close": 2.0}]
+        )
 
 
 class AsyncFetcher(Fetcher):
@@ -81,18 +82,13 @@ class AsyncFetcher(Fetcher):
     async def fetch_data(
         self,
         symbol: str,
+        loaded_asset_type: str,
         start_date: str,
         end_date: str,
-        loaded_asset_type: str | None = None,
-    ) -> list[dict[str, Any]]:
-        return [
-            {
-                "symbol": symbol,
-                "asset": loaded_asset_type,
-                "start": start_date,
-                "end": end_date,
-            }
-        ]
+    ) -> pd.DataFrame:
+        return pd.DataFrame(
+            [{"symbol": symbol, "asset": loaded_asset_type, "start": start_date, "end": end_date}]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -301,9 +297,9 @@ def test_cleaner_clean_orchestrates_hooks_in_order() -> None:
 
 def test_fetcher_init_sets_config_and_logger() -> None:
     config = {"provider": {"name": "databento"}}
-    fetcher = SyncFetcher(config)
+    fetcher = MinimalFetcher(config)
     assert fetcher.config is config
-    assert fetcher.logger.name == "SyncFetcher"
+    assert fetcher.logger.name == "MinimalFetcher"
     assert fetcher.logger.level == logging.INFO
 
 
@@ -320,7 +316,7 @@ def test_fetcher_retrieve_delegates_to_fetch_data() -> None:
         )
     )
 
-    assert result == [
+    assert result.to_dict("records") == [
         {"symbol": "ES", "asset": "FUTURE", "start": "2023-01-01", "end": "2023-01-31"}
     ]
 
