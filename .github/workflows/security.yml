@@ -8,8 +8,8 @@ name: security
 # workflow stays green on a repo that has not had its services migrated in yet
 # and lights up automatically as each one lands.
 #
-# On push and pull_request, CodeQL additionally skips languages whose files
-# were not touched by the change — a docs-only or HTML-only commit should not
+# On push and pull_request, CodeQL additionally skips languages whose source
+# or dependency files were not touched by the change — a docs-only or HTML-only commit should not
 # pay for a C++ extraction. The Monday scheduled run still scans every
 # detected language, which is what catches advisories against unchanged code.
 
@@ -83,8 +83,8 @@ jobs:
           }
 
           langs=()
-          [ -n "$(find_src '*.py')" ] && touched '\.py$' && langs+=('"python"')
-          [ -n "$(find_src '*.ts')$(find_src '*.tsx')$(find_src '*.js')$(find_src '*.jsx')" ] && touched '\.(ts|tsx|js|jsx|mjs|cjs)$' && langs+=('"javascript-typescript"')
+          [ -n "$(find_src '*.py')" ] && touched '(^|/)(pyproject\.toml|requirements[^/]*\.txt)$|^uv\.lock$|\.py$' && langs+=('"python"')
+          [ -n "$(find_src '*.ts')$(find_src '*.tsx')$(find_src '*.js')$(find_src '*.jsx')" ] && touched '(^|/)package\.json$|^pnpm-lock\.yaml$|\.(ts|tsx|js|jsx|mjs|cjs)$' && langs+=('"javascript-typescript"')
           [ -n "$(find_src '*.cpp')$(find_src '*.hpp')$(find_src '*.cc')" ] && touched '\.(cpp|hpp|cc|h|cxx)$' && langs+=('"c-cpp"')
           json="[$(IFS=,; echo "${langs[*]:-}")]"
           echo "languages=$json" >> "$GITHUB_OUTPUT"
