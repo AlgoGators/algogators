@@ -46,7 +46,7 @@ dev = [
     "pyyaml>=6.0",
     "types-PyYAML>=6.0",
     # starlette's TestClient (data-ngin's API tests) requires httpx2 at runtime.
-    "httpx2>=0.1",
+    "httpx2>=2.12.0",
     # `just` from PyPI. Pinning it here rather than installing it with a
     # marketplace action means the task runner's version is in uv.lock like
     # everything else, and CI cannot drift from a developer's machine.
