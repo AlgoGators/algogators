@@ -121,7 +121,7 @@ int main() {
         // Convert timestamps to proper format
         auto now = std::chrono::system_clock::now();
         auto now_time_t = std::chrono::system_clock::to_time_t(now);
-        std::tm* now_tm = std::localtime(&now_time_t);
+        std::tm* now_tm = trade_ngin::core::safe_localtime(&now_time_t);
 
         // Set start date based on lookback_years from config
         std::tm start_tm = *now_tm;
