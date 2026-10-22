@@ -8,10 +8,9 @@ name: security
 # workflow stays green on a repo that has not had its services migrated in yet
 # and lights up automatically as each one lands.
 #
-# On push and pull_request, CodeQL additionally skips languages whose files
-# were not touched by the change — a docs-only or HTML-only commit should not
-# pay for a C++ extraction. The Monday scheduled run still scans every
-# detected language, which is what catches advisories against unchanged code.
+# Pull requests run every configured CodeQL language because code scanning
+# protection expects all results before merge. Pushes filter by changed source
+# or dependency files; scheduled runs scan every detected language.
 
 on:
   push:
@@ -47,13 +46,11 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           PUSH_BEFORE: ${{ github.event.before }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
 
-          # Changed files for this event; empty scan_all means "filter by diff".
-          # Schedule/dispatch, unknown before-SHAs (new branch, force push) and
-          # missing bases all fall back to scanning everything.
+          # Branch protection expects every configured CodeQL language on PRs.
+          # Pushes filter by diff; schedules and unknown before-SHAs scan all.
           scan_all=false
           changed=""
           case "$EVENT_NAME" in
@@ -65,11 +62,7 @@ jobs:
               fi
               ;;
             pull_request)
-              if git cat-file -e "$PR_BASE_SHA" 2>/dev/null; then
-                changed=$(git diff --name-only "$PR_BASE_SHA" HEAD)
-              else
-                scan_all=true
-              fi
+              scan_all=true
               ;;
             *)
               scan_all=true
@@ -83,9 +76,10 @@ jobs:
           }
 
           langs=()
-          [ -n "$(find_src '*.py')" ] && touched '\.py$' && langs+=('"python"')
-          [ -n "$(find_src '*.ts')$(find_src '*.tsx')$(find_src '*.js')$(find_src '*.jsx')" ] && touched '\.(ts|tsx|js|jsx|mjs|cjs)$' && langs+=('"javascript-typescript"')
-          [ -n "$(find_src '*.cpp')$(find_src '*.hpp')$(find_src '*.cc')" ] && touched '\.(cpp|hpp|cc|h|cxx)$' && langs+=('"c-cpp"')
+          [ -n "$(find_src '*.py')" ] && touched '(^|/)(pyproject\.toml|requirements[^/]*\.txt)$|^uv\.lock$|\.py$' && langs+=('"python"')
+          [ -n "$(find_src '*.ts')$(find_src '*.tsx')$(find_src '*.js')$(find_src '*.jsx')" ] && touched '(^|/)package\.json$|^pnpm-lock\.yaml$|\.(ts|tsx|js|jsx|mjs|cjs)$' && langs+=('"javascript-typescript"')
+          # Dependency-only pushes also need the C++ configuration on main.
+          [ -n "$(find_src '*.cpp')$(find_src '*.hpp')$(find_src '*.cc')" ] && touched '\.(cpp|hpp|cc|h|cxx)$|(^|/)(pyproject\.toml|requirements[^/]*\.txt|package\.json)$|^(uv\.lock|pnpm-lock\.yaml)$' && langs+=('"c-cpp"')
           json="[$(IFS=,; echo "${langs[*]:-}")]"
           echo "languages=$json" >> "$GITHUB_OUTPUT"
           echo "any=$([ "$json" = '[]' ] && echo false || echo true)" >> "$GITHUB_OUTPUT"
