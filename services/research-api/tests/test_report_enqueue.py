@@ -4,7 +4,7 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 
 from research_api.application.reports.enqueue import EnqueueDailyReports
-from research_api.infrastructure.reports.worker import enabled, run_once
+from research_api.infrastructure.reports.worker import enabled, record_sent, run_once
 
 NY = ZoneInfo("America/New_York")
 CFG = {
@@ -110,3 +110,8 @@ def test_a_day_approved_without_its_email_waits_for_the_desks_send():
     assert summary.queued == 0 and queue.rows == [] and reader.calls == 0
     summary, queue, _ = _run(now, day, held=lambda pid, d: False)
     assert summary.queued == 1
+
+
+def test_sent_at_is_recorded_only_when_asked():
+    assert not record_sent({}) and not record_sent({"REPORT_RECORD_SENT": "true"})
+    assert record_sent({"REPORT_RECORD_SENT": "1"})

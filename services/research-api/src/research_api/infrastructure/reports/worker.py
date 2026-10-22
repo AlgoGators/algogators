@@ -7,6 +7,8 @@ It does nothing until REPORT_SEND_ENABLED=1, so deploying it changes nothing by 
     REPORT_SEND_ENABLED  "1" to queue and send; anything else leaves the worker idle
     REPORT_PORTFOLIOS    comma-separated portfolio ids to report on (e.g. the QT conservative book)
     REPORT_TO            comma-separated To addresses; QT_APPROVERS (vp, president) are Cc'd
+    REPORT_RECORD_SENT   "1" to set live_run_metadata.sent_at after a send; ONLY with the engine's
+                         QT_BOOK_EMAIL_HANDOFF=1, else the engine skips its own fund email
     REPORT_EXCLUDE       addresses never addressed (dhebrank@msn.com is built in)
     SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, REPORT_FROM   see infrastructure/reports/mailer.py
 
@@ -40,6 +42,12 @@ def enabled(env) -> bool:
     return (env.get("REPORT_SEND_ENABLED") or "").strip() == "1"
 
 
+def record_sent(env) -> bool:
+    """Whether a send also sets the book's sent_at. Off by default: with it on, the engine takes the
+    day as e-mailed and skips its own send, so it is turned on only with QT_BOOK_EMAIL_HANDOFF."""
+    return (env.get("REPORT_RECORD_SENT") or "").strip() == "1"
+
+
 def run_once(env=None) -> int:
     """One pass; the number of reports that failed."""
     env = os.environ if env is None else env
@@ -65,7 +73,7 @@ def run_once(env=None) -> int:
         who,
         who.approvers(),
         who.excluded(),
-        book_sent=PostgresBookSentMarker(),
+        book_sent=PostgresBookSentMarker() if record_sent(env) else None,
     )()
     logger.info(
         "queued=%d skipped=%d sent=%d failed=%d",
