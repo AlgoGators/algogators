@@ -14,12 +14,11 @@ on:
   push:
     branches: [prod]
     # `prod` is shared with the AlgoLens deploy: only data-ngin changes redeploy Airflow.
+    # Only the code the image is built from. The workflow files are left out on purpose: a
+    # change to this file or to a shared workflow must not redeploy Airflow by itself.
     paths:
       - services/data-ngin/**
       - platform/db/**
-      - .github/workflows/svc-data-ngin.deploy.yml
-      - .github/workflows/_deploy-ssh.yml
-      - .github/workflows/_publish-container.yml
   workflow_dispatch:
     inputs:
       dry-run:
