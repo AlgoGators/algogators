@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { computeCombinedMetrics } from './computeCombinedMetrics';
+import { computeCombinedMetrics, sumCurvesByDay } from './computeCombinedMetrics';
 import type { Strategy, StrategyMetrics, Position, FinalizedPosition } from './portfolioData';
 
 // Minimal builders so tests stay readable. Only the fields the computation reads
@@ -154,8 +154,9 @@ describe('computeCombinedMetrics', () => {
     const out = computeCombinedMetrics([a, b], ['a', 'b']);
 
     // Combined equity by date is 200k -> 210k -> 235k; performance is % from the base.
+    // Days are summed and stamped 12:00 UTC (D-36).
     expect(out.historicalPerformance.map(p => p.date)).toEqual([
-      '2026-01-01', '2026-01-02', '2026-01-03',
+      '2026-01-01T12:00:00Z', '2026-01-02T12:00:00Z', '2026-01-03T12:00:00Z',
     ]);
     expect(out.historicalPerformance[0].return).toBeCloseTo(0, 6);
     expect(out.historicalPerformance[1].return).toBeCloseTo(5, 6);    // 210/200 - 1
@@ -163,5 +164,251 @@ describe('computeCombinedMetrics', () => {
 
     // Daily PnL is the day-over-day dollar change of that combined curve.
     expect(out.dailyPnL.map(p => p.pnl)).toEqual([0, 10000, 25000]);
+  });
+});
+
+describe('information ratio', () => {
+  // The yardstick is the model's book (the `system` stream, D-3) -- not an index.
+  // It is the comparison AlphaAttribution draws as the desk's value. (`benchmark`
+  // below names the yardstick's curve in these tests.)
+
+  function withStreams(
+    id: string,
+    book: [string, number][],
+    benchmark?: [string, number][],
+  ) {
+    return strategy({
+      id,
+      historicalData: book.map(([date, value]) => ({ date, value })),
+      ...(benchmark
+        ? { equityByStream: { system: benchmark.map(([date, value]) => ({ date, value })) } }
+        : {}),
+    });
+  }
+
+  it('is unavailable when no strategy carries a benchmark stream', () => {
+    // The pre-migration state. Reporting a number here would mean inventing one.
+    const a = withStreams('a', [['2026-01-01', 100], ['2026-01-02', 102]]);
+    const out = computeCombinedMetrics([a], ['a']);
+    expect(out.advancedMetrics.informationRatio).toBeNull();
+  });
+
+  it('is unavailable when the two curves overlap on fewer than three dates', () => {
+    // Two shared dates yield a single active return, which has no dispersion.
+    const a = withStreams(
+      'a',
+      [['2026-01-01', 100], ['2026-01-02', 102]],
+      [['2026-01-01', 100], ['2026-01-02', 101]],
+    );
+    const out = computeCombinedMetrics([a], ['a']);
+    expect(out.advancedMetrics.informationRatio).toBeNull();
+  });
+
+  it('is unavailable when the book has never diverged from the benchmark', () => {
+    // This is production today: nothing writes edits into qt, so the two curves
+    // are identical and tracking error is zero. Dividing by it would produce
+    // Infinity; reporting 0.00 would read as "the desk added nothing".
+    const curve: [string, number][] = [
+      ['2026-01-01', 100], ['2026-01-02', 102], ['2026-01-03', 102], ['2026-01-04', 106.08],
+    ];
+    const a = withStreams('a', curve, curve);
+    const out = computeCombinedMetrics([a], ['a']);
+    expect(out.advancedMetrics.informationRatio).toBeNull();
+  });
+
+  it('measures active return against the benchmark stream, annualised', () => {
+    // Book returns   +2%, 0%, +4%
+    // Benchmark      +1%, +1%, +1%
+    // Active          +1%, -1%, +3%  -> mean 1%, population sd 1.63299%
+    // IR = 0.01 * sqrt(252) / 0.0163299 = 9.7211
+    const a = withStreams(
+      'a',
+      [['2026-01-01', 100], ['2026-01-02', 102], ['2026-01-03', 102], ['2026-01-04', 106.08]],
+      [['2026-01-01', 100], ['2026-01-02', 101], ['2026-01-03', 102.01], ['2026-01-04', 103.0301]],
+    );
+    const out = computeCombinedMetrics([a], ['a']);
+    expect(out.advancedMetrics.informationRatio).toBeCloseTo(9.7211, 3);
+  });
+
+  it('goes negative when the book trails the benchmark', () => {
+    const a = withStreams(
+      'a',
+      [['2026-01-01', 100], ['2026-01-02', 101], ['2026-01-03', 102.01], ['2026-01-04', 103.0301]],
+      [['2026-01-01', 100], ['2026-01-02', 102], ['2026-01-03', 102], ['2026-01-04', 106.08]],
+    );
+    const out = computeCombinedMetrics([a], ['a']);
+    expect(out.advancedMetrics.informationRatio).toBeCloseTo(-9.7211, 3);
+  });
+
+  it('sums benchmark curves across strategies the same way the book is summed', () => {
+    // Two strategies, each half the size. Summed, they reproduce the single-strategy
+    // case above exactly, so the ratio must come out identical.
+    const a = withStreams(
+      'a',
+      [['2026-01-01', 50], ['2026-01-02', 51], ['2026-01-03', 51], ['2026-01-04', 53.04]],
+      [['2026-01-01', 50], ['2026-01-02', 50.5], ['2026-01-03', 51.005], ['2026-01-04', 51.51505]],
+    );
+    const b = withStreams(
+      'b',
+      [['2026-01-01', 50], ['2026-01-02', 51], ['2026-01-03', 51], ['2026-01-04', 53.04]],
+      [['2026-01-01', 50], ['2026-01-02', 50.5], ['2026-01-03', 51.005], ['2026-01-04', 51.51505]],
+    );
+    const out = computeCombinedMetrics([a, b], ['a', 'b']);
+    expect(out.advancedMetrics.informationRatio).toBeCloseTo(9.7211, 3);
+  });
+
+  it('ignores dates the benchmark does not cover', () => {
+    // A trailing book date with no benchmark point must not be read as a day the
+    // benchmark returned zero -- that would invent an active return.
+    const a = withStreams(
+      'a',
+      [
+        ['2026-01-01', 100], ['2026-01-02', 102], ['2026-01-03', 102],
+        ['2026-01-04', 106.08], ['2026-01-05', 200],
+      ],
+      [['2026-01-01', 100], ['2026-01-02', 101], ['2026-01-03', 102.01], ['2026-01-04', 103.0301]],
+    );
+    const out = computeCombinedMetrics([a], ['a']);
+    expect(out.advancedMetrics.informationRatio).toBeCloseTo(9.7211, 3);
+  });
+
+  it('is unavailable when only some of the selected strategies have a benchmark', () => {
+    // Summing a partial benchmark against a full book would understate the benchmark
+    // and overstate the desk -- a wrong number, not a missing one.
+    const a = withStreams(
+      'a',
+      [['2026-01-01', 50], ['2026-01-02', 51], ['2026-01-03', 51], ['2026-01-04', 53.04]],
+      [['2026-01-01', 50], ['2026-01-02', 50.5], ['2026-01-03', 51.005], ['2026-01-04', 51.51505]],
+    );
+    const b = withStreams(
+      'b',
+      [['2026-01-01', 50], ['2026-01-02', 51], ['2026-01-03', 51], ['2026-01-04', 53.04]],
+    );
+    const out = computeCombinedMetrics([a, b], ['a', 'b']);
+    expect(out.advancedMetrics.informationRatio).toBeNull();
+  });
+
+  it('is unavailable rather than zero when nothing is selected', () => {
+    const out = computeCombinedMetrics([strategy({ id: 'a' })], []);
+    expect(out.advancedMetrics.informationRatio).toBeNull();
+  });
+});
+
+describe('sortino ratio', () => {
+  // Downside deviation is target semi-deviation with a minimum acceptable return of
+  // zero: root-mean-square of the negative daily returns over EVERY period, not just
+  // the losing ones, annualised by sqrt(252). Returns are percentages, matching
+  // annualizedReturn, so the ratio is dimensionless.
+
+  function book(id: string, curve: [string, number][], annualizedReturn: number) {
+    return strategy({
+      id,
+      historicalData: curve.map(([date, value]) => ({ date, value })),
+      metrics: metrics({ annualizedReturn }),
+    });
+  }
+
+  it('measures each day against the previous day, not against the first day', () => {
+    // 100 -> 110 -> 99 is +10% then -10%.
+    // Downside = sqrt(10^2 / 2) * sqrt(252) = 7.0710678 * 15.8745079 = 112.24972
+    // Sortino  = 10 / 112.24972 = 0.089087
+    //
+    // Reading the differences of cumulative-return-from-base instead would call the
+    // second day -11 rather than -10, because it divides by the opening equity rather
+    // than by yesterday's.
+    const a = book('a', [['2026-01-01', 100], ['2026-01-02', 110], ['2026-01-03', 99]], 10);
+    const out = computeCombinedMetrics([a], ['a']);
+    expect(out.advancedMetrics.sortinoRatio).toBeCloseTo(0.089087, 5);
+  });
+
+  it('divides by every period, not only the losing ones', () => {
+    // +10%, -10%, +10%. One losing day out of three.
+    // Downside = sqrt(10^2 / 3) * sqrt(252) = 5.7735027 * 15.8745079 = 91.651514
+    // Sortino  = 10 / 91.651514 = 0.109109
+    //
+    // Dividing by the count of losing days instead would give 158.745, understating
+    // the ratio by a factor that grows as the portfolio wins more often -- the exact
+    // opposite of what the number is supposed to reward.
+    const a = book(
+      'a',
+      [['2026-01-01', 100], ['2026-01-02', 110], ['2026-01-03', 99], ['2026-01-04', 108.9]],
+      10,
+    );
+    const out = computeCombinedMetrics([a], ['a']);
+    expect(out.advancedMetrics.sortinoRatio).toBeCloseTo(0.109109, 5);
+  });
+
+  it('is unavailable when the book has never had a down day', () => {
+    // There is no downside to divide by. The old fallback substituted 0.1, which
+    // turned a 10% annualised return into a Sortino of 100.00 on screen.
+    const a = book('a', [['2026-01-01', 100], ['2026-01-02', 110], ['2026-01-03', 120]], 10);
+    const out = computeCombinedMetrics([a], ['a']);
+    expect(out.advancedMetrics.sortinoRatio).toBeNull();
+  });
+
+  it('is unavailable when there are not two points to take a return between', () => {
+    const a = book('a', [['2026-01-01', 100]], 10);
+    const out = computeCombinedMetrics([a], ['a']);
+    expect(out.advancedMetrics.sortinoRatio).toBeNull();
+  });
+
+  it('is unavailable when the curve touches zero', () => {
+    // A return off a zero base is undefined; the ratio must not be built on it.
+    const a = book('a', [['2026-01-01', 0], ['2026-01-02', 100], ['2026-01-03', 90]], 10);
+    const out = computeCombinedMetrics([a], ['a']);
+    expect(out.advancedMetrics.sortinoRatio).toBeNull();
+  });
+
+  it('goes negative when the book lost money over the period', () => {
+    const a = book('a', [['2026-01-01', 100], ['2026-01-02', 110], ['2026-01-03', 99]], -10);
+    const out = computeCombinedMetrics([a], ['a']);
+    expect(out.advancedMetrics.sortinoRatio).toBeCloseTo(-0.089087, 5);
+  });
+
+  it('sums the strategies before taking returns, not after', () => {
+    // Two halves of the single-strategy case above must reproduce it exactly.
+    const a = book('a', [['2026-01-01', 50], ['2026-01-02', 55], ['2026-01-03', 49.5]], 10);
+    const b = book('b', [['2026-01-01', 50], ['2026-01-02', 55], ['2026-01-03', 49.5]], 10);
+    const out = computeCombinedMetrics([a, b], ['a', 'b']);
+    expect(out.advancedMetrics.sortinoRatio).toBeCloseTo(0.089087, 5);
+  });
+
+  it('is unavailable rather than zero when nothing is selected', () => {
+    const out = computeCombinedMetrics([strategy({ id: 'a' })], []);
+    expect(out.advancedMetrics.sortinoRatio).toBeNull();
+  });
+});
+
+describe('sumCurvesByDay (D-36)', () => {
+  it('adds a futures book (05:00 UTC) and an equity book (00:00 UTC) on the same day', () => {
+    const futures = [
+      { date: '2026-10-13T05:00:00+00:00', value: 500 },
+      { date: '2026-10-14T05:00:00+00:00', value: 510 },
+    ];
+    const equities = [
+      { date: '2026-10-13T00:00:00+00:00', value: 100 },
+      { date: '2026-10-14T00:00:00+00:00', value: 90 },
+    ];
+    expect(sumCurvesByDay([futures, equities])).toEqual([
+      { date: '2026-10-13T12:00:00Z', value: 600 },
+      { date: '2026-10-14T12:00:00Z', value: 600 },
+    ]);
+  });
+
+  it('carries a book over a day it did not write, only inside its own span', () => {
+    const daily = [
+      { date: '2026-10-09T05:00:00Z', value: 500 },
+      { date: '2026-10-10T05:00:00Z', value: 505 },
+      { date: '2026-10-11T05:00:00Z', value: 507 },
+      { date: '2026-10-12T05:00:00Z', value: 509 },
+    ];
+    const weekdays = [
+      { date: '2026-10-09T00:00:00Z', value: 100 },
+      { date: '2026-10-12T00:00:00Z', value: 104 },
+    ];
+    const late = [{ date: '2026-10-12T00:00:00Z', value: 50 }];
+    expect(sumCurvesByDay([daily, weekdays, late]).map(p => p.value)).toEqual([
+      600, 605, 607, 663,
+    ]);
   });
 });

@@ -1,0 +1,1413 @@
+"""Postgres-backed tests of the QT desk reads and writes.
+
+Opt-in: see tests/qt_fixture.py (ALGOLENS_TEST_DATABASE_URL, localhost only).
+The schema is new_algo_data's after migrations 021 (emulated), 022 and 023.
+"""
+
+import json
+from datetime import UTC, date, datetime, timedelta
+
+import psycopg2
+import psycopg2.errors
+import psycopg2.extras
+import pytest
+import research_api.application.qt.use_cases as use_cases
+from qt_fixture import has_026, qt_db, requires_db  # noqa: F401  (fixture)
+from research_api.application.qt.ports import (
+    DeskConflictError,
+    DeskForbiddenError,
+    DeskGoneError,
+    DeskNotSeededError,
+)
+from research_api.application.qt.use_cases import (
+    ApproveDesk,
+    DecideOverride,
+    GetDeskState,
+    ListSymbolChoices,
+    LookupApproval,
+    PublishDesk,
+    RequestOverride,
+    RescindDesk,
+    SaveDeskEdit,
+)
+from research_api.domain.portfolio.registry import portfolio_entries
+from research_api.domain.qt.desk import DeskRuleError, DeskStaleError, token_hash
+
+pytestmark = requires_db
+
+QT = "QT_CONSERVATIVE_PORTFOLIO"
+MODEL = "QT_CONSERVATIVE_MODEL_PORTFOLIO"
+STRATEGY = "LIVE_TREND_FOLLOWING"
+SLEEVE = "TREND_FOLLOWING"
+D1, D2 = date(2026, 10, 7), date(2026, 10, 8)
+# 08:00 New York (EDT) on D2: before the 09:30 cutoff.
+CLOCK = datetime(2026, 10, 8, 12, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def _desk_clock(monkeypatch):
+    """The use cases run at CLOCK unless a test passes its own clock."""
+    monkeypatch.setattr(use_cases, "_utcnow", lambda: CLOCK)
+
+
+def _exec(factory, sql, params=()):
+    with factory.setup.cursor() as cur:
+        cur.execute(sql, params)
+        try:
+            return cur.fetchall()
+        except Exception:
+            return None
+
+
+def add_position(
+    factory, book, day, symbol, qty, price=100.0, portfolio=QT, sleeve=SLEEVE, moved_by=None
+):
+    _exec(
+        factory,
+        """
+        INSERT INTO trading.positions
+            (symbol, quantity, average_price, daily_unrealized_pnl, daily_realized_pnl,
+             last_update, updated_at, strategy_id, strategy_name, date, portfolio_id,
+             portfolio_type, moved_by)
+        VALUES (%s, %s, %s, 5, 1, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            symbol,
+            qty,
+            price,
+            datetime(day.year, day.month, day.day, 18, tzinfo=UTC),
+            datetime(day.year, day.month, day.day, 18, tzinfo=UTC),
+            STRATEGY,
+            sleeve,
+            day,
+            portfolio,
+            book,
+            moved_by,
+        ),
+    )
+
+
+def add_results(factory, book, day, value, portfolio=QT):
+    _exec(
+        factory,
+        """
+        INSERT INTO trading.live_results
+            (strategy_id, portfolio_id, date, config, current_portfolio_value,
+             total_annualized_return, volatility, portfolio_type)
+        VALUES (%s, %s, %s, %s, %s, 1, 10, %s)
+        """,
+        (STRATEGY, portfolio, day, f'{{"strategy_type": "{STRATEGY}"}}', value, book),
+    )
+
+
+def add_execution(factory, book, day, exec_id, symbol, portfolio=QT):
+    _exec(
+        factory,
+        """
+        INSERT INTO trading.executions
+            (portfolio_id, strategy_id, strategy_name, date, exec_id, symbol, side,
+             quantity, price, execution_time, commissions_fees, portfolio_type)
+        VALUES (%s, %s, %s, %s, %s, %s, 'BUY', 1, 100, %s, 1, %s)
+        """,
+        (
+            portfolio,
+            STRATEGY,
+            SLEEVE,
+            day,
+            exec_id,
+            symbol,
+            datetime(day.year, day.month, day.day, 18, tzinfo=UTC),
+            book,
+        ),
+    )
+
+
+def repo(factory):
+    from research_api.infrastructure.portfolio.repositories import PostgresPortfolioRepository
+
+    return PostgresPortfolioRepository(connection_factory=factory)
+
+
+def registry(factory):
+    from research_api.infrastructure.portfolio.strategy_registry import PostgresStrategyRegistry
+
+    return PostgresStrategyRegistry(connection_factory=factory)
+
+
+# --- A2: registry and portfolio-id reads -------------------------------------
+
+
+def test_registry_carries_the_two_qt_portfolios_from_migration_023(qt_db):
+    from research_api.domain.portfolio.registry import group_portfolios
+
+    groups = group_portfolios(registry(qt_db).list(active_only=True))
+
+    qt_group = next(g for g in groups if g["group"] == "qt_conservative")
+    assert [(p["portfolio_id"], p["desk_editable"]) for p in qt_group["portfolios"]] == [
+        (QT, True),
+        (MODEL, False),
+    ]
+    equity = next(g for g in groups if g["group"] == "EQUITY_MR_PORTFOLIO")
+    assert equity["portfolios"][0]["asset_class"] == "equity"
+    assert equity["portfolios"][0]["desk_editable"] is False
+
+
+def test_portfolio_read_serves_each_book_on_its_latest_date(qt_db):
+    add_results(qt_db, "system", D2, 501000)
+    add_results(qt_db, "qt", D2, 502000)
+    add_position(qt_db, "system", D2, "ZC.v.0", 3)
+    add_position(qt_db, "qt_proposal", D2, "ZC.v.0", 2)
+    add_position(qt_db, "qt", D1, "ZC.v.0", 9)
+    add_position(qt_db, "qt", D2, "ZC.v.0", 1, moved_by="cap")
+
+    by_book = {
+        book: repo(qt_db).fetch_portfolio_rows(QT, book=book, allow_fallback=False)
+        for book in ("system", "qt_proposal", "qt")
+    }
+
+    assert {b: [float(p["quantity"]) for p in r.positions] for b, r in by_book.items()} == {
+        "system": [3.0],
+        "qt_proposal": [2.0],
+        "qt": [1.0],
+    }
+    assert float(by_book["qt"].latest["current_portfolio_value"]) == 502000
+    # qt_proposal has no results row of its own: the system row's numbers.
+    assert float(by_book["qt_proposal"].latest["current_portfolio_value"]) == 501000
+
+
+def test_portfolio_read_nets_sleeves_and_hides_flattened_symbols(qt_db):
+    add_results(qt_db, "qt", D2, 500000)
+    add_position(qt_db, "qt", D2, "ZC.v.0", 2, price=400, sleeve="A")
+    add_position(qt_db, "qt", D2, "ZC.v.0", 1, price=430, sleeve="B")
+    add_position(qt_db, "qt", D2, "ZS.v.0", 0)
+
+    rows = repo(qt_db).fetch_portfolio_rows(QT, book="qt", allow_fallback=False)
+
+    assert [
+        (p["symbol"], float(p["quantity"]), float(p["average_price"])) for p in rows.positions
+    ] == [("ZC.v.0", 3.0, 410.0)]
+
+
+def test_portfolio_read_falls_back_to_system_only_when_unnamed(qt_db):
+    add_results(qt_db, "system", D2, 500000, portfolio=MODEL)
+    add_position(qt_db, "system", D2, "ZC.v.0", 3, portfolio=MODEL)
+    add_position(qt_db, "qt", D2, "ZC.v.0", 1, portfolio=QT)  # another portfolio's qt
+
+    fallback = repo(qt_db).fetch_portfolio_rows(MODEL)
+    exact = repo(qt_db).fetch_portfolio_rows(MODEL, book="qt", allow_fallback=False)
+
+    assert (fallback.book, fallback.fell_back) == ("system", True)
+    assert [p["symbol"] for p in fallback.positions] == ["ZC.v.0"]
+    assert (exact.book, exact.fell_back, exact.positions) == ("qt", False, [])
+    # D-37: the model book has no qt rows; its system numbers are not served as "qt".
+    assert exact.book_missing is True and exact.latest is None
+
+
+def test_portfolio_read_scopes_executions_to_the_book(qt_db):
+    add_results(qt_db, "qt", D2, 500000)
+    add_position(qt_db, "qt", D2, "ZC.v.0", 1)
+    add_execution(qt_db, "system", D2, "e1", "ZC.v.0")
+    add_execution(qt_db, "qt", D2, "e1", "ZS.v.0")
+
+    rows = repo(qt_db).fetch_portfolio_rows(QT, book="qt", allow_fallback=False)
+
+    assert [e["symbol"] for e in rows.executions] == ["ZS.v.0"]
+
+
+def test_portfolio_read_ignores_strategy_id(qt_db):
+    # A book is found by its portfolio id; the strategy id is a description.
+    add_results(qt_db, "qt", D2, 500000)
+    _exec(
+        qt_db,
+        "UPDATE trading.live_results SET strategy_id = 'RENAMED', config = '{}'",
+    )
+    add_position(qt_db, "qt", D2, "ZC.v.0", 1)
+
+    rows = repo(qt_db).fetch_portfolio_rows(QT, book="qt", allow_fallback=False)
+
+    assert rows.latest is not None
+    assert [p["symbol"] for p in rows.positions] == ["ZC.v.0"]
+
+
+def test_member_read_scopes_results_and_trades_to_the_book(qt_db):
+    # D-34: the member page (strategy-id read) listed the model's trades next to the QT
+    # book's copy of them, and took its numbers from whichever book wrote last.
+    add_results(qt_db, "system", D2, 501000)
+    add_results(qt_db, "qt", D2, 502000)
+    add_position(qt_db, "qt", D2, "ZC.v.0", 1)
+    add_execution(qt_db, "system", D2, "e1", "ZC.v.0")
+    add_execution(qt_db, "qt", D2, "e1", "ZS.v.0")
+
+    rows = repo(qt_db).fetch_detail_rows(STRATEGY, QT, book="qt", allow_fallback=False)
+    system = repo(qt_db).fetch_detail_rows(STRATEGY, QT, book="system", allow_fallback=False)
+
+    assert [e["symbol"] for e in rows.executions] == ["ZS.v.0"]
+    assert float(rows.latest["current_portfolio_value"]) == 502000
+    assert [e["symbol"] for e in system.executions] == ["ZC.v.0"]
+    assert float(system.latest["current_portfolio_value"]) == 501000
+
+
+def test_portfolio_reads_carry_the_contract_sizes(qt_db):
+    # D-32: notionals need the contract multiplier; a root with no metadata is left out.
+    _exec(
+        qt_db,
+        """
+        INSERT INTO metadata.contract_metadata
+            ("Databento Symbol", "IB Symbol", "Name", "Exchange", "Asset Type", "Sector",
+             "Contract Size")
+        VALUES ('ZF', 'ZF', '5-Year Note', 'CBOT', 'Futures', 'Rates', '1,000')
+        """,
+    )
+    add_results(qt_db, "qt", D2, 500000)
+    add_position(qt_db, "qt", D2, "ZF.v.0", -5)
+    add_position(qt_db, "qt", D2, "QQQ", 2)
+
+    by_portfolio = repo(qt_db).fetch_portfolio_rows(QT, book="qt", allow_fallback=False)
+    by_strategy = repo(qt_db).fetch_detail_rows(STRATEGY, QT, book="qt", allow_fallback=False)
+
+    assert by_portfolio.contract_sizes == {"ZF": 1000.0}
+    assert by_strategy.contract_sizes == {"ZF": 1000.0}
+
+
+def test_closed_positions_compare_with_the_books_previous_date(qt_db):
+    # D-35: "yesterday" is the book's previous date (a weekend or a gap in between),
+    # not the calendar's yesterday.
+    d0 = date(2026, 10, 5)
+    add_results(qt_db, "qt", D2, 500000)
+    add_position(qt_db, "qt", d0, "ZS.v.0", 4)
+    add_position(qt_db, "qt", D2, "ZC.v.0", 1)
+
+    by_portfolio = repo(qt_db).fetch_portfolio_rows(QT, book="qt", allow_fallback=False)
+    by_strategy = repo(qt_db).fetch_detail_rows(STRATEGY, QT, book="qt", allow_fallback=False)
+
+    for rows in (by_portfolio, by_strategy):
+        assert [(p["symbol"], float(p["quantity"])) for p in rows.yesterday_positions] == [
+            ("ZS.v.0", 4.0)
+        ]
+
+
+# --- A3-A6: the desk against the real command log ----------------------------
+
+
+class NullAgent:
+    """The engine is down: every call is lost, nothing may fail."""
+
+    def __init__(self):
+        self.calls = []
+
+    def _lost(self, *args):
+        self.calls.append(args)
+        return "not delivered (UNAVAILABLE)"
+
+    def run_desk(self, command):
+        return self._lost(command)
+
+    def request_override(self, command):
+        return self._lost(command)
+
+    def publish(self, command):
+        return self._lost(command)
+
+    def rescind(self, command):
+        return self._lost(command)
+
+    def record_decision(self, decision, token):
+        return self._lost(decision, token)
+
+    def get_run_status(self, portfolio_id, day):
+        return {"state": "succeeded", "startedAt": None, "finishedAt": None, "message": ""}
+
+    def get_desk_risk(self, portfolio_id, day):
+        # Not a command: the risk report of the model's book, inside the limits, so the
+        # approval gate (C9) passes; the gate itself is tested against fakes.
+        return {
+            "state": "model",
+            "auditId": 0,
+            "withinLimits": True,
+            "approvedOverride": False,
+            "breaches": [],
+            "symbols": [],
+            "limits": [],
+        }
+
+
+def desk_repo(factory):
+    from research_api.infrastructure.qt.repositories import PostgresDeskRepository
+
+    return PostgresDeskRepository(connection_factory=factory)
+
+
+def entry(factory, portfolio_id=QT):
+    cfg = registry(factory).get_portfolio(portfolio_id)
+    return portfolio_entries([cfg])[0]
+
+
+def seed_day(factory, day=D2, proposal=True):
+    """The model run's day: system, a qt_proposal copy and a qt copy."""
+    for symbol, qty, price in (("ZC.v.0", 3, 400.0), ("ZS.v.0", -2, 1000.0)):
+        add_position(factory, "system", day, symbol, qty, price)
+        if proposal:
+            add_position(factory, "qt_proposal", day, symbol, qty, price)
+        add_position(factory, "qt", day, symbol, qty, price)
+
+
+def add_market(factory):
+    _exec(
+        factory,
+        """
+        INSERT INTO metadata.contract_metadata
+            ("Databento Symbol", "IB Symbol", "Name", "Exchange", "Asset Type", "Sector", "Contract Size")
+        VALUES ('6E', 'M6E', 'EUR/USD', 'CME', 'Futures', 'FX', '125000'),
+               ('ES', 'ES', 'E-mini S&P', 'CME', 'Futures', 'Equity', '50'),
+               ('NODATA', 'X', 'No data', 'CME', 'Futures', 'FX', '1'),
+               ('AAPL', 'AAPL', 'Apple', 'NASDAQ', 'Equity', 'Tech', '1')
+        """,
+    )
+    # A duplicated (symbol, time) bar: the higher-volume copy is the one the
+    # engine keeps, so it is the price.
+    _exec(
+        factory,
+        """
+        INSERT INTO futures_data.ohlcv_1d (time, symbol, open, high, low, close, volume) VALUES
+            ('2026-10-06', '6E.v.0', 1, 1, 1, 1.10, 100),
+            ('2026-10-07', '6E.v.0', 1, 1, 1, 1.17, 50),
+            ('2026-10-07', '6E.v.0', 1, 1, 1, 1.15, 900),
+            ('2026-10-07', 'ES.v.0', 1, 1, 1, 5000, 10)
+        """,
+    )
+
+
+def proposal_rows(factory, day=D2):
+    return {
+        r["symbol"]: r
+        for r in _exec(
+            factory,
+            "SELECT * FROM trading.positions WHERE portfolio_id = %s AND date = %s "
+            "AND portfolio_type = 'qt_proposal'",
+            (QT, day),
+        )
+    }
+
+
+def commands(factory):
+    return _exec(factory, "SELECT * FROM trading.position_overrides ORDER BY id")
+
+
+def engine_finishes(factory, command_id, status="done", **columns):
+    """The engine (desk-agent) runs a command: pending -> running -> status
+    (C4), setting engine-owned columns on the final move."""
+    _exec(
+        factory,
+        "UPDATE trading.position_overrides SET status = 'running', started_at = now() "
+        "WHERE id = %s",
+        (command_id,),
+    )
+    sets = ", ".join(f"{name} = %s" for name in columns)
+    _exec(
+        factory,
+        "UPDATE trading.position_overrides SET status = %s, finished_at = now()"
+        + (", " + sets if sets else "")
+        + " WHERE id = %s",
+        (status, *columns.values(), command_id),
+    )
+
+
+def test_save_is_one_transaction_upserting_the_proposal_and_logging_the_save(qt_db):
+    seed_day(qt_db)
+    add_market(qt_db)
+    agent = NullAgent()
+
+    result = SaveDeskEdit(desk_repo(qt_db), agent).execute(
+        entry(qt_db),
+        [
+            {"symbol": "ZC.v.0", "quantity": 0, "expected": 3},  # flatten: a zero-quantity row
+            {"symbol": "ZS.v.0", "quantity": -1, "expected": -2},
+            {"symbol": "6E.v.0", "quantity": 2, "expected": None},  # new: priced from market data
+        ],
+        "desk view on corn",
+        "desk@x.com",
+    )
+
+    rows = proposal_rows(qt_db)
+    assert float(rows["ZC.v.0"]["quantity"]) == 0  # stored, not deleted (ruling 16)
+    assert float(rows["ZS.v.0"]["quantity"]) == -1
+    new = rows["6E.v.0"]
+    assert float(new["quantity"]) == 2
+    assert float(new["average_price"]) == 1.15  # latest close, engine's keep order
+    assert float(new["daily_unrealized_pnl"]) == 0 and float(new["daily_realized_pnl"]) == 0
+    assert (new["strategy_id"], new["strategy_name"]) == (STRATEGY, SLEEVE)
+    assert float(rows["ZS.v.0"]["daily_unrealized_pnl"]) == 0
+    system = _exec(
+        qt_db,
+        "SELECT symbol, quantity FROM trading.positions WHERE portfolio_type = 'system' ORDER BY symbol",
+    )
+    assert [(r["symbol"], float(r["quantity"])) for r in system] == [
+        ("ZC.v.0", 3.0),
+        ("ZS.v.0", -2.0),
+    ]
+
+    [save] = commands(qt_db)
+    assert (save["kind"], save["status"], save["date"], save["requested_by"]) == (
+        "save",
+        "pending",
+        D2,
+        "desk@x.com",
+    )
+    assert save["payload"] == {
+        "changes": [
+            {"symbol": "ZC.v.0", "from": 3, "to": 0},
+            {"symbol": "ZS.v.0", "from": -2, "to": -1},
+            {"symbol": "6E.v.0", "from": 0, "to": 2},
+        ]
+    }
+    assert result["command"]["id"] == save["id"]
+    assert len(agent.calls) == 1  # the lost call did not fail the save
+
+
+def test_saves_are_repeatable_and_read_the_latest_proposal(qt_db):
+    seed_day(qt_db)
+    use_case = SaveDeskEdit(desk_repo(qt_db), NullAgent())
+    use_case.execute(
+        entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 1, "expected": 3}], "a", "d@x.com"
+    )
+    use_case.execute(
+        entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 5, "expected": 1}], "b", "d@x.com"
+    )
+
+    assert float(proposal_rows(qt_db)["ZC.v.0"]["quantity"]) == 5
+    assert [c["payload"]["changes"][0]["from"] for c in commands(qt_db)] == [3, 1]
+
+
+def test_a_failed_save_leaves_nothing_behind(qt_db):
+    seed_day(qt_db)
+    add_market(qt_db)
+    with pytest.raises(DeskRuleError):
+        SaveDeskEdit(desk_repo(qt_db), NullAgent()).execute(
+            entry(qt_db),
+            [
+                {"symbol": "ZC.v.0", "quantity": 1, "expected": 3},
+                {"symbol": "NODATA.v.0", "quantity": 1, "expected": None},
+            ],
+            "r",
+            "d@x.com",
+        )
+    assert float(proposal_rows(qt_db)["ZC.v.0"]["quantity"]) == 3  # rolled back
+    assert commands(qt_db) == []
+
+
+def test_save_before_the_day_is_seeded_is_refused(qt_db):
+    seed_day(qt_db, day=D1)
+    seed_day(qt_db, day=D2, proposal=False)  # today's model run, no proposal yet
+
+    with pytest.raises(DeskNotSeededError):
+        SaveDeskEdit(desk_repo(qt_db), NullAgent()).execute(
+            entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 1, "expected": 3}], "r", "d@x.com"
+        )
+    assert float(proposal_rows(qt_db, D1)["ZC.v.0"]["quantity"]) == 3  # yesterday untouched
+    assert commands(qt_db) == []
+
+
+def test_save_on_a_portfolio_with_no_book_at_all_is_refused(qt_db):
+    with pytest.raises(DeskNotSeededError):
+        SaveDeskEdit(desk_repo(qt_db), NullAgent()).execute(
+            entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 1, "expected": 3}], "r", "d@x.com"
+        )
+
+
+def test_the_model_twin_and_equity_books_are_not_editable(qt_db):
+    seed_day(qt_db)
+    for portfolio_id in (MODEL, "EQUITY_MR_PORTFOLIO"):
+        with pytest.raises(DeskForbiddenError):
+            SaveDeskEdit(desk_repo(qt_db), NullAgent()).execute(
+                entry(qt_db, portfolio_id),
+                [{"symbol": "ZC.v.0", "quantity": 1, "expected": 3}],
+                "r",
+                "d@x.com",
+            )
+
+
+def test_reason_is_required_by_the_use_case_and_by_the_table(qt_db):
+    seed_day(qt_db)
+    with pytest.raises(DeskRuleError):
+        SaveDeskEdit(desk_repo(qt_db), NullAgent()).execute(
+            entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 1, "expected": 3}], "  ", "d@x.com"
+        )
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        _exec(
+            qt_db,
+            "INSERT INTO trading.position_overrides (portfolio_id, date, kind, requested_by, reason) "
+            "VALUES (%s, %s, 'save', 'd@x.com', '  ')",
+            (QT, D2),
+        )
+
+
+def test_symbol_choices_come_from_contract_metadata_with_latest_close(qt_db):
+    add_market(qt_db)
+    choices = ListSymbolChoices(desk_repo(qt_db)).execute(entry(qt_db))
+    # ES (full-size, outside the engine's universe), NODATA (no bars) and
+    # AAPL (not futures) are not offered.
+    assert [(c["symbol"], c["price"]) for c in choices] == [("6E.v.0", 1.15)]
+
+
+def test_desk_state_compares_asked_and_given_with_moved_by(qt_db):
+    seed_day(qt_db)
+    _exec(
+        qt_db,
+        "UPDATE trading.positions SET quantity = 1, moved_by = 'cap' "
+        "WHERE portfolio_type = 'qt' AND symbol = 'ZC.v.0'",
+    )
+    SaveDeskEdit(desk_repo(qt_db), NullAgent()).execute(
+        entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 5, "expected": 3}], "r", "d@x.com"
+    )
+    # The engine finishes the save.
+    engine_finishes(
+        qt_db,
+        commands(qt_db)[-1]["id"],
+        message="one pass ran",
+        result=psycopg2.extras.Json({"book_source": "desk"}),
+    )
+
+    state = GetDeskState(desk_repo(qt_db), NullAgent()).execute(entry(qt_db))
+
+    assert state["date"] == D2.isoformat() and state["seeded"] is True
+    zc = next(r for r in state["comparison"] if r["symbol"] == "ZC.v.0")
+    assert (zc["asked"], zc["given"], zc["moved_by"], zc["differs"]) == (5, 1, "cap", True)
+    assert state["latestSave"]["status"] == "done"
+    assert state["latestSave"]["message"] == "one pass ran"
+
+
+def _emailed(factory, requested_by="desk@x.com", expires_in=timedelta(hours=48)):
+    """A request whose link the engine has e-mailed (token_hash is engine-owned)."""
+    seed_day(factory)
+    result = RequestOverride(desk_repo(factory), NullAgent()).execute(
+        entry(factory), "breach on purpose", requested_by
+    )
+    # A live link is valid for the use cases' clock and for the database's
+    # now(); an expired one has expired for both.
+    if expires_in < timedelta(0):
+        expires = CLOCK + expires_in
+    else:
+        expires = _exec(factory, "SELECT now() + %s AS at", (expires_in,))[0]["at"]
+    engine_finishes(
+        factory,
+        result["command"]["id"],
+        token_hash=token_hash("tok-123"),
+        token_expires_at=expires,
+    )
+    return result["command"]["id"]
+
+
+def test_override_decision_is_recorded_once(qt_db):
+    request_id = _emailed(qt_db)
+    agent = NullAgent()
+
+    page = LookupApproval(desk_repo(qt_db), NullAgent()).execute("tok-123")
+    assert page["request"]["id"] == request_id
+    assert {r["symbol"] for r in page["table"]} == {"ZC.v.0", "ZS.v.0"}
+
+    DecideOverride(desk_repo(qt_db), agent).execute("tok-123", True, "p@x.com", "president", "fine")
+    decision, publish = commands(qt_db)[-2:]
+    assert (
+        decision["kind"],
+        decision["parent_id"],
+        decision["approver_role"],
+        decision["payload"],
+    ) == ("override_decision", request_id, "president", {"approved": True})
+    assert decision["requested_by"] == "p@x.com"
+    # C10: the approval queues the publish of B in the same transaction, requested by the QT.
+    assert (publish["kind"], publish["requested_by"], publish["payload"]) == (
+        "publish",
+        "desk@x.com",
+        {"flow": "override_b", "after": decision["id"]},
+    )
+    assert len(agent.calls) == 2
+
+    with pytest.raises(DeskConflictError):
+        DecideOverride(desk_repo(qt_db), agent).execute("tok-123", False, "vp@x.com", "vp")
+    assert len(commands(qt_db)) == 3
+
+
+def test_approve_saves_b_and_its_publish_in_one_transaction(qt_db):
+    seed_day(qt_db)
+    agent = NullAgent()
+    result = ApproveDesk(desk_repo(qt_db), agent).execute(
+        entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 7, "expected": 3}], "lean", "desk@x.com"
+    )
+    save, publish = commands(qt_db)
+    assert save["kind"] == "save" and publish["kind"] == "publish"
+    assert publish["payload"] == {"flow": "auto", "after": save["id"]}
+    assert result["command"]["id"] == publish["id"]
+    assert proposal_rows(qt_db)["ZC.v.0"]["quantity"] == 7
+    # The day is publishing: nothing else is written until the engine answers.
+    with pytest.raises(DeskConflictError):
+        ApproveDesk(desk_repo(qt_db), agent).execute(entry(qt_db), [], "again", "desk@x.com")
+    assert len(commands(qt_db)) == 2
+
+
+def test_a_refused_approve_leaves_nothing_behind(qt_db):
+    seed_day(qt_db)
+    with pytest.raises(DeskStaleError):
+        ApproveDesk(desk_repo(qt_db), NullAgent()).execute(
+            entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 7, "expected": 99}], "x", "desk@x.com"
+        )
+    assert commands(qt_db) == []
+
+
+def test_approve_c_inserts_an_accept_c_publish(qt_db):
+    seed_day(qt_db)
+    repo = desk_repo(qt_db)
+    save = repo.save_proposal(QT, D2, lambda current: [], "check", "desk@x.com")
+    engine_finishes(qt_db, save["id"])
+    publish = repo.insert_publish(
+        QT, D2, "desk@x.com", {"flow": "accept_c", "after": save["id"], "acknowledged": []}
+    )
+    assert publish["payload"]["flow"] == "accept_c"
+
+
+def test_override_decision_refusals(qt_db):
+    _emailed(qt_db, requested_by="VP@x.com")
+    decide = DecideOverride(desk_repo(qt_db), NullAgent())
+    with pytest.raises(DeskForbiddenError):
+        decide.execute("tok-123", True, "random@x.com", None)  # not an approver
+    with pytest.raises(DeskForbiddenError):
+        decide.execute("tok-123", True, "vp@x.com", "vp")  # own request
+    assert [c["kind"] for c in commands(qt_db)] == ["override_request"]
+
+
+def test_expired_approval_link(qt_db):
+    _emailed(qt_db, expires_in=timedelta(seconds=-1))
+    with pytest.raises(DeskGoneError):
+        LookupApproval(desk_repo(qt_db), NullAgent()).execute("tok-123")
+    with pytest.raises(DeskGoneError):
+        DecideOverride(desk_repo(qt_db), NullAgent()).execute(
+            "tok-123", True, "p@x.com", "president"
+        )
+
+
+def test_publish_row_and_publish_state(qt_db):
+    seed_day(qt_db)
+    PublishDesk(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "desk@x.com")
+    [publish] = commands(qt_db)
+    assert (publish["kind"], publish["status"], publish["date"]) == ("publish", "pending", D2)
+    with pytest.raises(DeskConflictError):
+        PublishDesk(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "desk@x.com")
+
+    # The engine publishes: the row is done and live_run_metadata carries who/when.
+    engine_finishes(qt_db, publish["id"])
+    _exec(
+        qt_db,
+        "INSERT INTO trading.live_run_metadata "
+        "(date, strategy_id, portfolio_id, published_by, published_at) "
+        "VALUES (%s, %s, %s, 'desk@x.com', '2026-10-08T21:00:00Z')",
+        (D2, STRATEGY, QT),
+    )
+    state = GetDeskState(desk_repo(qt_db), NullAgent()).execute(entry(qt_db))
+    assert state["published"]["published_by"] == "desk@x.com"
+    assert state["publish"]["status"] == "done"
+
+    with pytest.raises(DeskConflictError):  # a published day takes no more edits
+        SaveDeskEdit(desk_repo(qt_db), NullAgent()).execute(
+            entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 1, "expected": 3}], "r", "d@x.com"
+        )
+
+
+def test_command_rows_cannot_be_deleted(qt_db):
+    seed_day(qt_db)
+    PublishDesk(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "desk@x.com")
+    with pytest.raises(psycopg2.Error):
+        _exec(qt_db, "DELETE FROM trading.position_overrides")
+
+
+# --- hardening (2026-10-09 spec: C1, C2, C3, optimistic save) -----------------
+
+
+def publish_on_live_run_metadata(factory, day=D2, by="system:non-trading-day"):
+    """The engine marks the day published (also its own non-trading-day
+    publish, with no publish command row at all)."""
+    _exec(
+        factory,
+        "INSERT INTO trading.live_run_metadata "
+        "(date, strategy_id, portfolio_id, published_by, published_at) "
+        "VALUES (%s, %s, %s, %s, now())",
+        (day, STRATEGY, QT, by),
+    )
+
+
+SNAPSHOT_BYTES = (
+    b'[{"strategy_name":"TREND_FOLLOWING","symbol":"ZC.v.0","quantity":3},'
+    b'{"strategy_name":"TREND_FOLLOWING","symbol":"ZS.v.0","quantity":-2}]'
+)
+
+
+def test_override_request_snapshots_the_proposal_and_its_hash(qt_db):
+    import hashlib
+
+    seed_day(qt_db)
+    RequestOverride(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "breach", "d@x.com")
+
+    [request] = commands(qt_db)
+    assert request["payload"]["proposal"] == [
+        {"strategy_name": SLEEVE, "symbol": "ZC.v.0", "quantity": 3},
+        {"strategy_name": SLEEVE, "symbol": "ZS.v.0", "quantity": -2},
+    ]
+    assert request["payload"]["proposal_sha256"] == hashlib.sha256(SNAPSHOT_BYTES).hexdigest()
+
+
+def test_snapshot_keeps_zero_rows_and_sorts_by_sleeve_then_symbol(qt_db):
+    seed_day(qt_db)
+    add_position(qt_db, "qt_proposal", D2, "6E.v.0", 0, sleeve="A_SLEEVE")
+    RequestOverride(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "breach", "d@x.com")
+    proposal = commands(qt_db)[0]["payload"]["proposal"]
+    assert [(r["strategy_name"], r["symbol"], r["quantity"]) for r in proposal] == [
+        ("A_SLEEVE", "6E.v.0", 0),
+        (SLEEVE, "ZC.v.0", 3),
+        (SLEEVE, "ZS.v.0", -2),
+    ]
+
+
+def test_one_open_override_request_a_day(qt_db):
+    seed_day(qt_db)
+    request = RequestOverride(desk_repo(qt_db), NullAgent())
+    first = request.execute(entry(qt_db), "breach", "d@x.com")["command"]
+    with pytest.raises(DeskConflictError):  # pending
+        request.execute(entry(qt_db), "again", "d@x.com")
+
+    expires = _exec(qt_db, "SELECT now() + interval '2 days' AS at")[0]["at"]
+    engine_finishes(qt_db, first["id"], token_hash=token_hash("t1"), token_expires_at=expires)
+    with pytest.raises(DeskConflictError):  # e-mailed, undecided, still the same book
+        request.execute(entry(qt_db), "again", "d@x.com")
+
+    # The desk saves again: the old request can never be approved, so a new
+    # one is allowed.
+    SaveDeskEdit(desk_repo(qt_db), NullAgent()).execute(
+        entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 4, "expected": 3}], "r", "d@x.com"
+    )
+    second = request.execute(entry(qt_db), "new book", "d@x.com")["command"]
+    assert second["payload"]["proposal_sha256"] != first["payload"]["proposal_sha256"]
+
+
+def test_a_rejected_request_frees_the_day_for_a_new_one(qt_db):
+    _emailed(qt_db)
+    DecideOverride(desk_repo(qt_db), NullAgent()).execute("tok-123", False, "p@x.com", "president")
+    RequestOverride(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "again", "d@x.com")
+    assert [c["kind"] for c in commands(qt_db)] == [
+        "override_request",
+        "override_decision",
+        "override_request",
+    ]
+
+
+def test_approval_of_a_changed_proposal_is_refused_but_rejection_is_not(qt_db):
+    _emailed(qt_db)
+    SaveDeskEdit(desk_repo(qt_db), NullAgent()).execute(
+        entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 9, "expected": 3}], "r", "d@x.com"
+    )
+    page = LookupApproval(desk_repo(qt_db), NullAgent()).execute("tok-123")
+    assert page["snapshotMatches"] is False
+    assert page["snapshot"][0]["quantity"] == 3
+
+    with pytest.raises(
+        DeskConflictError, match="proposal changed after the override was requested"
+    ):
+        DecideOverride(desk_repo(qt_db), NullAgent()).execute(
+            "tok-123", True, "p@x.com", "president"
+        )
+    DecideOverride(desk_repo(qt_db), NullAgent()).execute("tok-123", False, "p@x.com", "president")
+    assert commands(qt_db)[-1]["payload"] == {"approved": False}
+
+
+def test_approval_page_shows_the_snapshot(qt_db):
+    _emailed(qt_db)
+    page = LookupApproval(desk_repo(qt_db), NullAgent()).execute("tok-123")
+    assert page["snapshotMatches"] is True
+    assert [(r["symbol"], r["quantity"]) for r in page["snapshot"]] == [
+        ("ZC.v.0", 3),
+        ("ZS.v.0", -2),
+    ]
+
+
+def test_a_failed_decision_can_be_retried_but_a_live_one_cannot(qt_db):
+    request_id = _emailed(qt_db)
+    decide = DecideOverride(desk_repo(qt_db), NullAgent())
+    first = decide.execute("tok-123", True, "p@x.com", "president")["command"]
+    with pytest.raises(DeskConflictError):
+        decide.execute("tok-123", True, "vp@x.com", "vp")
+    engine_finishes(qt_db, first["id"], status="failed", message="smtp down")
+    # C10: the engine then refuses the publish queued behind the failed decision.
+    publish = next(c for c in commands(qt_db) if c["kind"] == "publish")
+    engine_finishes(qt_db, publish["id"], status="refused", message="the override failed")
+    decide.execute("tok-123", True, "vp@x.com", "vp")
+    assert [c["parent_id"] for c in commands(qt_db) if c["kind"] == "override_decision"] == [
+        request_id,
+        request_id,
+    ]
+
+
+def test_a_request_not_yet_emailed_cannot_be_decided(qt_db):
+    seed_day(qt_db)
+    command = RequestOverride(desk_repo(qt_db), NullAgent()).execute(
+        entry(qt_db), "breach", "d@x.com"
+    )["command"]
+    with pytest.raises(DeskConflictError):
+        desk_repo(qt_db).insert_decision(command["id"], True, "p@x.com", "president", None)
+
+
+def test_a_published_day_is_frozen_even_without_a_publish_row(qt_db):
+    _emailed(qt_db)
+    publish_on_live_run_metadata(qt_db)
+    repo = desk_repo(qt_db)
+
+    with pytest.raises(DeskConflictError, match="published"):
+        SaveDeskEdit(repo, NullAgent()).execute(
+            entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 1, "expected": 3}], "r", "d@x.com"
+        )
+    with pytest.raises(DeskConflictError, match="published"):
+        RequestOverride(repo, NullAgent()).execute(entry(qt_db), "breach", "d@x.com")
+    with pytest.raises(DeskConflictError, match="published"):
+        DecideOverride(repo, NullAgent()).execute("tok-123", True, "p@x.com", "president")
+    with pytest.raises(DeskConflictError, match="published"):
+        PublishDesk(repo, NullAgent()).execute(entry(qt_db), "d@x.com")
+    assert [c["kind"] for c in commands(qt_db)] == ["override_request"]
+    assert float(proposal_rows(qt_db)["ZC.v.0"]["quantity"]) == 3
+
+    state = GetDeskState(repo, NullAgent()).execute(entry(qt_db))
+    assert state["locked"] == "published"
+    assert state["published"]["published_by"] == "system:non-trading-day"
+
+
+def test_save_and_override_are_refused_while_a_publish_is_open(qt_db):
+    seed_day(qt_db)
+    repo = desk_repo(qt_db)
+    PublishDesk(repo, NullAgent()).execute(entry(qt_db), "d@x.com")
+    with pytest.raises(DeskConflictError, match="publish"):
+        SaveDeskEdit(repo, NullAgent()).execute(
+            entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 1, "expected": 3}], "r", "d@x.com"
+        )
+    with pytest.raises(DeskConflictError, match="publish"):
+        RequestOverride(repo, NullAgent()).execute(entry(qt_db), "breach", "d@x.com")
+    assert GetDeskState(repo, NullAgent()).execute(entry(qt_db))["locked"] == "publishing"
+
+
+def test_a_stale_save_is_refused_and_lists_the_changed_symbols(qt_db):
+    from research_api.domain.qt.desk import DeskStaleError
+
+    seed_day(qt_db)
+    save = SaveDeskEdit(desk_repo(qt_db), NullAgent())
+    save.execute(entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 1, "expected": 3}], "a", "a@x.com")
+    with pytest.raises(DeskStaleError) as stale:  # b still saw 3
+        save.execute(
+            entry(qt_db),
+            [
+                {"symbol": "ZC.v.0", "quantity": 7, "expected": 3},
+                {"symbol": "ZS.v.0", "quantity": 0, "expected": -2},
+            ],
+            "b",
+            "b@x.com",
+        )
+    assert stale.value.symbols == ["ZC.v.0"]
+    assert float(proposal_rows(qt_db)["ZC.v.0"]["quantity"]) == 1
+    assert float(proposal_rows(qt_db)["ZS.v.0"]["quantity"]) == -2
+    assert len(commands(qt_db)) == 1
+
+
+def test_writers_of_a_day_wait_for_each_other(qt_db):
+    """Two publishes at once: the second waits on the day lock, then sees the
+    first one's row and is refused (no double publish)."""
+    import threading
+    import time
+
+    seed_day(qt_db)
+    holder = qt_db()
+    cursor = holder.cursor()
+    cursor.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"algolens.qt_desk|{QT}|{D2.isoformat()}",),
+    )
+    outcome = {}
+
+    def second_publish():
+        try:
+            PublishDesk(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "b@x.com")
+            outcome["result"] = "inserted"
+        except DeskConflictError as exc:
+            outcome["result"] = str(exc)
+
+    thread = threading.Thread(target=second_publish)
+    thread.start()
+    for _ in range(50):
+        waiting = _exec(
+            qt_db,
+            "SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND NOT granted",
+        )[0]["n"]
+        if waiting:
+            break
+        time.sleep(0.1)
+    assert waiting == 1 and "result" not in outcome
+    # The first publish lands while the second waits.
+    cursor.execute(
+        "INSERT INTO trading.position_overrides (portfolio_id, date, kind, requested_by) "
+        "VALUES (%s, %s, 'publish', 'a@x.com')",
+        (QT, D2),
+    )
+    holder.commit()
+    holder.close()
+    thread.join(10)
+    assert "already pending" in outcome["result"]
+    assert len(commands(qt_db)) == 1
+
+
+def test_a_unique_violation_from_025_is_a_409(qt_db, monkeypatch):
+    if qt_db.version == "023":
+        pytest.skip("the unique partial indexes are 025's")
+    from research_api.infrastructure.qt.repositories import PostgresDeskRepository
+
+    seed_day(qt_db)
+    PublishDesk(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "a@x.com")
+    # Without AlgoLens' own check the index still refuses a second open publish.
+    monkeypatch.setattr(PostgresDeskRepository, "_guard_day", lambda *a, **k: None)
+    with pytest.raises(DeskConflictError, match="already open"):
+        PublishDesk(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "b@x.com")
+    assert len(commands(qt_db)) == 1
+
+
+def test_after_025_algolens_only_inserts_into_the_command_log(qt_db):
+    seed_day(qt_db)
+    PublishDesk(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "a@x.com")
+    conn = qt_db()
+    try:
+        with conn.cursor() as cur:
+            if qt_db.version != "023":
+                with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+                    cur.execute("UPDATE trading.position_overrides SET message = 'x'")
+            else:
+                cur.execute("SELECT 1")
+    finally:
+        conn.rollback()
+        conn.close()
+
+
+def test_desk_state_reports_the_open_override_request(qt_db):
+    request_id = _emailed(qt_db)
+    state = GetDeskState(desk_repo(qt_db), NullAgent()).execute(entry(qt_db))
+    assert state["openOverrideRequestId"] == request_id
+    assert state["locked"] is None
+    assert state["overrideRequests"][0]["payload"]["proposal_sha256"]
+
+
+# --- A7: desk settings as strategy_config versions ---------------------------
+
+RUN_CONFIG = {
+    "capital": 500000,
+    "risk": {"max_leverage": 2.0, "max_drawdown": 0.3},
+    "strategies": {"tf": {"lookbacks": [16, 32]}},
+}
+
+
+class AcceptingEngine:
+    """CheckSettings (D-17) that accepts: the engine's own check is tested in trade-ngin."""
+
+    def check_settings(self, portfolio_id, overrides):
+        return True, ""
+
+
+def report_settings(factory, day, version, config=RUN_CONFIG, portfolio=QT):
+    """A live run of the 022 binary writing settings_used."""
+    _exec(
+        factory,
+        "INSERT INTO trading.live_run_metadata (date, strategy_id, portfolio_id, settings_used) "
+        "VALUES (%s, %s, %s, %s)",
+        (
+            day,
+            STRATEGY,
+            portfolio,
+            psycopg2.extras.Json({"strategy_config_version": version, "config": config}),
+        ),
+    )
+
+
+def config_rows(factory, portfolio=QT):
+    return _exec(
+        factory,
+        "SELECT version, overrides, is_active, reason, created_by FROM trading.strategy_config "
+        "WHERE portfolio_id = %s ORDER BY version",
+        (portfolio,),
+    )
+
+
+def test_settings_versions_keep_exactly_one_active(qt_db):
+    from research_api.application.qt.settings_use_cases import (
+        GetSettings,
+        RevertSettings,
+        SaveSettings,
+    )
+
+    report_settings(qt_db, D1, None)
+    repo = desk_repo(qt_db)
+
+    SaveSettings(repo, AcceptingEngine()).execute(
+        entry(qt_db), [{"path": ["risk", "max_leverage"], "value": 1.5}], "less risk", "d@x.com"
+    )
+    SaveSettings(repo, AcceptingEngine()).execute(
+        entry(qt_db),
+        [{"path": ["strategies", "tf", "lookbacks"], "value": [8, 16]}],
+        "faster",
+        "d@x.com",
+    )
+
+    rows = config_rows(qt_db)
+    assert [(r["version"], r["is_active"]) for r in rows] == [(1, False), (2, True)]
+    assert rows[1]["overrides"] == {
+        "risk": {"max_leverage": 1.5},
+        "strategies": {"tf": {"lookbacks": [8, 16]}},
+    }
+    assert (rows[1]["reason"], rows[1]["created_by"]) == ("faster", "d@x.com")
+
+    view = GetSettings(repo).execute(entry(qt_db))
+    assert view["running"]["version"] is None and view["pending"] is True
+    lev = next(f for f in view["fields"] if f["path"] == ["risk", "max_leverage"])
+    assert (lev["value"], lev["pending"]) == (2.0, 1.5)
+
+    # The next run picked version 2 up: running == active, nothing pending.
+    report_settings(
+        qt_db, D2, 2, config={**RUN_CONFIG, "risk": {"max_leverage": 1.5, "max_drawdown": 0.3}}
+    )
+    assert GetSettings(repo).execute(entry(qt_db))["pending"] is False
+
+    RevertSettings(repo, AcceptingEngine()).execute(entry(qt_db), 1, "undo faster", "d@x.com")
+    rows = config_rows(qt_db)
+    assert [(r["version"], r["is_active"]) for r in rows] == [(1, False), (2, False), (3, True)]
+    assert rows[2]["overrides"] == {"risk": {"max_leverage": 1.5}}
+
+    # The database itself refuses a second active version.
+    with pytest.raises(psycopg2.errors.UniqueViolation):
+        _exec(qt_db, "UPDATE trading.strategy_config SET is_active = true WHERE version = 1")
+
+
+def test_settings_refuse_unknown_keys_and_hidden_sections(qt_db):
+    from research_api.application.qt.settings_use_cases import SaveSettings
+    from research_api.domain.qt.settings import SettingsRuleError
+
+    report_settings(qt_db, D1, None)
+    for change in (
+        {"path": ["risk", "invented"], "value": 1.0},
+        {"path": ["database", "host"], "value": "x"},
+    ):
+        with pytest.raises(SettingsRuleError):
+            SaveSettings(desk_repo(qt_db), AcceptingEngine()).execute(
+                entry(qt_db), [change], "r", "d@x.com"
+            )
+    assert config_rows(qt_db) == []
+
+
+def test_settings_save_detects_a_concurrent_change(qt_db):
+    report_settings(qt_db, D1, None)
+    repo = desk_repo(qt_db)
+    repo.insert_config_version(QT, {"capital": 1}, "first", "a@x.com", None)
+    with pytest.raises(DeskConflictError):
+        repo.insert_config_version(QT, {"capital": 2}, "stale", "b@x.com", None)
+    assert [r["version"] for r in config_rows(qt_db)] == [1]
+
+
+# --- the daily approval cutoff (2026-10-09; migration 026 present or not) ------
+
+
+def test_desk_state_reads_publish_source_and_sent_at_once_026_is_applied(qt_db):
+    seed_day(qt_db)
+    with_026 = has_026(qt_db.version)
+    columns = ", publish_source, sent_at" if with_026 else ""
+    values = ", 'desk', '2026-10-08T13:30:05Z'" if with_026 else ""
+    _exec(
+        qt_db,
+        "INSERT INTO trading.live_run_metadata "
+        f"(date, strategy_id, portfolio_id, published_by, published_at{columns}) "
+        f"VALUES (%s, %s, %s, 'desk@x.com', '2026-10-08T13:00:00Z'{values})",
+        (D2, STRATEGY, QT),
+    )
+
+    state = GetDeskState(desk_repo(qt_db), NullAgent()).execute(entry(qt_db))
+
+    assert state["sendTracked"] is with_026
+    assert state["published"]["published_by"] == "desk@x.com"
+    assert state["published"]["publish_source"] == "desk"
+    if with_026:
+        sent = datetime.fromisoformat(state["published"]["sent_at"])
+        assert sent == datetime(2026, 10, 8, 13, 30, 5, tzinfo=UTC)
+    else:
+        assert state["published"]["sent_at"] is None
+    assert state["serverTime"] == CLOCK.isoformat()
+    assert state["deadlines"]["approveBy"] == "2026-10-08T09:30:00-04:00"
+
+
+def test_a_fallback_publish_reads_as_fallback_with_or_without_026(qt_db):
+    seed_day(qt_db)
+    publish_on_live_run_metadata(qt_db, by="system:fallback-10am")
+    if has_026(qt_db.version):
+        _exec(
+            qt_db,
+            "UPDATE trading.live_run_metadata SET publish_source = 'fallback', sent_at = now()",
+        )
+    state = GetDeskState(desk_repo(qt_db), NullAgent()).execute(entry(qt_db))
+    assert state["published"]["publish_source"] == "fallback"
+    assert (state["published"]["sent_at"] is not None) is has_026(qt_db.version)
+    assert state["locked"] == "published"
+
+
+def test_approve_from_10_new_york_is_refused_and_writes_nothing(qt_db):
+    seed_day(qt_db)
+    late = datetime(2026, 10, 8, 14, 0, tzinfo=UTC)  # 10:00 EDT
+    with pytest.raises(DeskConflictError, match="closed at 10:00 New York"):
+        PublishDesk(desk_repo(qt_db), NullAgent(), now=lambda: late).execute(
+            entry(qt_db), "desk@x.com"
+        )
+    with pytest.raises(DeskConflictError, match="closed at 10:00 New York"):
+        SaveDeskEdit(desk_repo(qt_db), NullAgent(), now=lambda: late).execute(
+            entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 1, "expected": 3}], "r", "d@x.com"
+        )
+    assert commands(qt_db) == []
+    assert float(proposal_rows(qt_db)["ZC.v.0"]["quantity"]) == 3
+    # 09:59 New York the same day is still open.
+    early = datetime(2026, 10, 8, 13, 59, tzinfo=UTC)
+    PublishDesk(desk_repo(qt_db), NullAgent(), now=lambda: early).execute(
+        entry(qt_db), "desk@x.com"
+    )
+    assert [c["kind"] for c in commands(qt_db)] == ["publish"]
+
+
+# --- rescind (C8, migration 029) -----------------------------------------------
+
+
+def _needs_029(factory):
+    if factory.version != "029":
+        pytest.skip("kind 'rescind' is 029's")
+
+
+def engine_publishes(
+    factory, publish_id, source="desk", sent_at=None, by="desk@x.com", result=None
+):
+    """The engine runs a publish: the row done, live_run_metadata published."""
+    engine_finishes(factory, publish_id, **({"result": json.dumps(result)} if result else {}))
+    _exec(
+        factory,
+        "INSERT INTO trading.live_run_metadata "
+        "(date, strategy_id, portfolio_id, published_by, published_at, publish_source, sent_at) "
+        "VALUES (%s, %s, %s, %s, now(), %s, %s) "
+        "ON CONFLICT (date, strategy_id, portfolio_id) DO UPDATE SET "
+        "published_by = EXCLUDED.published_by, published_at = EXCLUDED.published_at, "
+        "publish_source = EXCLUDED.publish_source, sent_at = EXCLUDED.sent_at",
+        (D2, STRATEGY, QT, by, source, sent_at),
+    )
+
+
+def engine_rescinds(factory, rescind_id):
+    """The engine runs a rescind: clears the approval, finishes the row done."""
+    _exec(
+        factory,
+        "UPDATE trading.live_run_metadata SET published_by = NULL, published_at = NULL, "
+        "publish_source = NULL WHERE portfolio_id = %s AND date = %s",
+        (QT, D2),
+    )
+    engine_finishes(factory, rescind_id, message="approval of 2026-10-08 rescinded")
+
+
+def _approve(factory, **published):
+    seed_day(factory)
+    command = PublishDesk(desk_repo(factory), NullAgent()).execute(entry(factory), "desk@x.com")
+    engine_publishes(factory, command["command"]["id"], **published)
+
+
+def test_rescind_reopens_the_day_for_edits_and_a_second_approval(qt_db):
+    _needs_029(qt_db)
+    _approve(qt_db)
+    repo = desk_repo(qt_db)
+    rescind = RescindDesk(repo, NullAgent())
+
+    command = rescind.execute(entry(qt_db), "desk@x.com")["command"]
+    assert (command["kind"], command["status"], command["date"]) == (
+        "rescind",
+        "pending",
+        "2026-10-08",
+    )
+    with pytest.raises(
+        DeskConflictError, match="rescind of the 2026-10-08 book is already pending"
+    ):
+        rescind.execute(entry(qt_db), "desk@x.com")
+    state = GetDeskState(repo, NullAgent()).execute(entry(qt_db))
+    assert state["locked"] == "published" and state["rescind"]["id"] == command["id"]
+
+    engine_rescinds(qt_db, command["id"])
+    state = GetDeskState(repo, NullAgent()).execute(entry(qt_db))
+    assert state["locked"] is None and state["published"] is None
+    assert state["rescind"]["status"] == "done"
+
+    # The day takes edits and a new approval; 029 dropped the one-done-publish index.
+    save = SaveDeskEdit(repo, NullAgent()).execute(
+        entry(qt_db), [{"symbol": "ZC.v.0", "quantity": 1, "expected": 3}], "r", "desk@x.com"
+    )
+    # C9: no approval while the save is still running.
+    with pytest.raises(DeskConflictError, match="A save is still running"):
+        PublishDesk(repo, NullAgent()).execute(entry(qt_db), "desk@x.com")
+    engine_finishes(qt_db, save["command"]["id"])
+    second = PublishDesk(repo, NullAgent()).execute(entry(qt_db), "desk@x.com")["command"]
+    engine_publishes(qt_db, second["id"])
+    assert [(c["kind"], c["status"]) for c in commands(qt_db)] == [
+        ("publish", "done"),
+        ("rescind", "done"),
+        ("save", "done"),
+        ("publish", "done"),
+    ]
+
+
+def test_rescind_refuses_what_is_not_an_unsent_desk_approval(qt_db):
+    _needs_029(qt_db)
+    seed_day(qt_db)
+    repo = desk_repo(qt_db)
+    with pytest.raises(DeskConflictError, match="not approved"):
+        RescindDesk(repo, NullAgent()).execute(entry(qt_db), "desk@x.com")
+
+    publish_on_live_run_metadata(qt_db, by="system:fallback-10am")
+    _exec(qt_db, "UPDATE trading.live_run_metadata SET publish_source = 'fallback'")
+    with pytest.raises(DeskConflictError, match=r"published by the engine \(fallback\)"):
+        RescindDesk(repo, NullAgent()).execute(entry(qt_db), "desk@x.com")
+
+    _exec(
+        qt_db,
+        "UPDATE trading.live_run_metadata SET publish_source = 'desk', "
+        "published_by = 'desk@x.com', sent_at = now()",
+    )
+    with pytest.raises(DeskConflictError, match="already been e-mailed"):
+        RescindDesk(repo, NullAgent()).execute(entry(qt_db), "desk@x.com")
+    assert commands(qt_db) == []
+
+
+def test_anyone_on_qt_can_rescind_a_desk_approval(qt_db):
+    # Dom 2026-10-16: not only the approver (the route lets only the QT screen in).
+    _needs_029(qt_db)
+    _approve(qt_db)  # approved by desk@x.com
+    RescindDesk(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "other@x.com")
+    assert [c["kind"] for c in commands(qt_db)] == ["publish", "rescind"]
+
+
+def test_only_the_vp_or_president_can_rescind_an_override_day(qt_db):
+    _needs_029(qt_db)
+    seed_day(qt_db)
+    # The day an approved override published: its publish row carries flow override_b.
+    command = desk_repo(qt_db).insert_publish(
+        QT, D2, "desk@x.com", {"flow": "override_b", "after": 1}
+    )
+    engine_publishes(
+        qt_db,
+        command["id"],
+        result={"published": True, "published_at": "2026-10-08T12:00:00+00:00"},
+    )
+    with pytest.raises(DeskConflictError, match="only the VP or the President can take it back"):
+        RescindDesk(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "desk@x.com")
+    assert [c["kind"] for c in commands(qt_db)] == ["publish"]
+    RescindDesk(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "vp@x.com", is_approver=True)
+    assert [c["kind"] for c in commands(qt_db)] == ["publish", "rescind"]
+
+
+def test_send_needs_a_published_unsent_day_and_nothing_open(qt_db):
+    """D-66: the desk's Send inserts a publish row {"flow": "send"} under the day lock."""
+    _needs_029(qt_db)
+    seed_day(qt_db)
+    repo = desk_repo(qt_db)
+    with pytest.raises(DeskConflictError, match="not approved"):
+        repo.insert_send(QT, D2, "desk@x.com")
+    command = PublishDesk(repo, NullAgent()).execute(entry(qt_db), "desk@x.com", email=False)
+    assert command["command"]["payload"] == {"email": False}
+    engine_publishes(qt_db, command["command"]["id"])
+    send = repo.insert_send(QT, D2, "other@x.com")
+    assert (send["kind"], send["payload"]) == ("publish", {"flow": "send"})
+    with pytest.raises(DeskConflictError, match="already pending"):
+        repo.insert_send(QT, D2, "other@x.com")
+    engine_finishes(qt_db, send["id"])
+    _exec(qt_db, "UPDATE trading.live_run_metadata SET sent_at = now()")
+    with pytest.raises(DeskConflictError, match="already been e-mailed"):
+        repo.insert_send(QT, D2, "other@x.com")
+
+
+def test_rescind_from_0930_new_york_writes_nothing(qt_db):
+    _needs_029(qt_db)
+    _approve(qt_db)
+    at = datetime(2026, 10, 8, 13, 30, tzinfo=UTC)  # 09:30 EDT
+    with pytest.raises(DeskConflictError, match="can no longer be taken back"):
+        RescindDesk(desk_repo(qt_db), NullAgent(), now=lambda: at).execute(
+            entry(qt_db), "desk@x.com"
+        )
+    assert [c["kind"] for c in commands(qt_db)] == ["publish"]
+
+
+def test_a_second_open_rescind_is_refused_by_the_029_index(qt_db, monkeypatch):
+    _needs_029(qt_db)
+    from research_api.infrastructure.qt.repositories import PostgresDeskRepository
+
+    _approve(qt_db)
+    RescindDesk(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "desk@x.com")
+    monkeypatch.setattr(PostgresDeskRepository, "_open_command", lambda *a, **k: None)
+    with pytest.raises(DeskConflictError, match="already open"):
+        RescindDesk(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "desk@x.com")
+    assert [c["kind"] for c in commands(qt_db)] == ["publish", "rescind"]
+
+
+def test_before_029_the_command_log_refuses_a_rescind_row(qt_db):
+    if qt_db.version != "026":
+        pytest.skip("026 has the send tracking rescind reads, but not 029's kind")
+    _approve(qt_db)
+    with pytest.raises(psycopg2.IntegrityError):
+        RescindDesk(desk_repo(qt_db), NullAgent()).execute(entry(qt_db), "desk@x.com")
+    assert [c["kind"] for c in commands(qt_db)] == ["publish"]
+
+
+def test_the_settings_lock_list_from_migration_004(qt_db):
+    # D-14: before 004 the repository reports no table (the starting locks apply); after it
+    # the seeded list is read, an admin's lock and unlock land, and each is logged.
+    from pathlib import Path
+
+    assert desk_repo(qt_db).settings_locks() is None
+    sql = (Path(__file__).parent.parent / "migrations" / "004_desk_settings_locks.sql").read_text(
+        "utf-8"
+    )
+    with qt_db.setup.cursor() as cur:
+        cur.execute(sql)
+        cur.execute(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON trading.desk_settings_locks TO algolens_test_app"
+        )
+        cur.execute("GRANT SELECT, INSERT ON trading.desk_settings_lock_log TO algolens_test_app")
+        cur.execute(
+            "GRANT USAGE ON SEQUENCE trading.desk_settings_lock_log_id_seq TO algolens_test_app"
+        )
+
+    seeded = [tuple(r["path"]) for r in desk_repo(qt_db).settings_locks()]
+    assert (
+        ("use_optimization",) in seeded
+        and ("strategies", "*", "type") in seeded
+        and len(seeded) == 9
+    )
+
+    desk_repo(qt_db).set_settings_lock(["risk", "max_drawdown"], True, "freeze it", "admin@x.com")
+    desk_repo(qt_db).set_settings_lock(["live"], False, "open live", "admin@x.com")
+    paths = [tuple(r["path"]) for r in desk_repo(qt_db).settings_locks()]
+    assert ("risk", "max_drawdown") in paths and ("live",) not in paths
+    log = _exec(
+        qt_db, "SELECT path, locked, reason FROM trading.desk_settings_lock_log ORDER BY id"
+    )
+    assert [(tuple(r["path"]), r["locked"], r["reason"]) for r in log] == [
+        (("risk", "max_drawdown"), True, "freeze it"),
+        (("live",), False, "open live"),
+    ]
+
+
+def test_a_portfolio_read_lists_its_strategies(qt_db):
+    # D-20: a portfolio holds strategies (sleeves); the read names them with what each holds.
+    add_results(qt_db, "qt", D2, 500000)
+    add_position(qt_db, "qt", D2, "ZC.v.0", 2, sleeve="TREND")
+    add_position(qt_db, "qt", D2, "ZS.v.0", 1, sleeve="TREND")
+    add_position(qt_db, "qt", D2, "ES.v.0", 0, sleeve="FAST")
+    add_position(qt_db, "qt", D1, "CL.v.0", 1, sleeve="OLD")
+
+    rows = repo(qt_db).fetch_portfolio_rows(QT, book="qt", allow_fallback=False)
+
+    assert list(rows.sleeves) == [
+        {"name": "FAST", "positions": 0},
+        {"name": "TREND", "positions": 2},
+    ]

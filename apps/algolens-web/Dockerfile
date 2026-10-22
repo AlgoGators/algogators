@@ -1,32 +1,31 @@
-# Build stage
+# The AlgoLens frontend: a static Vite build served by nginx.
+#
+# Build context is the REPO ROOT (the app is a member of the pnpm workspace, so the lockfile
+# and workspace manifest live above it):
+#   docker build -f apps/algolens-web/Dockerfile --build-arg VITE_API_URL=https://algolens.algogators.com .
 FROM node:26-alpine AS build
 
-WORKDIR /app
+# Node 25+ no longer bundles corepack; the version matches package.json "packageManager".
+RUN npm install --global pnpm@9.15.0
 
-# Copy package files
-COPY package*.json ./
+WORKDIR /repo
 
-# Install dependencies
-RUN npm ci
+# Manifests first so the dependency layer is cached until a dependency changes. pnpm checks the
+# whole lockfile, so every workspace member's manifest has to be present.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/algolens-web/package.json apps/algolens-web/package.json
+COPY apps/website/package.json apps/website/package.json
+RUN pnpm install --frozen-lockfile --filter @algogators/algolens-web...
 
-# Copy source code
-COPY . .
+COPY apps/algolens-web apps/algolens-web
 
-# Build argument for API URL
+# The API origin is baked into the static build; the site is same-origin behind the edge nginx.
 ARG VITE_API_URL
 ENV VITE_API_URL=$VITE_API_URL
 
-# Build the application
-RUN npm run build
+RUN pnpm --filter @algogators/algolens-web run build
 
-# Production stage
 FROM nginx:alpine
-
-# Copy built assets from build stage
-COPY --from=build /app/build /usr/share/nginx/html
-
-# Expose port 80
+COPY --from=build /repo/apps/algolens-web/dist /usr/share/nginx/html
 EXPOSE 80
-
-# Start nginx
 CMD ["nginx", "-g", "daemon off;"]

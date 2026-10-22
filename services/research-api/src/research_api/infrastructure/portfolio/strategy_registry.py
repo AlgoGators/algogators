@@ -1,27 +1,22 @@
-"""Postgres-backed strategy registry with a built-in fallback."""
+"""Postgres-backed strategy registry (no fallback: a failed read is an error, D-23)."""
 
 import logging
 
 import psycopg2
 
+from research_api.application.shared.errors import ApplicationError
 from research_api.infrastructure.db.postgres import get_db_connection
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_REGISTRY = [
-    {
-        "id": "trendfollowing",
-        "strategy_type": "LIVE_TREND_FOLLOWING",
-        "portfolio_id": "CONSERVATIVE_PORTFOLIO",
-        "name": "Trend Following",
-        "description": "Systematic trend following across multiple futures contracts",
-        "initial_equity": 500000.0,
-        "managers": ["AlgoLens System"],
-        "is_active": True,
-        "lifecycle": "live",
-        "sort_order": 0,
-    }
-]
+
+class RegistryUnavailableError(ApplicationError):
+    """trading.strategy_registry could not be read, or holds no rows.
+
+    D-23: there is no built-in default list. A default once stood in for a failed read and
+    silently hid every portfolio but the trend book, the QT books included; a failed read is
+    now an error the screens show.
+    """
 
 
 def _normalize(row):
@@ -39,18 +34,29 @@ def _normalize(row):
         "is_active": bool(row.get("is_active", True)),
         "lifecycle": row.get("lifecycle") or "live",
         "sort_order": int(row.get("sort_order") or 0),
+        # Migration 023 (trade-ngin): grouping for the portfolio switcher and
+        # the desk-editing gate. Absent before 023 -> ungrouped, not editable.
+        "portfolio_group": row.get("portfolio_group"),
+        "desk_editable": bool(row.get("desk_editable") or False),
     }
 
 
-def _has_lifecycle_column(cursor):
+# Columns read when present; each was added by a later migration.
+_OPTIONAL_COLUMNS = ("lifecycle", "portfolio_group", "desk_editable")
+
+
+def _optional_columns(cursor):
     cursor.execute(
         """
-        SELECT 1 FROM information_schema.columns
+        SELECT column_name FROM information_schema.columns
         WHERE table_schema = 'trading' AND table_name = 'strategy_registry'
-          AND column_name = 'lifecycle'
-        """
+          AND column_name = ANY(%s)
+        """,
+        (list(_OPTIONAL_COLUMNS),),
     )
-    return cursor.fetchone() is not None
+    present = {row["column_name"] for row in cursor.fetchall()}
+    # Fixed order, never caller-controlled text, so it is safe to splice in.
+    return [column for column in _OPTIONAL_COLUMNS if column in present]
 
 
 class PostgresStrategyRegistry:
@@ -62,42 +68,29 @@ class PostgresStrategyRegistry:
         try:
             conn = self.connection_factory()
             with conn.cursor() as cursor:
-                has_lifecycle = _has_lifecycle_column(cursor)
-                if has_lifecycle:
-                    cursor.execute(
-                        """
-                        SELECT id, strategy_type, portfolio_id, name, description,
-                               initial_equity, managers, is_active, lifecycle, sort_order
-                        FROM trading.strategy_registry
-                        ORDER BY sort_order ASC, id ASC
-                        """
-                    )
-                else:
-                    cursor.execute(
-                        """
-                        SELECT id, strategy_type, portfolio_id, name, description,
-                               initial_equity, managers, is_active, sort_order
-                        FROM trading.strategy_registry
-                        ORDER BY sort_order ASC, id ASC
-                        """
-                    )
+                extra = "".join(f", {column}" for column in _optional_columns(cursor))
+                cursor.execute(
+                    "SELECT id, strategy_type, portfolio_id, name, description, "
+                    "initial_equity, managers, is_active, sort_order"
+                    + extra
+                    + " FROM trading.strategy_registry ORDER BY sort_order ASC, id ASC"
+                )
                 rows = cursor.fetchall()
 
             registry = [_normalize(row) for row in rows]
-            if not registry:
-                logger.warning(
-                    "[REGISTRY] strategy_registry table is empty; using built-in default"
-                )
-                registry = list(DEFAULT_REGISTRY)
         except (psycopg2.Error, ValueError) as exc:
-            logger.warning(
-                "[REGISTRY] Could not read strategy_registry (%s); using built-in default",
-                getattr(exc, "pgcode", None) or str(exc),
-            )
-            registry = list(DEFAULT_REGISTRY)
+            reason = getattr(exc, "pgcode", None) or str(exc)
+            logger.error("[REGISTRY] Could not read strategy_registry (%s)", reason)
+            raise RegistryUnavailableError(
+                f"the portfolio registry could not be read ({reason})"
+            ) from exc
         finally:
             if conn is not None:
                 conn.close()
+
+        if not registry:
+            logger.error("[REGISTRY] strategy_registry is empty")
+            raise RegistryUnavailableError("the portfolio registry is empty")
 
         if active_only:
             registry = [
@@ -110,6 +103,13 @@ class PostgresStrategyRegistry:
     def get(self, strategy_id):
         for strategy in self.list(active_only=True):
             if strategy["id"] == strategy_id:
+                return strategy
+        return None
+
+    def get_portfolio(self, portfolio_id):
+        """The first live registry entry for a portfolio id, or None."""
+        for strategy in self.list(active_only=True):
+            if strategy["portfolio_id"] == portfolio_id:
                 return strategy
         return None
 

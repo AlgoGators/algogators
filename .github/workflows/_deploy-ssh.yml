@@ -41,6 +41,12 @@ on:
           pull/up. The script, not this workflow, then owns the roll.
         type: string
         default: ''
+      deploy-args:
+        description: >
+          Extra arguments passed to deploy-script after the image ref (for a script that rolls
+          more than one image, e.g. a backend and a frontend).
+        type: string
+        default: ''
       sparse-paths:
         description: Space-separated paths kept in the deploy-script checkout.
         type: string
@@ -86,7 +92,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
           command_timeout: ${{ inputs.timeout-minutes }}m
-          envs: IMAGE_REF,REMOTE_PATH,COMPOSE_FILE,SERVICE_NAME,GHCR_ACTOR,GHCR_TOKEN,DEPLOY_SCRIPT,SPARSE_PATHS,REPO_URL,DEPLOY_REF,DEPLOY_SHA
+          envs: IMAGE_REF,REMOTE_PATH,COMPOSE_FILE,SERVICE_NAME,GHCR_ACTOR,GHCR_TOKEN,DEPLOY_SCRIPT,DEPLOY_ARGS,SPARSE_PATHS,REPO_URL,DEPLOY_REF,DEPLOY_SHA
           script_stop: true
           script: |
             set -euo pipefail
@@ -106,7 +112,8 @@ jobs:
               # Exactly the commit CI built, never a newer push that raced it.
               git merge --ff-only "$DEPLOY_SHA"
               trap 'docker logout ghcr.io >/dev/null' EXIT
-              bash "$DEPLOY_SCRIPT" "$IMAGE_REF"
+              # shellcheck disable=SC2086  # DEPLOY_ARGS is a space-separated list of refs
+              bash "$DEPLOY_SCRIPT" "$IMAGE_REF" $DEPLOY_ARGS
               exit 0
             fi
 
@@ -129,6 +136,7 @@ jobs:
           GHCR_ACTOR: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DEPLOY_SCRIPT: ${{ inputs.deploy-script }}
+          DEPLOY_ARGS: ${{ inputs.deploy-args }}
           SPARSE_PATHS: ${{ inputs.sparse-paths }}
           REPO_URL: https://github.com/${{ github.repository }}.git
           DEPLOY_REF: ${{ github.ref_name }}
