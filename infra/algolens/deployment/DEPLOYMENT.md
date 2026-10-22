@@ -73,7 +73,7 @@ AlgoLens (`services/research-api`, `apps/algolens-web`, `infra/algolens`, `libs/
    frontend is built with `VITE_API_URL=https://algolens.algogators.com`
    (override with the repo variable `ALGOLENS_PUBLIC_URL`).
 3. **deploy**: SSHes to the box, logs in to GHCR with the run's token,
-   clones `/home/ubuntu/algogators` on first use (sparse: `infra/algolens/deployment` only),
+   clones `/home/ubuntu/algolens-deploy` on first use (sparse: `infra/algolens/deployment` only),
    fast-forwards it to the exact commit that was built, and runs
    `infra/algolens/deployment/deploy.sh <backend@sha256:...> <frontend@sha256:...>`
    (the reusable `_deploy-ssh.yml`, with the frontend ref in `deploy-args`).
@@ -156,8 +156,8 @@ chmod 600 ~/.config/algogators/algolens.env
 docker network create qt || true
 ```
 
-`/home/ubuntu/algogators` is created by the first deploy from the monorepo. Do not create it by
-hand. The previous checkout `/home/ubuntu/algolens` (a sparse clone of the old AlgoLens repo) is no
+`/home/ubuntu/algolens-deploy` is created by the first deploy from the monorepo. Do not create it by
+hand (`/home/ubuntu/algogators` on this box is the data-ngin deploy's checkout; leave it alone). The previous checkout `/home/ubuntu/algolens` (a sparse clone of the old AlgoLens repo) is no
 longer used and can be removed once the first monorepo deploy is healthy.
 
 **Security group** (trade-ngin box):
@@ -230,7 +230,7 @@ rolls itself back to the last good pair. To go back further by hand,
 `deploy.sh` prints the exact command at the end of every deploy. In general:
 
 ```bash
-cd ~/algogators && bash infra/algolens/deployment/deploy.sh $(cat ~/.config/algogators/algolens.previous-images)
+cd ~/algolens-deploy && bash infra/algolens/deployment/deploy.sh $(cat ~/.config/algogators/algolens.previous-images)
 ```
 
 You can also re-run an earlier successful `algolens · deploy` run.
@@ -243,7 +243,7 @@ docker ps --filter name=algolens
 docker stats --no-stream algolens-backend algolens-frontend algolens-edge
 docker logs -f algolens-backend
 # After editing algolens.env, re-run deploy.sh with the current images:
-cd ~/algogators && bash infra/algolens/deployment/deploy.sh $(cat ~/.config/algogators/algolens.current-images)
+cd ~/algolens-deploy && bash infra/algolens/deployment/deploy.sh $(cat ~/.config/algogators/algolens.current-images)
 ```
 
 ## Retired

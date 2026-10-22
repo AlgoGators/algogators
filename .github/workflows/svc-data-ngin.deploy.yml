@@ -13,6 +13,13 @@ name: data-ngin · deploy
 on:
   push:
     branches: [prod]
+    # `prod` is shared with the AlgoLens deploy: only data-ngin changes redeploy Airflow.
+    paths:
+      - services/data-ngin/**
+      - platform/db/**
+      - .github/workflows/svc-data-ngin.deploy.yml
+      - .github/workflows/_deploy-ssh.yml
+      - .github/workflows/_publish-container.yml
   workflow_dispatch:
     inputs:
       dry-run:
