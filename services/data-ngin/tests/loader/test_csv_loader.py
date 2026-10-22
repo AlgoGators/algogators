@@ -114,7 +114,49 @@ class TestCSVLoader(unittest.TestCase):
         loader: CSVLoader = CSVLoader(config=self.mock_config)
         with self.assertRaises(ValueError) as context:
             loader.load_symbols()
-        self.assertIn("Null values", str(context.exception))
+        self.assertIn("Null or blank", str(context.exception))
+
+
+    def test_load_symbols_whitespace_duplicate(self) -> None:
+        """Reject symbols that collide only after trimming whitespace."""
+        mock_csv_data: list[dict[str, str]] = [
+            {"dataSymbol": "ES", "instrumentType": "FUTURE"},
+            {"dataSymbol": " ES ", "instrumentType": "FUTURE"},
+        ]
+        temp_csv_path: str = self.create_mock_csv(mock_csv_data)
+        self.mock_config["loader"]["file_path"] = temp_csv_path
+
+        loader: CSVLoader = CSVLoader(config=self.mock_config)
+        with self.assertRaises(ValueError) as context:
+            loader.load_symbols()
+        self.assertIn("Duplicate symbols", str(context.exception))
+
+    def test_load_symbols_whitespace_only_symbol(self) -> None:
+        """Reject whitespace-only symbols that would become empty keys."""
+        mock_csv_data: list[dict[str, str]] = [
+            {"dataSymbol": "ES", "instrumentType": "FUTURE"},
+            {"dataSymbol": "   ", "instrumentType": "FUTURE"},
+        ]
+        temp_csv_path: str = self.create_mock_csv(mock_csv_data)
+        self.mock_config["loader"]["file_path"] = temp_csv_path
+
+        loader: CSVLoader = CSVLoader(config=self.mock_config)
+        with self.assertRaises(ValueError) as context:
+            loader.load_symbols()
+        self.assertIn("Null or blank", str(context.exception))
+
+    def test_load_symbols_valid_padded_symbol(self) -> None:
+        """Keep a single padded symbol working after trim."""
+        mock_csv_data: list[dict[str, str]] = [
+            {"dataSymbol": " ES ", "instrumentType": "future"},
+            {"dataSymbol": "NQ", "instrumentType": "FUTURE"},
+        ]
+        temp_csv_path: str = self.create_mock_csv(mock_csv_data)
+        self.mock_config["loader"]["file_path"] = temp_csv_path
+
+        loader: CSVLoader = CSVLoader(config=self.mock_config)
+        symbols: dict[str, str] = loader.load_symbols()
+        self.assertEqual(symbols, {"ES": "FUTURE", "NQ": "FUTURE"})
 
     def test_load_symbols_missing_file(self) -> None:
         """

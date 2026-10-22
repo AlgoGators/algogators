@@ -95,17 +95,17 @@ class CSVLoader(Loader):
                 f"Missing columns: {missing_columns}"
             )
 
-        # Ensure no duplicates or null values in 'dataSymbol'
+        # Normalize symbols before duplicate/blank checks so padded values
+        # (e.g. " ES ") cannot bypass validation and then collide in the dict.
+        contracts_df["dataSymbol"] = contracts_df["dataSymbol"].astype("string").str.strip()
+        contracts_df["instrumentType"] = contracts_df["instrumentType"].astype("string").str.upper()
+
+        if contracts_df["dataSymbol"].isna().any() or (contracts_df["dataSymbol"] == "").any():
+            logging.error("Null or blank values found in 'dataSymbol' column.")
+            raise ValueError("Null or blank values found in 'dataSymbol' column.")
         if contracts_df["dataSymbol"].duplicated().any():
             logging.error("Duplicate symbols found in 'dataSymbol' column.")
             raise ValueError("Duplicate symbols found in 'dataSymbol' column.")
-        if contracts_df["dataSymbol"].isnull().any():
-            logging.error("Null values found in 'dataSymbol' column.")
-            raise ValueError("Null values found in 'dataSymbol' column.")
-
-        # Normalize data: Strip whitespace and ensure consistent casing
-        contracts_df["dataSymbol"] = contracts_df["dataSymbol"].str.strip()
-        contracts_df["instrumentType"] = contracts_df["instrumentType"].str.upper()
 
         # Create a dictionary mapping symbols to their asset types
         symbol_dict: dict[str, str] = dict(
