@@ -6,14 +6,15 @@ from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, ClassVar
 
 import psycopg2
+import psycopg2.extras
 from platform_db import DatabaseConfig
 from psycopg2 import pool as psycopg2_pool
 
 from data_ngin.infrastructure.inserter import Inserter
 
 # Unique keys of the OHLCV tables: (time, symbol) on the cleaned tables,
-# (ts_event, symbol) on the raw ones.
-CONFLICT_KEYS = (("time", "symbol"), ("ts_event", "symbol"))
+# (ts_event, symbol) on the raw ones, and (instrument_id, date) on contract_ohlcv_1d.
+CONFLICT_KEYS = (("time", "symbol"), ("ts_event", "symbol"), ("instrument_id", "date"))
 
 
 def upsert_clause(columns: list[str]) -> str:
@@ -251,6 +252,106 @@ class OhlcvRepository(Inserter):
         except Exception as e:
             self.connection.rollback()
             raise RuntimeError(f"Failed to insert data into {schema}.{table}: {e}") from e
+
+    def insert_contract_bars(
+        self,
+        records: list[dict[str, Any]],
+        chunk_size: int = 5000,
+        schema: str = "futures_data",
+        table: str = "contract_ohlcv_1d",
+    ) -> None:
+        """
+        Batch upserts per-contract OHLCV records using execute_values for high throughput.
+        Matches primary key on (instrument_id, date) with ON CONFLICT DO UPDATE.
+        """
+        if not records:
+            self.logger.info("No contract records to insert; skipping.")
+            return
+
+        self._ensure_connected()
+        if not self.connection:
+            raise RuntimeError("Database connection is not established.")
+
+        columns = [
+            "instrument_id",
+            "date",
+            "root",
+            "raw_symbol",
+            "expiration",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+        ]
+        cols_sql = ", ".join(f'"{c}"' if c == "date" else c for c in columns)
+        update_cols = [c for c in columns if c not in ("instrument_id", "date")]
+        updates_sql = ", ".join(f'"{c}" = EXCLUDED."{c}"' if c == "date" else f"{c} = EXCLUDED.{c}" for c in update_cols)
+
+        insert_sql = f"""
+        INSERT INTO {schema}.{table} ({cols_sql})
+        VALUES %s
+        ON CONFLICT (instrument_id, "date") DO UPDATE SET
+            {updates_sql},
+            loaded_at = now()
+        """
+
+        tuple_values = [
+            tuple(r.get(col) for col in columns)
+            for r in records
+        ]
+
+        try:
+            with self.connection.cursor() as cur:
+                for i in range(0, len(tuple_values), chunk_size):
+                    chunk = tuple_values[i : i + chunk_size]
+                    psycopg2.extras.execute_values(
+                        cur,
+                        insert_sql,
+                        chunk,
+                        template=None,
+                        page_size=chunk_size,
+                    )
+            self.logger.info(f"Successfully upserted {len(records)} records into {schema}.{table}")
+        except Exception as e:
+            self.connection.rollback()
+            self.logger.error("Failed to batch insert contract bars: %s", e)
+            raise RuntimeError(f"Failed to batch insert contract bars: {e}") from e
+
+    def get_contract_bar(
+        self,
+        instrument_id: str,
+        bar_date: Any,
+        schema: str = "futures_data",
+        table: str = "contract_ohlcv_1d",
+    ) -> dict[str, Any] | None:
+        """
+        Fetch a single contract bar by (instrument_id, date).
+        """
+        self._ensure_connected()
+        query = f"""
+        SELECT instrument_id, "date", root, raw_symbol, expiration, open, high, low, close, volume, loaded_at
+        FROM {schema}.{table}
+        WHERE instrument_id = %s AND "date" = %s
+        """
+        with self.connection.cursor() as cur:
+            cur.execute(query, (str(instrument_id), bar_date))
+            row = cur.fetchone()
+            if not row:
+                return None
+            return {
+                "instrument_id": row[0],
+                "date": row[1],
+                "root": row[2],
+                "raw_symbol": row[3],
+                "expiration": row[4],
+                "open": row[5],
+                "high": row[6],
+                "low": row[7],
+                "close": row[8],
+                "volume": row[9],
+                "loaded_at": row[10],
+            }
 
     def close(self) -> None:
         """
