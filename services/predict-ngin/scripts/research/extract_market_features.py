@@ -255,7 +255,7 @@ def extract_market_features(
             end_dt = pd.to_datetime(end_date)
             features["end_date"] = end_dt.isoformat()
             features["days_to_resolution"] = (end_dt - datetime.now()).total_seconds() / 86400
-        except:
+        except Exception:
             features["end_date"] = None
             features["days_to_resolution"] = None
     else:
@@ -450,13 +450,13 @@ Examples:
             if price_store:
                 try:
                     prices_df = price_store.load_prices_for_markets([market_id], outcome="YES")
-                except:
+                except Exception:
                     pass
             
             if trade_store:
                 try:
                     trades_df = trade_store.load_trades(market_ids=[market_id])
-                except:
+                except Exception:
                     pass
             
             # Extract features

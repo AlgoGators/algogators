@@ -315,7 +315,7 @@ def build_market_resolution_dates(
             if closed_time:
                 try:
                     resolution_date = pd.to_datetime(closed_time)
-                except:
+                except Exception:
                     resolution_date = last_trade_date
             else:
                 resolution_date = last_trade_date

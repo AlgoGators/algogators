@@ -149,7 +149,7 @@ def get_active_token_ids(min_volume: float = 10000, limit: int = 100) -> Set[str
             if isinstance(tokens, str):
                 try:
                     tokens = json.loads(tokens)
-                except:
+                except Exception:
                     tokens = []
             token_ids.update(tokens)
 
