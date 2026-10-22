@@ -2,13 +2,31 @@ import contextlib
 import logging
 import os
 import threading
-from typing import Any, ClassVar, Optional
+from datetime import UTC, date, datetime, time, timedelta
+from typing import Any, ClassVar
 
 import psycopg2
 from platform_db import DatabaseConfig
 from psycopg2 import pool as psycopg2_pool
 
 from data_ngin.infrastructure.inserter import Inserter
+
+# Unique keys of the OHLCV tables: (time, symbol) on the cleaned tables,
+# (ts_event, symbol) on the raw ones.
+CONFLICT_KEYS = (("time", "symbol"), ("ts_event", "symbol"))
+
+
+def upsert_clause(columns: list[str]) -> str:
+    """ON CONFLICT ... DO UPDATE for rows with these columns, keyed on whichever
+    OHLCV unique key the columns contain."""
+    key = next((k for k in CONFLICT_KEYS if all(c in columns for c in k)), None)
+    if key is None:
+        raise ValueError(f"No known unique key among columns {columns}")
+    updates = [c for c in columns if c not in key]
+    if not updates:
+        return f"ON CONFLICT ({', '.join(key)}) DO NOTHING"
+    assignments = ", ".join(f"{c} = EXCLUDED.{c}" for c in updates)
+    return f"ON CONFLICT ({', '.join(key)}) DO UPDATE SET {assignments}"
 
 
 class OhlcvRepository(Inserter):
@@ -34,10 +52,13 @@ class OhlcvRepository(Inserter):
     once per process (see `_diagnostics_logged`), not once per connect().
     """
 
-    _pool: Optional["psycopg2_pool.ThreadedConnectionPool"] = None
+    # One pool per database: a config's `database.db_name` picks the database
+    # (algo_data for the futures pipeline, new_algo_data for the equities and
+    # new-futures pipelines), so a single process can talk to more than one.
+    _pools: ClassVar[dict[str | None, "psycopg2_pool.ThreadedConnectionPool"]] = {}
     _pool_lock = threading.Lock()
     _diagnostics_logged: bool = False
-    _verified_tables: ClassVar[set[tuple[str, str]]] = set()
+    _verified_tables: ClassVar[set[tuple[str | None, str, str]]] = set()
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config=config)
@@ -45,20 +66,33 @@ class OhlcvRepository(Inserter):
         self.logger.setLevel(logging.INFO)
 
     @classmethod
-    def _get_pool(cls) -> "psycopg2_pool.ThreadedConnectionPool":
-        if cls._pool is None:
+    def _get_pool(cls, db_name: str | None = None) -> "psycopg2_pool.ThreadedConnectionPool":
+        """
+        Returns the shared pool for `db_name`, building it on first use.
+        `db_name=None` means the database named by the DB_NAME env var.
+        """
+        pool = cls._pools.get(db_name)
+        if pool is None:
             with cls._pool_lock:
-                if cls._pool is None:
+                pool = cls._pools.get(db_name)
+                if pool is None:
                     # DB_* credentials go through the shared DatabaseConfig so
                     # they are validated (missing/blank vars raise instead of
                     # silently building a pool with None values); the pool
                     # sizing knobs stay a local concern.
-                    cls._pool = psycopg2_pool.ThreadedConnectionPool(
+                    env = dict(os.environ)
+                    if db_name:
+                        env["DB_NAME"] = db_name
+                    pool = psycopg2_pool.ThreadedConnectionPool(
                         int(os.getenv("DB_POOL_MIN_CONN", "1")),
                         int(os.getenv("DB_POOL_MAX_CONN", "10")),
-                        **DatabaseConfig.from_env().connect_kwargs(),
+                        **DatabaseConfig.from_env(env).connect_kwargs(),
                     )
-        return cls._pool
+                    cls._pools[db_name] = pool
+        return pool
+
+    def _db_name(self) -> str | None:
+        return (self.config.get("database") or {}).get("db_name") or None
 
     @classmethod
     def reset_pool_for_testing(cls) -> None:
@@ -69,10 +103,10 @@ class OhlcvRepository(Inserter):
         tests that patch psycopg2.connect need a clean slate per test rather
         than reusing whatever pool an earlier test's mock built.
         """
-        if cls._pool is not None:
+        for pool in cls._pools.values():
             with contextlib.suppress(Exception):
-                cls._pool.closeall()
-        cls._pool = None
+                pool.closeall()
+        cls._pools = {}
         cls._diagnostics_logged = False
         cls._verified_tables = set()
 
@@ -88,7 +122,7 @@ class OhlcvRepository(Inserter):
             ConnectionError: If a connection cannot be acquired.
         """
         try:
-            self.connection = self._get_pool().getconn()
+            self.connection = self._get_pool(self._db_name()).getconn()
             self.connection.autocommit = True
 
             if not OhlcvRepository._diagnostics_logged:
@@ -124,7 +158,13 @@ class OhlcvRepository(Inserter):
         if not self.connection:
             self.connect()
 
-    def insert_data(self, data: list[dict[str, Any]], schema: str, table: str) -> None:
+    def insert_data(
+        self,
+        data: list[dict[str, Any]],
+        schema: str,
+        table: str,
+        update_on_conflict: bool = False,
+    ) -> None:
         """
         Inserts data into the specified TimescaleDB schema and table dynamically.
 
@@ -132,6 +172,10 @@ class OhlcvRepository(Inserter):
             data (List[Dict[str, Any]]): A list of dictionaries representing data rows.
             schema (str): The target schema in TimescaleDB.
             table (str): The target table in TimescaleDB.
+            update_on_conflict (bool): False (default) keeps an existing row
+                with the same key (ON CONFLICT DO NOTHING). True overwrites its
+                other columns with the new values (ON CONFLICT DO UPDATE), on
+                the table's (time, symbol) or (ts_event, symbol) unique key.
 
         Raises:
             RuntimeError: If the connection is missing or the insertion into the database fails.
@@ -150,7 +194,7 @@ class OhlcvRepository(Inserter):
         # for the process's lifetime, not on every insert -- these don't
         # change between calls, and the orchestrator calls insert_data twice
         # per symbol (raw + cleaned tables) for every symbol in a run.
-        table_key = (schema, table)
+        table_key = (self._db_name(), schema, table)
         if table_key not in OhlcvRepository._verified_tables:
             schema_exists_sql = """
             SELECT 1 FROM information_schema.schemata WHERE schema_name = %s
@@ -183,10 +227,13 @@ class OhlcvRepository(Inserter):
         columns = list(data[0].keys())
         column_names = ", ".join(columns)
         placeholders = ", ".join([f"%({col})s" for col in columns])
+        conflict_clause = "ON CONFLICT DO NOTHING"
+        if update_on_conflict:
+            conflict_clause = upsert_clause(columns)
         query = f"""
         INSERT INTO {schema}.{table} ({column_names})
         VALUES ({placeholders})
-        ON CONFLICT DO NOTHING;
+        {conflict_clause};
         """.strip()
 
         try:
@@ -213,7 +260,7 @@ class OhlcvRepository(Inserter):
         """
         if self.connection:
             try:
-                self._get_pool().putconn(self.connection)
+                self._get_pool(self._db_name()).putconn(self.connection)
                 self.logger.info("Connection returned to pool.")
             except Exception:
                 # Pool may be unusable (e.g. already closed) -- fall back to
@@ -295,6 +342,35 @@ class OhlcvRepository(Inserter):
                 self.logger.info(f"Latest available date in the database: {row[0]}")
                 return row[0].strftime("%Y-%m-%d")
             return None
+
+    def get_bar_dates(
+        self,
+        symbols: list[str],
+        start_date: date,
+        end_date: date,
+        schema: str | None = None,
+        table: str | None = None,
+    ) -> set[tuple[str, date]]:
+        """
+        The (symbol, UTC bar date) pairs present for `symbols` between
+        `start_date` and `end_date`, both inclusive. Daily bars are stamped at
+        00:00 UTC of their day, so the bar date is the UTC date of `time`.
+        """
+        if not symbols:
+            return set()
+        self._ensure_connected()
+        schema, table = self._default_schema_table(schema, table)
+
+        query = f"""
+            SELECT symbol, (time AT TIME ZONE 'UTC')::date
+            FROM {schema}.{table}
+            WHERE time >= %s AND time < %s AND symbol = ANY(%s)
+        """
+        window_start = datetime.combine(start_date, time.min, tzinfo=UTC)
+        window_end = datetime.combine(end_date + timedelta(days=1), time.min, tzinfo=UTC)
+        with self.connection.cursor() as cur:
+            cur.execute(query, (window_start, window_end, list(symbols)))
+            return {(row[0], row[1]) for row in cur.fetchall()}
 
     def get_latest_data(
         self, symbol: str, schema: str | None = None, table: str | None = None

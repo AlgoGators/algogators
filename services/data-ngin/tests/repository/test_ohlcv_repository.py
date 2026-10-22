@@ -4,7 +4,7 @@ import unittest
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository
+from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository, upsert_clause
 
 # _get_pool routes the DB_* variables through platform_db.DatabaseConfig, which
 # validates them -- pool tests must therefore run with a complete set.
@@ -107,6 +107,31 @@ class TestOhlcvRepositoryWrites(unittest.TestCase):
         actual_query, actual_data = mock_cursor.executemany.call_args[0]
         self.assertEqual(re.sub(r"\s+", " ", actual_query.strip()), expected_query)
         self.assertEqual(actual_data, data)
+
+    def test_insert_data_update_on_conflict(self) -> None:
+        _mock_connection, mock_cursor = self._mock_pool_connection(extra_fetchone=[(1,), (1,)])
+        data = [{"time": "2026-10-12", "symbol": "ES", "close": 1.0, "volume": 2}]
+
+        self.repository.connect()
+        self.repository.insert_data(
+            data, schema="futures_data", table="ohlcv_1d", update_on_conflict=True
+        )
+
+        query = re.sub(r"\s+", " ", mock_cursor.executemany.call_args[0][0])
+        self.assertIn(
+            "ON CONFLICT (time, symbol) DO UPDATE SET close = EXCLUDED.close, "
+            "volume = EXCLUDED.volume;",
+            query,
+        )
+
+    def test_upsert_clause_keys(self) -> None:
+        self.assertEqual(
+            upsert_clause(["ts_event", "symbol", "open"]),
+            "ON CONFLICT (ts_event, symbol) DO UPDATE SET open = EXCLUDED.open",
+        )
+        self.assertEqual(upsert_clause(["time", "symbol"]), "ON CONFLICT (time, symbol) DO NOTHING")
+        with self.assertRaises(ValueError):
+            upsert_clause(["symbol", "open"])
 
     def test_insert_data_only_verifies_schema_table_once(self) -> None:
         """

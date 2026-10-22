@@ -12,7 +12,7 @@ from research_api.application.portfolio.ports import (
     PortfolioReaderPort,
     StrategyRegistryPort,
 )
-from research_api.application.shared.errors import NotFoundError
+from research_api.application.shared.errors import NotFoundError, ValidationError
 from research_api.domain.portfolio.calculations import (
     build_historical_data,
     compute_return_stats,
@@ -24,6 +24,13 @@ from research_api.domain.portfolio.calculations import (
     transform_positions,
 )
 from research_api.domain.portfolio.incubation import compute_incubation_window
+from research_api.domain.portfolio.registry import (
+    asset_class_for,
+    counts_in_fund_total,
+    desk_edit_allowed,
+    group_portfolios,
+)
+from research_api.domain.portfolio.streams import DEFAULT_BOOK, POSITION_BOOKS
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +39,39 @@ class StrategyDataNotFoundError(NotFoundError):
     """A known strategy has no live portfolio data yet."""
 
 
+class BookNotWrittenError(NotFoundError):
+    """D-37: the portfolio has no rows in the book the request named."""
+
+    def __init__(self, portfolio_id: str, book: str):
+        super().__init__(f"{portfolio_id} has no {book} rows")
+        self.book = book
+
+
+class PortfolioNotFoundError(NotFoundError):
+    """No live registry entry exists for the requested portfolio id."""
+
+
 class StrategyNotFoundError(NotFoundError):
     """No active strategy exists for the requested public id."""
+
+
+class InvalidBookError(ValidationError):
+    """The requested position book is not one AlgoLens serves."""
+
+
+def resolve_book_request(book: str | None) -> tuple[str, bool]:
+    """Return (book to read, whether it may fall back to the system book).
+
+    No book named -> the default (qt), with fallback allowed. A named book is
+    served exactly as asked, even when it has no rows.
+    """
+    if book is None:
+        return DEFAULT_BOOK, True
+    if book not in POSITION_BOOKS:
+        raise InvalidBookError(
+            f"Invalid book {book!r}: expected one of {', '.join(POSITION_BOOKS)}"
+        )
+    return book, False
 
 
 def build_strategy_detail(
@@ -53,9 +91,10 @@ def build_strategy_detail(
         stream: build_historical_data(stream_rows)
         for stream, stream_rows in rows.equity_by_stream.items()
     }
-    transformed_positions = transform_positions(rows.positions, current_value)
+    sizes = getattr(rows, "contract_sizes", None)
+    transformed_positions = transform_positions(rows.positions, current_value, sizes)
     stats = compute_return_stats(historical_data)
-    transformed_executions = transform_executions(rows.executions)
+    transformed_executions = transform_executions(rows.executions, sizes)
     transformed_finalized = transform_finalized(rows.yesterday_positions, rows.positions)
 
     volatility = float(latest["volatility"])
@@ -79,6 +118,9 @@ def build_strategy_detail(
         "finalizedPositions": transformed_finalized,
         "managers": cfg["managers"],
         "lastUpdate": latest["date"].isoformat(),
+        "book": rows.book,
+        "fellBack": rows.fell_back,
+        "inFundTotal": counts_in_fund_total(cfg),
         "metrics": {
             "volatility": volatility,
             "sharpeRatio": sharpe,
@@ -91,12 +133,20 @@ def build_strategy_detail(
             "dailyReturn": float_or_default(latest["daily_return"]),
             "cumulativeReturn": return_percent,
             "annualizedReturn": annualized_return,
-            "grossLeverage": float_or_default(latest["gross_leverage"]),
+            # D-28: the futures runners write gross leverage to portfolio_leverage and leave
+            # gross_leverage NULL (the equity runner writes both).
+            "grossLeverage": float_or_default(
+                latest["gross_leverage"]
+                if latest["gross_leverage"] is not None
+                else latest["portfolio_leverage"]
+            ),
             "netLeverage": float_or_default(latest["net_leverage"]),
             "portfolioLeverage": float_or_default(latest["portfolio_leverage"]),
             "marginPosted": float_or_default(latest["margin_posted"]),
             "equityToMarginRatio": float_or_default(latest["equity_to_margin_ratio"]),
-            "marginCushion": float_or_default(latest["margin_cushion"]),
+            # D-27: the engine stores the cushion as a fraction of equity ((equity - margin) /
+            # equity, 0.877); the screens print a percent, as the combined view computes it.
+            "marginCushion": float_or_default(latest["margin_cushion"]) * 100,
             "totalNotional": float_or_default(latest["gross_notional"]),
             "unrealizedPnL": float_or_default(latest["total_unrealized_pnl"]),
             "realizedPnL": float_or_default(latest["total_realized_pnl"]),
@@ -129,6 +179,7 @@ def build_strategy_summary(
         "volatility": volatility,
         "sharpeRatio": sharpe,
         "annualizedReturn": annualized_return,
+        "inFundTotal": counts_in_fund_total(cfg),
     }
 
 
@@ -174,12 +225,19 @@ class GetStrategyDetail:
         self.registry = registry
         self.reader = reader
 
-    def execute(self, strategy_id: str) -> dict[str, Any]:
+    def execute(self, strategy_id: str, book: str | None = None) -> dict[str, Any]:
+        requested_book, allow_fallback = resolve_book_request(book)
+
         cfg = self.registry.get(strategy_id)
         if cfg is None:
             raise StrategyNotFoundError(strategy_id)
 
-        rows = self.reader.fetch_detail_rows(cfg["strategy_type"], cfg["portfolio_id"])
+        rows = self.reader.fetch_detail_rows(
+            cfg["strategy_type"],
+            cfg["portfolio_id"],
+            book=requested_book,
+            allow_fallback=allow_fallback,
+        )
         detail = build_strategy_detail(cfg, rows)
         if detail is None:
             raise StrategyDataNotFoundError(strategy_id)
@@ -270,3 +328,49 @@ class RetireStrategy:
             reason=_require_reason(reason),
             user_id=user_id,
         )
+
+
+class ListPortfolios:
+    """The switcher: live portfolios grouped by portfolio_group (ruling 20)."""
+
+    def __init__(self, registry: StrategyRegistryPort):
+        self.registry = registry
+
+    def execute(self) -> list[dict[str, Any]]:
+        return group_portfolios(self.registry.list(active_only=True))
+
+
+class GetPortfolioDetail:
+    """One portfolio's book, found by portfolio id (AlgoLens#102)."""
+
+    def __init__(self, registry: StrategyRegistryPort, reader: PortfolioReaderPort):
+        self.registry = registry
+        self.reader = reader
+
+    def execute(self, portfolio_id: str, book: str | None = None) -> dict[str, Any]:
+        requested_book, allow_fallback = resolve_book_request(book)
+
+        cfg = self.registry.get_portfolio(portfolio_id)
+        if cfg is None:
+            raise PortfolioNotFoundError(portfolio_id)
+
+        rows = self.reader.fetch_portfolio_rows(
+            portfolio_id, book=requested_book, allow_fallback=allow_fallback
+        )
+        if getattr(rows, "book_missing", False):
+            raise BookNotWrittenError(portfolio_id, rows.book)
+        detail = build_strategy_detail(cfg, rows)
+        if detail is None:
+            raise StrategyDataNotFoundError(portfolio_id)
+        detail.update(
+            {
+                "portfolioId": portfolio_id,
+                "portfolioGroup": cfg.get("portfolio_group"),
+                "assetClass": asset_class_for(cfg.get("strategy_type")),
+                "deskEditable": desk_edit_allowed(cfg),
+                "requestedBook": requested_book,
+                # D-20: the portfolio's strategies (sleeves), not the portfolio called a strategy.
+                "strategies": [dict(s) for s in rows.sleeves],
+            }
+        )
+        return detail

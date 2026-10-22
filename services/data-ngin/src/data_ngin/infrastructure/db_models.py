@@ -4,8 +4,7 @@ from dotenv import load_dotenv
 from platform_db import DatabaseConfig
 from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine
 from sqlalchemy.engine.base import Engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.orm.session import Session
 
 # Base class for SQLAlchemy models

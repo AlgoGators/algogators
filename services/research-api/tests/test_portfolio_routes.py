@@ -412,7 +412,7 @@ def test_start_incubation_rejects_non_positive_mock_capital(client, monkeypatch)
 def test_start_incubation_success_records_call(client, monkeypatch):
     reader = RecordingReader()
     _patch_deps(monkeypatch, reader=reader)
-    csrf = _auth(client, role="general_member")
+    csrf = _auth(client, role="admin")  # D-55: lifecycle changes need an admin
 
     response = client.post(
         "/portfolio/incubation/trendfollowing/start",

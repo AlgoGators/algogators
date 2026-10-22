@@ -22,6 +22,7 @@ market open, so the quality gate diffs each service's contract usage against
 | `data-ngin/` | `data-ngin` | FastAPI + Airflow DAGs, Poetry, Postgres |
 | `trade-ngin/` | `trade-ngin` | C++20, CMake + vcpkg, GTest, Arrow |
 | `research-api/` | shared backend for AlgoLens and AlgoTerminal | Python API |
+| `predict-ngin/` | `predict-ngin` | Python 3.11+, uv, DuckDB/Parquet; Kalshi + Polymarket data and research |
 
 `data-ngin/contracts/` is the seed for `platform/contracts/` — promoting it is
 the first migration step, because it is the shared dependency that makes this a

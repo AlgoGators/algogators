@@ -1,0 +1,819 @@
+{
+ "source": "data/vendor/pmfix/hand_check_raw.json (Polygon receipts via polygon.drpc.org)",
+ "onchain": [
+  {
+   "file_row_number": 1328002,
+   "processed": {
+    "market_id": "253814",
+    "nonusdc_side": "token1",
+    "asset_id": "70846784379543189738553769950439417194408298778634087601432654779927747176765",
+    "maker": "0x5f01E0886b508A357aC198cBe72af3bF74Fe9d3d",
+    "taker": "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+    "maker_direction": "SELL",
+    "taker_direction": "BUY",
+    "price": 0.059958
+   },
+   "raw_orderfilled": {
+    "maker": "0x5f01e0886b508a357ac198cbe72af3bf74fe9d3d",
+    "taker": "0xc5d563a36ae78145c45a50134d48a1215220f80a",
+    "makerAssetId": "70846784379543189738553769950439417194408298778634087601432654779927747176765",
+    "takerAssetId": "0",
+    "makerAmountFilled": 3109820000,
+    "takerAmountFilled": 186459640
+   },
+   "meta_outcome_index": 0,
+   "hand_yes_price": 0.059958,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "file_row_number": 6397610,
+   "processed": {
+    "market_id": "253684",
+    "nonusdc_side": "token2",
+    "asset_id": "72331964067438131788858063976962038680861585128356787477467784824610129991753",
+    "maker": "0x83e38812dBC1f8CA0C87966cb4ebb89782Cc9F6f",
+    "taker": "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.944
+   },
+   "raw_orderfilled": {
+    "maker": "0x83e38812dbc1f8ca0c87966cb4ebb89782cc9f6f",
+    "taker": "0xc5d563a36ae78145c45a50134d48a1215220f80a",
+    "makerAssetId": "0",
+    "takerAssetId": "72331964067438131788858063976962038680861585128356787477467784824610129991753",
+    "makerAmountFilled": 52080480,
+    "takerAmountFilled": 55170000
+   },
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.056,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "file_row_number": 14460469,
+   "processed": {
+    "market_id": "255201",
+    "nonusdc_side": "token1",
+    "asset_id": "45707120010925428901399010334714886168663041774329016976269280856583414101569",
+    "maker": "0xC613E6707bD115e5c04D303d944568232697662B",
+    "taker": "0x1720F3c798803376EB84A7c55bEeCA8b6D34C325",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.004
+   },
+   "raw_orderfilled": {
+    "maker": "0xc613e6707bd115e5c04d303d944568232697662b",
+    "taker": "0x1720f3c798803376eb84a7c55beeca8b6d34c325",
+    "makerAssetId": "0",
+    "takerAssetId": "45707120010925428901399010334714886168663041774329016976269280856583414101569",
+    "makerAmountFilled": 24000,
+    "takerAmountFilled": 6000000
+   },
+   "meta_outcome_index": 0,
+   "hand_yes_price": 0.004,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "file_row_number": 59467824,
+   "processed": {
+    "market_id": "507287",
+    "nonusdc_side": "token1",
+    "asset_id": "86737884225646373837811376378539682738582118586381380962232589753097828192439",
+    "maker": "0x55b4AF6a1cff148A307cad8AD098206a028e80eA",
+    "taker": "0xB7d54Bf1D0a362Beb916d9Cb58a04C41D67e0789",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.024
+   },
+   "raw_orderfilled": {
+    "maker": "0x55b4af6a1cff148a307cad8ad098206a028e80ea",
+    "taker": "0xb7d54bf1d0a362beb916d9cb58a04c41d67e0789",
+    "makerAssetId": "0",
+    "takerAssetId": "86737884225646373837811376378539682738582118586381380962232589753097828192439",
+    "makerAmountFilled": 2376000,
+    "takerAmountFilled": 99000000
+   },
+   "meta_outcome_index": 0,
+   "hand_yes_price": 0.024,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "file_row_number": 82394337,
+   "processed": {
+    "market_id": "527530",
+    "nonusdc_side": "token2",
+    "asset_id": "20868555289740373585027273672430535369894493019257424501166102063436747757458",
+    "maker": "0x5C57496C97dD151F54b2d727646aA796CED55B16",
+    "taker": "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.59
+   },
+   "raw_orderfilled": {
+    "maker": "0x5c57496c97dd151f54b2d727646aa796ced55b16",
+    "taker": "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+    "makerAssetId": "0",
+    "takerAssetId": "20868555289740373585027273672430535369894493019257424501166102063436747757458",
+    "makerAmountFilled": 10089000,
+    "takerAmountFilled": 17100000
+   },
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.41,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "file_row_number": 116641316,
+   "processed": {
+    "market_id": "561555",
+    "nonusdc_side": "token1",
+    "asset_id": "59549868516473086345473798703202187358164127120661233316125755857980040103222",
+    "maker": "0xC8ab97a9089a9Ff7E6eF0688e6e591a066946418",
+    "taker": "0xF7b69Dc25C3EA8cC4E885b72656e2Cf9E2F794f7",
+    "maker_direction": "SELL",
+    "taker_direction": "BUY",
+    "price": 0.908
+   },
+   "raw_orderfilled": {
+    "maker": "0xc8ab97a9089a9ff7e6ef0688e6e591a066946418",
+    "taker": "0xf7b69dc25c3ea8cc4e885b72656e2cf9e2f794f7",
+    "makerAssetId": "59549868516473086345473798703202187358164127120661233316125755857980040103222",
+    "takerAssetId": "0",
+    "makerAmountFilled": 4540000,
+    "takerAmountFilled": 4122320
+   },
+   "meta_outcome_index": 0,
+   "hand_yes_price": 0.908,
+   "hand_yes_side": "BUY"
+  },
+  {
+   "file_row_number": 116954462,
+   "processed": {
+    "market_id": "562677",
+    "nonusdc_side": "token2",
+    "asset_id": "44772909867833350436379548987905690401709131783318902181878783128559698055555",
+    "maker": "0x51373c6B56e4a38bF97c301efbfF840fc8451556",
+    "taker": "0x208Fba0b2bdcb2e2eAAB0B16FE01354D2e0BCa72",
+    "maker_direction": "SELL",
+    "taker_direction": "BUY",
+    "price": 0.65
+   },
+   "raw_orderfilled": {
+    "maker": "0x51373c6b56e4a38bf97c301efbff840fc8451556",
+    "taker": "0x208fba0b2bdcb2e2eaab0b16fe01354d2e0bca72",
+    "makerAssetId": "44772909867833350436379548987905690401709131783318902181878783128559698055555",
+    "takerAssetId": "0",
+    "makerAmountFilled": 6000000,
+    "takerAmountFilled": 3900000
+   },
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.35,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "file_row_number": 121082040,
+   "processed": {
+    "market_id": "568317",
+    "nonusdc_side": "token2",
+    "asset_id": "46477970715049334076148363208748144571141799975572425612721299025248566863364",
+    "maker": "0x729AFCEf919d5F2B39549141EaE3599F7eBd1E51",
+    "taker": "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+    "maker_direction": "SELL",
+    "taker_direction": "BUY",
+    "price": 0.51
+   },
+   "raw_orderfilled": {
+    "maker": "0x729afcef919d5f2b39549141eae3599f7ebd1e51",
+    "taker": "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+    "makerAssetId": "46477970715049334076148363208748144571141799975572425612721299025248566863364",
+    "takerAssetId": "0",
+    "makerAmountFilled": 40000000,
+    "takerAmountFilled": 20400000
+   },
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.49,
+   "hand_yes_side": "BUY"
+  },
+  {
+   "file_row_number": 121633004,
+   "processed": {
+    "market_id": "566872",
+    "nonusdc_side": "token2",
+    "asset_id": "38956683342308403918638318865178022197379721962142482123056039817734450733593",
+    "maker": "0x8970b56535153bAaDEE991ca25A178aC085636b5",
+    "taker": "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.72
+   },
+   "raw_orderfilled": {
+    "maker": "0x8970b56535153baadee991ca25a178ac085636b5",
+    "taker": "0xc5d563a36ae78145c45a50134d48a1215220f80a",
+    "makerAssetId": "0",
+    "takerAssetId": "38956683342308403918638318865178022197379721962142482123056039817734450733593",
+    "makerAmountFilled": 24480000,
+    "takerAmountFilled": 34000000
+   },
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.28,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "file_row_number": 133135576,
+   "processed": {
+    "market_id": "580858",
+    "nonusdc_side": "token1",
+    "asset_id": "81907424176168014292770701202444740787768175884930236816791458922518881746495",
+    "maker": "0x9849476d179a00ba6575280B291F3491414e36f0",
+    "taker": "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.999
+   },
+   "raw_orderfilled": {
+    "maker": "0x9849476d179a00ba6575280b291f3491414e36f0",
+    "taker": "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+    "makerAssetId": "0",
+    "takerAssetId": "81907424176168014292770701202444740787768175884930236816791458922518881746495",
+    "makerAmountFilled": 54945000,
+    "takerAmountFilled": 55000000
+   },
+   "meta_outcome_index": 0,
+   "hand_yes_price": 0.999,
+   "hand_yes_side": "BUY"
+  },
+  {
+   "file_row_number": 139303753,
+   "processed": {
+    "market_id": "590333",
+    "nonusdc_side": "token2",
+    "asset_id": "114270791794580876375049629087676434310350622197352475824573956395261019082244",
+    "maker": "0x71f3683d00250530368694DE0745D24Fa715BB5C",
+    "taker": "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.39
+   },
+   "raw_orderfilled": {
+    "maker": "0x71f3683d00250530368694de0745d24fa715bb5c",
+    "taker": "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+    "makerAssetId": "0",
+    "takerAssetId": "114270791794580876375049629087676434310350622197352475824573956395261019082244",
+    "makerAmountFilled": 3900000,
+    "takerAmountFilled": 10000000
+   },
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.61,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "file_row_number": 172339385,
+   "processed": {
+    "market_id": "651864",
+    "nonusdc_side": "token1",
+    "asset_id": "77799672197472891099617286242484504089336103358935671417447011560857418716406",
+    "maker": "0x88a4AABe652927a1fF7ED4728B1803f6446c346a",
+    "taker": "0xca85f4b9e472B542e1DF039594eeAebb6d466bF2",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.48
+   },
+   "raw_orderfilled": {
+    "maker": "0x88a4aabe652927a1ff7ed4728b1803f6446c346a",
+    "taker": "0xca85f4b9e472b542e1df039594eeaebb6d466bf2",
+    "makerAssetId": "0",
+    "takerAssetId": "77799672197472891099617286242484504089336103358935671417447011560857418716406",
+    "makerAmountFilled": 4800000,
+    "takerAmountFilled": 10000000
+   },
+   "meta_outcome_index": 0,
+   "hand_yes_price": 0.48,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "file_row_number": 197594697,
+   "processed": {
+    "market_id": "635536",
+    "nonusdc_side": "token1",
+    "asset_id": "31292556359983886281736758243536068312618657105491881209477634466749309356608",
+    "maker": "0xbC3118d50FB3e0b0610C177e42A2eAd3EE05b05f",
+    "taker": "0xC5d563A36AE78145C45a50134d48A1215220f80a",
+    "maker_direction": "SELL",
+    "taker_direction": "BUY",
+    "price": 0.040405
+   },
+   "raw_orderfilled": {
+    "maker": "0xbc3118d50fb3e0b0610c177e42a2ead3ee05b05f",
+    "taker": "0xc5d563a36ae78145c45a50134d48a1215220f80a",
+    "makerAssetId": "31292556359983886281736758243536068312618657105491881209477634466749309356608",
+    "takerAssetId": "0",
+    "makerAmountFilled": 246800000,
+    "takerAmountFilled": 9972000
+   },
+   "meta_outcome_index": 0,
+   "hand_yes_price": 0.040405,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "file_row_number": 205286758,
+   "processed": {
+    "market_id": "692825",
+    "nonusdc_side": "token1",
+    "asset_id": "91317185618170003617456686806165491706357095382649523872903347071884462614881",
+    "maker": "0x0DF827738cc1AeaccB48d8Ab6b7F8078c070f42e",
+    "taker": "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.37
+   },
+   "raw_orderfilled": {
+    "maker": "0x0df827738cc1aeaccb48d8ab6b7f8078c070f42e",
+    "taker": "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+    "makerAssetId": "0",
+    "takerAssetId": "91317185618170003617456686806165491706357095382649523872903347071884462614881",
+    "makerAmountFilled": 7400000,
+    "takerAmountFilled": 20000000
+   },
+   "meta_outcome_index": 0,
+   "hand_yes_price": 0.37,
+   "hand_yes_side": "BUY"
+  },
+  {
+   "file_row_number": 224426160,
+   "processed": {
+    "market_id": "787044",
+    "nonusdc_side": "token2",
+    "asset_id": "57293067770517139052526374800657299952439876021919442217746368695680475255013",
+    "maker": "0x8227493c154eEe81026Cb8ffdb8eEe55AD96d504",
+    "taker": "0x203f6F1fA096197f735434C7000758964beb521e",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.49
+   },
+   "raw_orderfilled": {
+    "maker": "0x8227493c154eee81026cb8ffdb8eee55ad96d504",
+    "taker": "0x203f6f1fa096197f735434c7000758964beb521e",
+    "makerAssetId": "0",
+    "takerAssetId": "57293067770517139052526374800657299952439876021919442217746368695680475255013",
+    "makerAmountFilled": 6370000,
+    "takerAmountFilled": 13000000
+   },
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.51,
+   "hand_yes_side": "BUY"
+  },
+  {
+   "file_row_number": 233991646,
+   "processed": {
+    "market_id": "827770",
+    "nonusdc_side": "token2",
+    "asset_id": "16082630713034076292095038368457390565972890207394603252304173113378818126868",
+    "maker": "0xe330621Aba0ee3e3Ad9FdeeB3a7f1b82cFe49632",
+    "taker": "0x80b7cB8a62d9bbC8820476414f2788E4b89dC001",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.51
+   },
+   "raw_orderfilled": {
+    "maker": "0xe330621aba0ee3e3ad9fdeeb3a7f1b82cfe49632",
+    "taker": "0x80b7cb8a62d9bbc8820476414f2788e4b89dc001",
+    "makerAssetId": "0",
+    "takerAssetId": "16082630713034076292095038368457390565972890207394603252304173113378818126868",
+    "makerAmountFilled": 1530000,
+    "takerAmountFilled": 3000000
+   },
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.49,
+   "hand_yes_side": "BUY"
+  },
+  {
+   "file_row_number": 238044906,
+   "processed": {
+    "market_id": "889973",
+    "nonusdc_side": "token1",
+    "asset_id": "8969353410786644456671058042781490548499158174309120162140046364007424516584",
+    "maker": "0xf1820E157d1b75BA226e9C415A13fEDd7Cd503Fb",
+    "taker": "0xA4858bc2B489bC1891C1b43c634101d679AE2258",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.48
+   },
+   "raw_orderfilled": {
+    "maker": "0xf1820e157d1b75ba226e9c415a13fedd7cd503fb",
+    "taker": "0xa4858bc2b489bc1891c1b43c634101d679ae2258",
+    "makerAssetId": "0",
+    "takerAssetId": "8969353410786644456671058042781490548499158174309120162140046364007424516584",
+    "makerAmountFilled": 4800000,
+    "takerAmountFilled": 10000000
+   },
+   "meta_outcome_index": 0,
+   "hand_yes_price": 0.48,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "file_row_number": 256495771,
+   "processed": {
+    "market_id": "691616",
+    "nonusdc_side": "token2",
+    "asset_id": "40223503207979132870903413727110509992871116728538054538701668674539439084312",
+    "maker": "0x64Ac519746C005fe77f1046ce5e1541679419B66",
+    "taker": "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.44
+   },
+   "raw_orderfilled": {
+    "maker": "0x64ac519746c005fe77f1046ce5e1541679419b66",
+    "taker": "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+    "makerAssetId": "0",
+    "takerAssetId": "40223503207979132870903413727110509992871116728538054538701668674539439084312",
+    "makerAmountFilled": 2999999,
+    "takerAmountFilled": 6818180
+   },
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.56,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "file_row_number": 259561241,
+   "processed": {
+    "market_id": "953512",
+    "nonusdc_side": "token2",
+    "asset_id": "96993378474417666315396700610677334794693634555135124812344147248449281608015",
+    "maker": "0x3E360710dC233708f1D115b55791294d7F2083c4",
+    "taker": "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.93
+   },
+   "raw_orderfilled": {
+    "maker": "0x3e360710dc233708f1d115b55791294d7f2083c4",
+    "taker": "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+    "makerAssetId": "0",
+    "takerAssetId": "96993378474417666315396700610677334794693634555135124812344147248449281608015",
+    "makerAmountFilled": 24999994,
+    "takerAmountFilled": 26881714
+   },
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.07,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "file_row_number": 292330193,
+   "processed": {
+    "market_id": "1051629",
+    "nonusdc_side": "token2",
+    "asset_id": "101260320697137827726938798288326032998008946368508494124996590750817820236704",
+    "maker": "0xAad85f12E94E6bd9C09210e0b9C34d1348C1394a",
+    "taker": "0x66C62566753c2AAc6814e77F067Ef3f1400cB9F8",
+    "maker_direction": "BUY",
+    "taker_direction": "SELL",
+    "price": 0.24
+   },
+   "raw_orderfilled": {
+    "maker": "0xaad85f12e94e6bd9c09210e0b9c34d1348c1394a",
+    "taker": "0x66c62566753c2aac6814e77f067ef3f1400cb9f8",
+    "makerAssetId": "0",
+    "takerAssetId": "101260320697137827726938798288326032998008946368508494124996590750817820236704",
+    "makerAmountFilled": 5280000,
+    "takerAmountFilled": 22000000
+   },
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.76,
+   "hand_yes_side": "BUY"
+  }
+ ],
+ "data_api": [
+  {
+   "category": "Politics",
+   "tick": {
+    "conditionId": "0x6d250918ac8353e8aedd848e1c0934c0feb8ad1be05676f19414def48d4a914a",
+    "asset": "30495193023805634923320250692986636758103970591045419850588002750171782476633",
+    "outcome": "No",
+    "outcomeIndex": 1.0,
+    "side": "BUY",
+    "price": 0.999,
+    "size": 27.267,
+    "proxyWallet": "0x3cb12cf35e420c8e2fe86fa51a5d68cf4ac76090"
+   },
+   "raw_orderfilled": [
+    {
+     "maker": "0x3cb12cf35e420c8e2fe86fa51a5d68cf4ac76090",
+     "taker": "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+     "makerAssetId": "0",
+     "takerAssetId": "30495193023805634923320250692986636758103970591045419850588002750171782476633",
+     "makerAmountFilled": 27239733,
+     "takerAmountFilled": 27267000
+    }
+   ],
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.001,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "category": "Economy",
+   "tick": {
+    "conditionId": "0x97f4a22386259f51899dbd612b1b0b72273ae1c6288d38777c747d3693403913",
+    "asset": "30692071686325051674396274942597324651429415891916831949518063909074027377829",
+    "outcome": "No",
+    "outcomeIndex": 1.0,
+    "side": "BUY",
+    "price": 0.6299999882950815,
+    "size": 29.047618,
+    "proxyWallet": "0x4d7b931a2963d251ab42dd6c21792d25a92e1790"
+   },
+   "raw_orderfilled": [
+    {
+     "maker": "0x4058ebfdac713a7337319b8862b0c89039d98b1c",
+     "taker": "0x4d7b931a2963d251ab42dd6c21792d25a92e1790",
+     "makerAssetId": "30692071686325051674396274942597324651429415891916831949518063909074027377829",
+     "takerAssetId": "0",
+     "makerAmountFilled": 10047618,
+     "takerAmountFilled": 6329999
+    },
+    {
+     "maker": "0x4d7b931a2963d251ab42dd6c21792d25a92e1790",
+     "taker": "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+     "makerAssetId": "0",
+     "takerAssetId": "30692071686325051674396274942597324651429415891916831949518063909074027377829",
+     "makerAmountFilled": 18299999,
+     "takerAmountFilled": 29047618
+    }
+   ],
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.37,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "category": "Sports",
+   "tick": {
+    "conditionId": "0xd2f0475a426f69d5da5971e0bbd1d47344332f577027b08bf94965078f6aa562",
+    "asset": "100818246640065738651525050942469468917586418841495871735444888580128368622001",
+    "outcome": "Yes",
+    "outcomeIndex": 0.0,
+    "side": "SELL",
+    "price": 0.001,
+    "size": 173.0,
+    "proxyWallet": "0x7aa1386ec74265d8612a8f1b228716e51d54f434"
+   },
+   "raw_orderfilled": [
+    {
+     "maker": "0x0dfae545cadcc4d31c29a743ecb67f6af4c0c0e3",
+     "taker": "0x7aa1386ec74265d8612a8f1b228716e51d54f434",
+     "makerAssetId": "0",
+     "takerAssetId": "100818246640065738651525050942469468917586418841495871735444888580128368622001",
+     "makerAmountFilled": 173000,
+     "takerAmountFilled": 173000000
+    },
+    {
+     "maker": "0x7aa1386ec74265d8612a8f1b228716e51d54f434",
+     "taker": "0xc5d563a36ae78145c45a50134d48a1215220f80a",
+     "makerAssetId": "100818246640065738651525050942469468917586418841495871735444888580128368622001",
+     "takerAssetId": "0",
+     "makerAmountFilled": 173000000,
+     "takerAmountFilled": 173000
+    }
+   ],
+   "meta_outcome_index": 0,
+   "hand_yes_price": 0.001,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "category": "Geopolitics",
+   "tick": {
+    "conditionId": "0x23fd2b26c4e095465ba0d2ebce8d5eda57009ddc59aad8b68ab19ca968b41eed",
+    "asset": "15091760884604171309203489618212539770109612407760305338364320626709285790409",
+    "outcome": "Yes",
+    "outcomeIndex": 0.0,
+    "side": "SELL",
+    "price": 0.011415034744156664,
+    "size": 474.9,
+    "proxyWallet": "0x05ee4c70673cd38cef0c02fc61e512d001e1b9c9"
+   },
+   "raw_orderfilled": [
+    {
+     "maker": "0xb79fadaa593335ee1a1ccb4506c9c89ac3b2d749",
+     "taker": "0x05ee4c70673cd38cef0c02fc61e512d001e1b9c9",
+     "makerAssetId": "0",
+     "takerAssetId": "15091760884604171309203489618212539770109612407760305338364320626709285790409",
+     "makerAmountFilled": 154920,
+     "takerAmountFilled": 12910000
+    },
+    {
+     "maker": "0xb79fadaa593335ee1a1ccb4506c9c89ac3b2d749",
+     "taker": "0x05ee4c70673cd38cef0c02fc61e512d001e1b9c9",
+     "makerAssetId": "0",
+     "takerAssetId": "15091760884604171309203489618212539770109612407760305338364320626709285790409",
+     "makerAmountFilled": 136200,
+     "takerAmountFilled": 11350000
+    },
+    {
+     "maker": "0xb79fadaa593335ee1a1ccb4506c9c89ac3b2d749",
+     "taker": "0x05ee4c70673cd38cef0c02fc61e512d001e1b9c9",
+     "makerAssetId": "0",
+     "takerAssetId": "15091760884604171309203489618212539770109612407760305338364320626709285790409",
+     "makerAmountFilled": 77990,
+     "takerAmountFilled": 7090000
+    },
+    {
+     "maker": "0xb79fadaa593335ee1a1ccb4506c9c89ac3b2d749",
+     "taker": "0x05ee4c70673cd38cef0c02fc61e512d001e1b9c9",
+     "makerAssetId": "0",
+     "takerAssetId": "15091760884604171309203489618212539770109612407760305338364320626709285790409",
+     "makerAmountFilled": 78400,
+     "takerAmountFilled": 7840000
+    },
+    {
+     "maker": "0x05ee4c70673cd38cef0c02fc61e512d001e1b9c9",
+     "taker": "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+     "makerAssetId": "15091760884604171309203489618212539770109612407760305338364320626709285790409",
+     "takerAssetId": "0",
+     "makerAmountFilled": 474900000,
+     "takerAmountFilled": 5421000
+    }
+   ],
+   "meta_outcome_index": 0,
+   "hand_yes_price": 0.011415,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "category": "Tech",
+   "tick": {
+    "conditionId": "0x0b1d3e27de49ea25b72057d6b8d209379a1d7b35bda69937489a6e6177de51d4",
+    "asset": "20701042972929915435280116387023347660157098045916660539877937250990780112893",
+    "outcome": "Yes",
+    "outcomeIndex": 0.0,
+    "side": "SELL",
+    "price": 0.08,
+    "size": 1.77,
+    "proxyWallet": "0x7a82f25fd9974aba89f63d16dd8b49ef828fc2c1"
+   },
+   "raw_orderfilled": [
+    {
+     "maker": "0x7a82f25fd9974aba89f63d16dd8b49ef828fc2c1",
+     "taker": "0xc5d563a36ae78145c45a50134d48a1215220f80a",
+     "makerAssetId": "20701042972929915435280116387023347660157098045916660539877937250990780112893",
+     "takerAssetId": "0",
+     "makerAmountFilled": 1770000,
+     "takerAmountFilled": 141600
+    }
+   ],
+   "meta_outcome_index": 0,
+   "hand_yes_price": 0.08,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "category": "Politics",
+   "tick": {
+    "conditionId": "0xcc5a06c3b79f72f1abfd6bb4e360f627180fcb723a42f273ee625c4d6e65d241",
+    "asset": "28724533437487688411025346514794031697168459428818866007482318509427790019905",
+    "outcome": "No",
+    "outcomeIndex": 1.0,
+    "side": "SELL",
+    "price": 0.995,
+    "size": 34.31,
+    "proxyWallet": "0x56d7989cd256dbbf98a1a00f353c2472698950a2"
+   },
+   "raw_orderfilled": [
+    {
+     "maker": "0x60b2a17f0472db7361ae3189ad99063efe0b3cce",
+     "taker": "0x56d7989cd256dbbf98a1a00f353c2472698950a2",
+     "makerAssetId": "0",
+     "takerAssetId": "28724533437487688411025346514794031697168459428818866007482318509427790019905",
+     "makerAmountFilled": 34138450,
+     "takerAmountFilled": 34310000
+    },
+    {
+     "maker": "0x56d7989cd256dbbf98a1a00f353c2472698950a2",
+     "taker": "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+     "makerAssetId": "28724533437487688411025346514794031697168459428818866007482318509427790019905",
+     "takerAssetId": "0",
+     "makerAmountFilled": 34310000,
+     "takerAmountFilled": 34138450
+    }
+   ],
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.005,
+   "hand_yes_side": "BUY"
+  },
+  {
+   "category": "Economy",
+   "tick": {
+    "conditionId": "0x03aff22abeced3677559974ece8d59b164c9b1dc60703ea7061e9c23a2c09ddc",
+    "asset": "70663791500476214222548691124793820317674958051227120168038118337490286941540",
+    "outcome": "No",
+    "outcomeIndex": 1.0,
+    "side": "BUY",
+    "price": 0.996,
+    "size": 183.98,
+    "proxyWallet": "0x254b1e536f8325e8b1d5a979db6acacf66375802"
+   },
+   "raw_orderfilled": [
+    {
+     "maker": "0x2ddf49ceea26a1ce610f9580cf7002a3b5e46b9c",
+     "taker": "0x254b1e536f8325e8b1d5a979db6acacf66375802",
+     "makerAssetId": "70663791500476214222548691124793820317674958051227120168038118337490286941540",
+     "takerAssetId": "0",
+     "makerAmountFilled": 183980000,
+     "takerAmountFilled": 183244080
+    },
+    {
+     "maker": "0x254b1e536f8325e8b1d5a979db6acacf66375802",
+     "taker": "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+     "makerAssetId": "0",
+     "takerAssetId": "70663791500476214222548691124793820317674958051227120168038118337490286941540",
+     "makerAmountFilled": 183244080,
+     "takerAmountFilled": 183980000
+    }
+   ],
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.004,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "category": "Sports",
+   "tick": {
+    "conditionId": "0x39be54f735f3aca38d52bd0109bc85859a78efc8c443369028a447083a0d7e77",
+    "asset": "63531272983533372796684711562597736989178595458469513692886480786632241939105",
+    "outcome": "Yes",
+    "outcomeIndex": 0.0,
+    "side": "SELL",
+    "price": 0.027,
+    "size": 12.12,
+    "proxyWallet": "0x8e9eedf20dfa70956d49f608a205e402d9df38e4"
+   },
+   "raw_orderfilled": [
+    {
+     "maker": "0x8e9eedf20dfa70956d49f608a205e402d9df38e4",
+     "taker": "0xc5d563a36ae78145c45a50134d48a1215220f80a",
+     "makerAssetId": "63531272983533372796684711562597736989178595458469513692886480786632241939105",
+     "takerAssetId": "0",
+     "makerAmountFilled": 12120000,
+     "takerAmountFilled": 327240
+    }
+   ],
+   "meta_outcome_index": 0,
+   "hand_yes_price": 0.027,
+   "hand_yes_side": "SELL"
+  },
+  {
+   "category": "Geopolitics",
+   "tick": {
+    "conditionId": "0xa7ecbda690618f8db2bd77cfd434a4844fd7d65d3f94a7b11248bd4fd00a10c9",
+    "asset": "61834524187155059881812128869161037413453096657301009611202788405751442410642",
+    "outcome": "No",
+    "outcomeIndex": 1.0,
+    "side": "SELL",
+    "price": 0.994,
+    "size": 1.29,
+    "proxyWallet": "0xd5aacf965b6d1fb03d4f81ab41c8309ac666a92e"
+   },
+   "raw_orderfilled": [
+    {
+     "maker": "0xd5aacf965b6d1fb03d4f81ab41c8309ac666a92e",
+     "taker": "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
+     "makerAssetId": "61834524187155059881812128869161037413453096657301009611202788405751442410642",
+     "takerAssetId": "0",
+     "makerAmountFilled": 1290000,
+     "takerAmountFilled": 1282260
+    }
+   ],
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.006,
+   "hand_yes_side": "BUY"
+  },
+  {
+   "category": "Tech",
+   "tick": {
+    "conditionId": "0xa13265b2c87f6eb41889cd992ecb6629f7e787eb15b7c36ed10792b08cd58e60",
+    "asset": "83342426756755828424978540086603502035272940299973413987390148538364858635779",
+    "outcome": "No",
+    "outcomeIndex": 1.0,
+    "side": "BUY",
+    "price": 0.379,
+    "size": 207.28,
+    "proxyWallet": "0x6be949e0f7f46dbb2ba04da0efadc23dfd2c3493"
+   },
+   "raw_orderfilled": [
+    {
+     "maker": "0xa638749f9aa75ee30191b9296646c380f49a1d87",
+     "taker": "0x6be949e0f7f46dbb2ba04da0efadc23dfd2c3493",
+     "makerAssetId": "83342426756755828424978540086603502035272940299973413987390148538364858635779",
+     "takerAssetId": "0",
+     "makerAmountFilled": 207280000,
+     "takerAmountFilled": 78559120
+    },
+    {
+     "maker": "0x6be949e0f7f46dbb2ba04da0efadc23dfd2c3493",
+     "taker": "0xc5d563a36ae78145c45a50134d48a1215220f80a",
+     "makerAssetId": "0",
+     "takerAssetId": "83342426756755828424978540086603502035272940299973413987390148538364858635779",
+     "makerAmountFilled": 78559120,
+     "takerAmountFilled": 207280000
+    }
+   ],
+   "meta_outcome_index": 1,
+   "hand_yes_price": 0.621,
+   "hand_yes_side": "SELL"
+  }
+ ]
+}

@@ -125,7 +125,13 @@ class FakeReader:
             raise RuntimeError(f"database exploded for {strategy_type}")
         return self.summary_rows[strategy_type]
 
-    def fetch_detail_rows(self, strategy_type: str, portfolio_id: str) -> PortfolioDetailRows:
+    def fetch_detail_rows(
+        self,
+        strategy_type: str,
+        portfolio_id: str,
+        book: str = "qt",
+        allow_fallback: bool = True,
+    ) -> PortfolioDetailRows:
         self.calls.append(("fetch_detail_rows", (strategy_type, portfolio_id)))
         assert self.detail_rows is not None
         return self.detail_rows
@@ -250,7 +256,8 @@ def test_build_strategy_detail_degenerate_inputs_do_not_divide_by_zero():
     assert detail["historicalData"] == []
     assert detail["metrics"]["sharpeRatio"] == 0  # zero volatility guarded
     assert detail["metrics"]["dailyReturn"] == 0  # None coerced to default
-    assert detail["metrics"]["grossLeverage"] == 0
+    # D-28: with gross_leverage NULL the reading falls back to portfolio_leverage (1.3).
+    assert detail["metrics"]["grossLeverage"] == 1.3
     assert detail["metrics"]["totalTrades"] == 0
 
 
@@ -272,6 +279,7 @@ def test_build_strategy_summary_happy_path():
         "volatility": 10.0,
         "sharpeRatio": pytest.approx(2.0),
         "annualizedReturn": 20.0,
+        "inFundTotal": True,
     }
 
 
