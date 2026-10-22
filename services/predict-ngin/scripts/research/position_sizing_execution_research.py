@@ -112,7 +112,10 @@ class PositionSizingMethod:
 class FixedSizing(PositionSizingMethod):
     """Fixed position size."""
     
-    def calculate_size(self, base_size, **kwargs):
+    def calculate_size(
+        self, base_size, signal_strength, volatility, liquidity,
+        capital_available, portfolio_heat=0.0, **kwargs,
+    ):
         return base_size
 
 
@@ -122,7 +125,10 @@ class KellySizing(PositionSizingMethod):
     def __init__(self, kelly_fraction: float = 0.25):
         self.kelly_fraction = kelly_fraction
     
-    def calculate_size(self, base_size, signal_strength, volatility, capital_available, **kwargs):
+    def calculate_size(
+        self, base_size, signal_strength, volatility, liquidity,
+        capital_available, portfolio_heat=0.0, **kwargs,
+    ):
         # Simplified Kelly: f = (p * b - q) / b
         # where p = win prob, b = odds, q = 1-p
         # For prediction markets: p = signal_strength, b = 1/price - 1
@@ -146,7 +152,10 @@ class VolatilityAdjustedSizing(PositionSizingMethod):
     def __init__(self, target_volatility: float = 0.15):
         self.target_volatility = target_volatility
     
-    def calculate_size(self, base_size, volatility, **kwargs):
+    def calculate_size(
+        self, base_size, signal_strength, volatility, liquidity,
+        capital_available, portfolio_heat=0.0, **kwargs,
+    ):
         if volatility <= 0:
             return base_size
         
@@ -164,7 +173,10 @@ class LiquidityAdjustedSizing(PositionSizingMethod):
     def __init__(self, max_liquidity_pct: float = 0.10):
         self.max_liquidity_pct = max_liquidity_pct
     
-    def calculate_size(self, base_size, liquidity, **kwargs):
+    def calculate_size(
+        self, base_size, signal_strength, volatility, liquidity,
+        capital_available, portfolio_heat=0.0, **kwargs,
+    ):
         if liquidity <= 0:
             return base_size * 0.5
         
@@ -176,7 +188,10 @@ class LiquidityAdjustedSizing(PositionSizingMethod):
 class RiskParitySizing(PositionSizingMethod):
     """Risk parity sizing - equal risk contribution."""
     
-    def calculate_size(self, base_size, volatility, capital_available, portfolio_heat, **kwargs):
+    def calculate_size(
+        self, base_size, signal_strength, volatility, liquidity,
+        capital_available, portfolio_heat=0.0, **kwargs,
+    ):
         if volatility <= 0:
             return base_size
         
@@ -197,14 +212,24 @@ class CompositeSizing(PositionSizingMethod):
         self.liquidity_weight = liquidity_weight
         self.kelly_weight = kelly_weight
     
-    def calculate_size(self, base_size, signal_strength, volatility, liquidity, capital_available, **kwargs):
+    def calculate_size(
+        self, base_size, signal_strength, volatility, liquidity,
+        capital_available, portfolio_heat=0.0, **kwargs,
+    ):
         vol_sizer = VolatilityAdjustedSizing()
         liq_sizer = LiquidityAdjustedSizing()
         kelly_sizer = KellySizing()
         
-        vol_size = vol_sizer.calculate_size(base_size, volatility=volatility)
-        liq_size = liq_sizer.calculate_size(base_size, liquidity=liquidity)
-        kelly_size = kelly_sizer.calculate_size(base_size, signal_strength=signal_strength, volatility=volatility, capital_available=capital_available)
+        sizing_context = dict(
+            signal_strength=signal_strength,
+            volatility=volatility,
+            liquidity=liquidity,
+            capital_available=capital_available,
+            portfolio_heat=portfolio_heat,
+        )
+        vol_size = vol_sizer.calculate_size(base_size, **sizing_context)
+        liq_size = liq_sizer.calculate_size(base_size, **sizing_context)
+        kelly_size = kelly_sizer.calculate_size(base_size, **sizing_context)
         
         # Weighted average
         composite = (

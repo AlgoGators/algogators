@@ -147,7 +147,6 @@ def main():
     for nm, g in (("train", tr), ("test", x[x.date > TRAIN_END])):
         if g.empty:
             continue
-        m, s = fm.loc_scale_vec(g) if hasattr(fm, "loc_scale_vec") else (None, None)
         ms = [fm.loc_scale(c, me, t, xn, h) for c, me, t, xn, h in zip(g.code, g.measure, g.txn, g.xnd, g.h)]
         m = np.array([a for a, _ in ms]).ravel(); s = np.array([b for _, b in ms]).ravel()
         # coverage of central intervals
