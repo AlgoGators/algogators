@@ -24,7 +24,8 @@ def main():
     p = p[(p.split == split) & p.term_q.notna()].copy()
     tot = {}
     for f in glob.glob(G + "*.json"):
-        m = json.load(open(f))
+        with open(f) as fh:
+            m = json.load(fh)
         if m["nfiles"] >= 20:  # a day with < 20 of 24 sampled files is treated as missing
             tot[int(pd.Timestamp(m["day"], tz="UTC").timestamp())] = m["total"]
     need = set(zip(p.speaker, p.term_q))

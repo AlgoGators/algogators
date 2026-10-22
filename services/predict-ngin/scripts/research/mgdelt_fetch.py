@@ -37,22 +37,22 @@ def main():
     what = sys.argv[2] if len(sys.argv) > 2 else "both"
     p = pd.read_parquet(OUT + "panel.parquet")
     p = p[(p.split == split) & p.term_q.notna()]
-    log = open(OUT + f"fetch_{split}.log", "a")
-    if what in ("timeline", "both"):
-        pairs = p[["spk_q", "term_q"]].drop_duplicates().sample(frac=1, random_state=7)
-        t0 = time.time()
-        for i, (s, t) in enumerate(pairs.itertuples(index=False)):
-            r = get(tl_params(s, t, split))
-            if i % 50 == 0:
-                print(f"timeline {i}/{len(pairs)} {time.time()-t0:.0f}s ok={r is not None}", file=log, flush=True)
-    if what in ("artlist", "both"):
-        trip = p[["spk_q", "term_q", "Dstr"]].drop_duplicates().sample(frac=1, random_state=7)
-        t0 = time.time()
-        for i, (s, t, D) in enumerate(trip.itertuples(index=False)):
-            r = get(al_params(s, t, D))
-            if i % 50 == 0:
-                print(f"artlist {i}/{len(trip)} {time.time()-t0:.0f}s ok={r is not None}", file=log, flush=True)
-    print("done", what, file=log, flush=True)
+    with open(OUT + f"fetch_{split}.log", "a") as log:
+        if what in ("timeline", "both"):
+            pairs = p[["spk_q", "term_q"]].drop_duplicates().sample(frac=1, random_state=7)
+            t0 = time.time()
+            for i, (s, t) in enumerate(pairs.itertuples(index=False)):
+                r = get(tl_params(s, t, split))
+                if i % 50 == 0:
+                    print(f"timeline {i}/{len(pairs)} {time.time()-t0:.0f}s ok={r is not None}", file=log, flush=True)
+        if what in ("artlist", "both"):
+            trip = p[["spk_q", "term_q", "Dstr"]].drop_duplicates().sample(frac=1, random_state=7)
+            t0 = time.time()
+            for i, (s, t, D) in enumerate(trip.itertuples(index=False)):
+                r = get(al_params(s, t, D))
+                if i % 50 == 0:
+                    print(f"artlist {i}/{len(trip)} {time.time()-t0:.0f}s ok={r is not None}", file=log, flush=True)
+        print("done", what, file=log, flush=True)
 
 
 if __name__ == "__main__":

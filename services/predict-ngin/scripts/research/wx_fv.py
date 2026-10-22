@@ -120,7 +120,8 @@ class FairModel:
 
 
 def load_model():
-    return FairModel(json.load(open(OUT / "fv_params.json")))
+    with open(OUT / "fv_params.json") as fh:
+        return FairModel(json.load(fh))
 
 
 def main():
@@ -139,7 +140,8 @@ def main():
     res, keys, nu = best
     params = dict(theta=res.x.tolist(), keys=[list(k) for k in keys], nu=nu, hbins=HBINS, avail_lag=AVAIL_LAG,
                   train_end=TRAIN_END)
-    json.dump(params, open(OUT / "fv_params.json", "w"), indent=1)
+    with open(OUT / "fv_params.json", "w") as fh:
+        json.dump(params, fh, indent=1)
     fm = FairModel(params)
     # calibration on train vs test (PIT of integer outcome, CRPS-free check: P(V<=txn-bias) coverage & bracket Brier)
     for nm, g in (("train", tr), ("test", x[x.date > TRAIN_END])):
