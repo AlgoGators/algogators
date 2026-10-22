@@ -52,3 +52,9 @@ class Mailer(ABC):
     @abstractmethod
     def send(self, to, cc, email):
         """Deliver a RenderedEmail to the To and Cc addresses, or raise."""
+
+
+class BookSentMarker(ABC):
+    @abstractmethod
+    def mark_book_sent(self, portfolio_id, report_date):
+        """Record, once, that the day's book email went out (trading.live_run_metadata.sent_at)."""

@@ -26,6 +26,7 @@ from research_api.domain.reports.recipients import parse_address_list
 from research_api.infrastructure.investor.repositories import PostgresInvestorRepository
 from research_api.infrastructure.portfolio.repositories import PostgresPortfolioRepository
 from research_api.infrastructure.portfolio.strategy_registry import PostgresStrategyRegistry
+from research_api.infrastructure.reports.book import PostgresBookSentMarker
 from research_api.infrastructure.reports.mailer import SmtpMailer
 from research_api.infrastructure.reports.queue import PostgresReportQueue
 from research_api.infrastructure.reports.recipients import EnvRecipients
@@ -56,7 +57,13 @@ def run_once(env=None) -> int:
     )
     queued = enqueue()
     sent = SendQueuedReports(
-        queue, HtmlReportRenderer(), SmtpMailer(env), who, who.approvers(), who.excluded()
+        queue,
+        HtmlReportRenderer(),
+        SmtpMailer(env),
+        who,
+        who.approvers(),
+        who.excluded(),
+        book_sent=PostgresBookSentMarker(),
     )()
     logger.info(
         "queued=%d skipped=%d sent=%d failed=%d",
