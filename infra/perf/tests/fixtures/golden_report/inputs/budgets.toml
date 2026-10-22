@@ -1,0 +1,9 @@
+[db_footprint.table_bytes_test]
+baseline = 500000
+threshold = 150
+action = "Investigate table growth"
+
+[db_footprint.raw_cleaned_ratio]
+baseline = "unset"
+threshold = 130
+action = "Monitor data quality"
