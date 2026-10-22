@@ -109,7 +109,9 @@ jobs:
       image: algogators/algolens-backend
       digest: ${{ needs.backend-image.outputs.digest }}
       deploy-args: ghcr.io/algogators/algolens-frontend@${{ needs.frontend-image.outputs.digest }}
-      remote-path: /home/ubuntu/algogators
+      # Its own checkout: /home/ubuntu/algogators on this box is the data-ngin deploy's sparse checkout
+      # (services/data-ngin/deploy only), and /home/ubuntu/algolens is the old AlgoLens repository's.
+      remote-path: /home/ubuntu/algolens-deploy
       deploy-script: infra/algolens/deployment/deploy.sh
       sparse-paths: infra/algolens/deployment
       timeout-minutes: 20
