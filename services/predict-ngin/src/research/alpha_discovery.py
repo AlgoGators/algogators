@@ -63,7 +63,7 @@ def check_data_availability(db_path: str) -> Dict[str, Any]:
         try:
             result = conn.execute(query).fetchone()
             stats[table] = result[0]
-        except:
+        except Exception:
             stats[table] = 0
 
     # Date ranges
@@ -72,7 +72,7 @@ def check_data_availability(db_path: str) -> Dict[str, Any]:
             "SELECT MIN(timestamp), MAX(timestamp) FROM polymarket_trades"
         ).fetchone()
         stats["trade_date_range"] = (result[0], result[1])
-    except:
+    except Exception:
         stats["trade_date_range"] = (None, None)
 
     try:
@@ -80,7 +80,7 @@ def check_data_availability(db_path: str) -> Dict[str, Any]:
             "SELECT MIN(datetime), MAX(datetime) FROM polymarket_prices"
         ).fetchone()
         stats["price_date_range"] = (result[0], result[1])
-    except:
+    except Exception:
         stats["price_date_range"] = (None, None)
 
     conn.close()

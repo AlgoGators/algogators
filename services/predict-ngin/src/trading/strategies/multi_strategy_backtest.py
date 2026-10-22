@@ -106,7 +106,7 @@ class ThetaHarvestStrategy:
             latest = market_ticks.iloc[-1]
             try:
                 yes_price = float(latest.get('price', 0.5))
-            except:
+            except Exception:
                 continue
 
             # Signal: YES price in the target range
@@ -412,7 +412,7 @@ class MultiStrategyBacktest:
                             if trade and -500 < trade.pnl < 10000:
                                 self.all_trades.append(trade)
                                 equity += trade.pnl
-                        except:
+                        except Exception:
                             pass
 
                 # Trade burst signals
@@ -424,7 +424,7 @@ class MultiStrategyBacktest:
                             if trade and -500 < trade.pnl < 10000:
                                 self.all_trades.append(trade)
                                 equity += trade.pnl
-                        except:
+                        except Exception:
                             pass
 
                 # Loser fade signals
@@ -436,11 +436,11 @@ class MultiStrategyBacktest:
                             if trade and -500 < trade.pnl < 10000:
                                 self.all_trades.append(trade)
                                 equity += trade.pnl
-                        except:
+                        except Exception:
                             pass
 
                 self.equity_curve.append((current_time, equity))
-            except:
+            except Exception:
                 continue
 
         return self._format_results()
