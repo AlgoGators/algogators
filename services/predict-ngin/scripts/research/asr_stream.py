@@ -111,7 +111,8 @@ async def run(ev, provider, seconds, start, tag):
                     await receiver()
                 except websockets.ConnectionClosed as e:
                     print("closed", e.code)
-                await st
+                # Finish sending before the WAV and transcript handles close.
+                await asyncio.gather(st)
             f.write(json.dumps({"type": "done", "audio_s": n_total / SR, "wall_s": time.time() - t0}) + "\n")
     with open(OUT / "minutes_log.jsonl", "a") as g:
         g.write(json.dumps({"event": ev, "provider": provider, "tag": tag, "audio_min": round(n_total / SR / 60, 2),
