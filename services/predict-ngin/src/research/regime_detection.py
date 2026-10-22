@@ -77,7 +77,7 @@ def load_price_data(
 
     try:
         df = pd.read_sql_query(query, conn)
-    except:
+    except Exception:
         df = pd.DataFrame()
 
     conn.close()
@@ -114,7 +114,7 @@ def load_trade_data(
 
     try:
         df = pd.read_sql_query(query, conn)
-    except:
+    except Exception:
         df = pd.DataFrame()
 
     conn.close()
@@ -142,7 +142,7 @@ def calculate_trend(prices: pd.Series, window: int = 24) -> pd.Series:
         try:
             slope = np.polyfit(t, x, 1)[0]
             return slope
-        except:
+        except Exception:
             return 0
 
     return prices.rolling(window=window, min_periods=2).apply(rolling_slope, raw=False)
@@ -496,7 +496,7 @@ def generate_research_report(
                 price_snapshot=price_snapshot,
             )
             print(f"  Identified {len(whale_addresses)} whales")
-        except:
+        except Exception:
             whale_addresses = set()
             print("  Could not identify whales, skipping whale regime analysis")
 
