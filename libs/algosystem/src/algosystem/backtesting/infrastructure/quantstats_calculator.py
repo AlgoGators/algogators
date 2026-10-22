@@ -30,13 +30,13 @@ class QuantStatsMetricsCalculator(MetricsCalculator):
         """Calculate static performance metrics."""
         strategy_returns = self._returns_for_calculation(equity)
         benchmark_returns = self._benchmark_returns(benchmark)
-        benchmark_strategy_returns = strategy_returns
+        aligned_benchmark: tuple[pd.Series, pd.Series] | None = None
         if benchmark_returns is not None:
-            benchmark_strategy_returns, benchmark_returns = strategy_returns.align(
+            aligned_strategy_returns, aligned_benchmark_returns = strategy_returns.align(
                 benchmark_returns, join="inner"
             )
-            if benchmark_strategy_returns.empty or benchmark_returns.empty:
-                benchmark_returns = None
+            if not aligned_strategy_returns.empty and not aligned_benchmark_returns.empty:
+                aligned_benchmark = (aligned_strategy_returns, aligned_benchmark_returns)
 
         metrics: dict[MetricKey, float | None] = {
             MetricKey.TOTAL_RETURN: self._finite_or_none(
@@ -80,8 +80,8 @@ class QuantStatsMetricsCalculator(MetricsCalculator):
 
         metrics.update(self._jarque_bera(strategy_returns))
         metrics.update(self._monthly_metrics(strategy_returns))
-        if benchmark_returns is not None:
-            metrics.update(self._benchmark_metrics(benchmark_strategy_returns, benchmark_returns))
+        if aligned_benchmark is not None:
+            metrics.update(self._benchmark_metrics(*aligned_benchmark))
 
         return PerformanceMetrics.from_dict(metrics)
 

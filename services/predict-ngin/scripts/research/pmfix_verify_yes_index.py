@@ -15,7 +15,6 @@ Writes data/vendor/pmfix/verify_yes_index.csv and prints a summary.
 from __future__ import annotations
 
 import ast
-import sys
 import time
 from pathlib import Path
 
@@ -114,4 +113,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
