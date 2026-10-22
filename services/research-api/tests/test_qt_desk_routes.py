@@ -7,7 +7,9 @@ import research_api.adapters.http.desk as desk_http
 import research_api.application.qt.use_cases as use_cases
 from flask_jwt_extended import create_access_token, get_csrf_token
 from research_api.app import app
+from research_api.application.qt.ports import DeskConflictError
 from research_api.domain.qt.desk import token_hash
+from research_api.domain.qt.settings import SettingsRuleError
 from research_api.infrastructure.config.qt import load_qt_settings
 from test_qt_desk_use_cases import NOW, FakeAgent, FakeRepo, risk_report
 
@@ -55,6 +57,33 @@ def _login(client, email="desk@x.com", role="admin"):
         csrf = get_csrf_token(token)
     client.set_cookie("access_token_cookie", token)
     return {"X-CSRF-TOKEN": csrf}
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "message"),
+    [
+        (
+            DeskConflictError("Traceback: /internal/path API_KEY=secret"),
+            409,
+            "The desk action cannot proceed; check the current desk state",
+        ),
+        (
+            SettingsRuleError("The engine refused: secret configuration value"),
+            400,
+            "Invalid desk settings",
+        ),
+    ],
+)
+def test_handled_does_not_expose_exception_details(error, status, message):
+    @desk_http.handled
+    def secret_failure():
+        raise error
+
+    with app.app_context():
+        response, result_status = secret_failure()
+
+    assert result_status == status
+    assert response.get_json() == {"error": message}
 
 
 def test_every_desk_route_is_404_while_the_flag_is_off(client, desk, monkeypatch):
@@ -175,7 +204,7 @@ def test_publish_and_state(client, desk):
     assert state["risk"]["state"] == "model"
 
 
-def test_publish_outside_the_risk_limits_is_409_with_the_reason(client, desk):
+def test_publish_outside_the_risk_limits_is_409_without_engine_details(client, desk):
     repo, agent = desk
     agent.risk = risk_report(
         "desk", audit_id=0, within_limits=False, breaches=["L_g"], blockers=["L_g"]
@@ -186,8 +215,7 @@ def test_publish_outside_the_risk_limits_is_409_with_the_reason(client, desk):
     )
     assert response.status_code == 409
     assert response.get_json() == {
-        "error": "The 2026-10-08 positions are over a cap (L_g over its cap): save within the "
-        "caps or ask the VP or President to approve your positions"
+        "error": "The desk action cannot proceed; check the current desk state"
     }
     assert repo.rows == []
 
@@ -196,7 +224,10 @@ def test_publish_outside_the_risk_limits_is_409_with_the_reason(client, desk):
         "/portfolio/desk/QT_CONSERVATIVE_PORTFOLIO/publish", json={}, headers=headers
     )
     assert response.status_code == 409
-    assert response.get_json()["error"] == "The risk check is unavailable (UNAVAILABLE); try again"
+    assert (
+        response.get_json()["error"]
+        == "The desk action cannot proceed; check the current desk state"
+    )
     state = client.get("/portfolio/desk/QT_CONSERVATIVE_PORTFOLIO").get_json()
     assert state["risk"] == {"unavailable": "UNAVAILABLE"}
 
@@ -415,7 +446,10 @@ def test_approve_after_10_new_york_is_409_and_state_carries_the_clock(client, de
         "/portfolio/desk/QT_CONSERVATIVE_PORTFOLIO/publish", json={}, headers=headers
     )
     assert response.status_code == 409
-    assert "closed at 10:00 New York" in response.get_json()["error"]
+    assert (
+        response.get_json()["error"]
+        == "The desk action cannot proceed; check the current desk state"
+    )
     assert desk[0].rows == []
     state = client.get("/portfolio/desk/QT_CONSERVATIVE_PORTFOLIO").get_json()
     assert state["serverTime"] == late.isoformat()
@@ -475,7 +509,10 @@ def test_rescind_from_0930_new_york_is_409(client, desk, monkeypatch):
         "/portfolio/desk/QT_CONSERVATIVE_PORTFOLIO/rescind", json={}, headers=headers
     )
     assert response.status_code == 409
-    assert "can no longer be taken back" in response.get_json()["error"]
+    assert (
+        response.get_json()["error"]
+        == "The desk action cannot proceed; check the current desk state"
+    )
     assert repo.rows == []
 
 
@@ -510,7 +547,10 @@ def test_publish_accept_c_takes_the_flow_from_the_body(client, desk):
         headers=headers,
     )
     assert response.status_code == 409  # no finished save yet
-    assert "no finished save" in response.get_json()["error"]
+    assert (
+        response.get_json()["error"]
+        == "The desk action cannot proceed; check the current desk state"
+    )
 
 
 def test_a_deleted_user_cannot_look_up_or_decide(client, desk, screen_access):
