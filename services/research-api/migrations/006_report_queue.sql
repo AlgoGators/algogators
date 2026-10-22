@@ -39,4 +39,14 @@ CREATE INDEX IF NOT EXISTS report_queue_pending_idx
     ON reports.report_queue (created_at)
     WHERE status IN ('queued', 'failed');
 
+-- Grants go to svc_algolens (qt_algolens_app inherits it), when that role exists, as in 003.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'svc_algolens') THEN
+        GRANT USAGE ON SCHEMA reports TO svc_algolens;
+        GRANT SELECT, INSERT, UPDATE ON reports.report_queue TO svc_algolens;
+        GRANT USAGE ON SEQUENCE reports.report_queue_id_seq TO svc_algolens;
+    END IF;
+END $$;
+
 COMMIT;

@@ -44,6 +44,7 @@ PREVIOUS_FILE="$STATE_DIR/algolens.previous-images"
 CONTAINERS=(algolens-edge algolens-frontend algolens-report-worker algolens-backend)
 
 log() { echo "[$(date -Is)] $*"; }
+mem() { log "memory ($1): $(free -m | awk 'NR==2 {print $7 " MiB available of " $2 " MiB"}')"; }
 die() { echo "::error::$*" >&2; exit 1; }
 
 [ -f "$ALGOLENS_ENV_FILE" ] || die "env file $ALGOLENS_ENV_FILE is missing (see deployment/DEPLOYMENT.md)"
@@ -64,6 +65,7 @@ fi
 # The backend joins the network it shares with the trade-ngin engine-rpc container.
 docker network create qt >/dev/null 2>&1 || true
 
+mem before
 log "pulling $BACKEND_IMAGE"
 docker pull "$BACKEND_IMAGE"
 log "pulling $FRONTEND_IMAGE"
@@ -167,5 +169,6 @@ tag_pair algolens-frontend "$FRONTEND_IMAGE" "${tagged_prev_frontend:-}"
 
 docker image prune -f --filter 'until=168h' >/dev/null
 rollback="$DEPLOY_DIR/deploy.sh $(cat "$PREVIOUS_FILE" 2>/dev/null || echo '<no previous deploy recorded>')"
+mem after
 log "deployed backend=$BACKEND_IMAGE frontend=$FRONTEND_IMAGE"
 log "rollback: $rollback"

@@ -37,18 +37,9 @@ services:
     restart: unless-stopped
     env_file:
       - ${ALGOLENS_ENV_FILE:?ALGOLENS_ENV_FILE is unset}
-    # The image default is 2 workers x 4 threads; keep 2 small workers so one
-    # slow request does not block the rest, under a 256m cap. Flask-Limiter's
-    # in-memory counters are per worker.
-    command:
-      - gunicorn
-      - --bind=0.0.0.0:5000
-      - --workers=2
-      - --threads=2
-      - --timeout=60
-      - --max-requests=1000
-      - --max-requests-jitter=100
-      - research_api.wsgi:app
+    # No `command`: the image's own CMD (gunicorn, 2 workers x 4 threads) is right for this image and
+    # for an older one the shared rollback file may name, which a hard-coded app path would break.
+    # Flask-Limiter's in-memory counters are per worker. The 256m cap below is what bounds memory.
     mem_limit: 256m
     memswap_limit: 256m
     cpus: 0.5
