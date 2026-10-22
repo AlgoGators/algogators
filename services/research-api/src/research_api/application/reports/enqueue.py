@@ -33,15 +33,20 @@ class EnqueueDailyReports:
     reader:     fetch_detail_rows(strategy_type, portfolio_id) (the portfolio repository)
     published:  latest_published_day(portfolio_id) -> date | None (the investor repository)
     queue:      has_report(...) and enqueue(...) (PostgresReportQueue)
+    held:       held(portfolio_id, day) -> bool, a day approved without its e-mail (D-66) that the
+                desk has not released with Send yet; it is not queued until it is
     """
 
-    def __init__(self, registry, reader, published, queue, portfolio_ids, build_detail, now=None):
+    def __init__(
+        self, registry, reader, published, queue, portfolio_ids, build_detail, now=None, held=None
+    ):
         self.registry = registry
         self.reader = reader
         self.published = published
         self.queue = queue
         self.portfolio_ids = tuple(portfolio_ids)
         self.build_detail = build_detail  # (cfg, rows) -> detail dict | None
+        self.held = held or (lambda portfolio_id, day: False)
         self.now = now or (lambda: dt.datetime.now(NEW_YORK))
 
     def __call__(self):
@@ -59,6 +64,9 @@ class EnqueueDailyReports:
                 continue
             day = self.published.latest_published_day(pid)
             if day != today or self.queue.has_report(REPORT_TYPE, pid, today):
+                skipped += 1
+                continue
+            if self.held(pid, today):
                 skipped += 1
                 continue
             rows = self.reader.fetch_detail_rows(cfg["strategy_type"], pid)

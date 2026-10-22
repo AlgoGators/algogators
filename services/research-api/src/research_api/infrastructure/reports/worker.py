@@ -27,6 +27,7 @@ from research_api.infrastructure.investor.repositories import PostgresInvestorRe
 from research_api.infrastructure.portfolio.repositories import PostgresPortfolioRepository
 from research_api.infrastructure.portfolio.strategy_registry import PostgresStrategyRegistry
 from research_api.infrastructure.reports.book import PostgresBookSentMarker
+from research_api.infrastructure.reports.holds import PostgresHeldDays
 from research_api.infrastructure.reports.mailer import SmtpMailer
 from research_api.infrastructure.reports.queue import PostgresReportQueue
 from research_api.infrastructure.reports.recipients import EnvRecipients
@@ -54,6 +55,7 @@ def run_once(env=None) -> int:
         queue,
         parse_address_list(env.get("REPORT_PORTFOLIOS")),
         build_strategy_detail,
+        held=PostgresHeldDays(),
     )
     queued = enqueue()
     sent = SendQueuedReports(

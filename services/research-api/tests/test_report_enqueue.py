@@ -54,11 +54,11 @@ def _detail(cfg, rows):
     return t._detail()
 
 
-def _run(now, published, queue=None, ids=("QT_CONSERVATIVE",)):
+def _run(now, published, queue=None, ids=("QT_CONSERVATIVE",), held=None):
     queue = queue or Queue()
     reader = Reader()
     use = EnqueueDailyReports(
-        Registry(), reader, Published(published), queue, ids, _detail, now=lambda: now
+        Registry(), reader, Published(published), queue, ids, _detail, now=lambda: now, held=held
     )
     return use(), queue, reader
 
@@ -102,3 +102,11 @@ def test_the_worker_does_nothing_unless_enabled():
     assert not enabled({}) and not enabled({"REPORT_SEND_ENABLED": "true"})
     assert enabled({"REPORT_SEND_ENABLED": "1"})
     assert run_once({}) == 0  # idle: no database or SMTP is touched
+
+
+def test_a_day_approved_without_its_email_waits_for_the_desks_send():
+    now, day = dt.datetime(2026, 10, 22, 10, 5, tzinfo=NY), dt.date(2026, 10, 22)
+    summary, queue, reader = _run(now, day, held=lambda pid, d: True)
+    assert summary.queued == 0 and queue.rows == [] and reader.calls == 0
+    summary, queue, _ = _run(now, day, held=lambda pid, d: False)
+    assert summary.queued == 1
