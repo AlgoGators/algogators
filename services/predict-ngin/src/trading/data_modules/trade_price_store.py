@@ -5,7 +5,6 @@ Useful when you don't have separate price history files but have trades.
 """
 
 from typing import Optional, Dict, Any, List
-from collections import OrderedDict
 
 import pandas as pd
 import numpy as np
@@ -168,9 +167,6 @@ class TradeBasedPriceStore(PriceStore):
                 ["market_id", "outcome", "timestamp_unix"]
             ).reset_index(drop=True)
         
-        # LRU cache
-        self._cache: OrderedDict = OrderedDict()
-        self._cache_size = cache_size
         self._metadata_cache: Dict[str, Dict[str, Any]] = {}
     
     def get_market_metadata(self, market_id: str) -> Dict[str, Any]:
