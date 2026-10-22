@@ -12,7 +12,6 @@ tests/unit/fixtures/pmfix_hand_checked_fills.json).
 from __future__ import annotations
 
 import json
-import sys
 import time
 from pathlib import Path
 
@@ -100,4 +99,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
