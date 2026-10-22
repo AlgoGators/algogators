@@ -1,3 +1,5 @@
+import type { PositionBook } from './bookLabel';
+
 export interface Position {
   symbol: string;
   name: string;
@@ -86,6 +88,26 @@ export interface Strategy {
   finalizedPositions: FinalizedPosition[];
   managers: string[];
   lastUpdate: string;
+  /**
+   * Position book the positions and headline curve were read from. Absent on
+   * older API versions, so always guard on it.
+   */
+  book?: PositionBook;
+  /** True when the default QT book had no rows and the system book was served. */
+  fellBack?: boolean;
+  /** Set by the portfolio-id endpoint (/portfolio/portfolios/<id>). */
+  portfolioId?: string;
+  /** D-20: the portfolio's strategies (sleeves) on its latest day, with the symbols each holds. */
+  strategies?: { name: string; positions: number }[];
+  portfolioGroup?: string | null;
+  assetClass?: 'futures' | 'equity';
+  /** desk_editable and futures (ruling 13). */
+  deskEditable?: boolean;
+  /**
+   * Whether the book counts in the fund's total (fundTotals.ts). False for the
+   * QT desk book and its model twin. Absent on older API versions: counted.
+   */
+  inFundTotal?: boolean;
 }
 
 export interface PortfolioData {

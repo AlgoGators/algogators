@@ -1,0 +1,122 @@
+name: algolens · deploy
+
+# A push to `prod` that touches AlgoLens (the API, the web app, their libs or infra/algolens) is a
+# production deploy of AlgoLens on the trade-ngin box: quality gates, build and push both images,
+# then SSH in, fast-forward the box's sparse checkout of infra/algolens/deployment to the commit
+# CI built and run deploy.sh with the two image digests.
+#
+# deploy.sh keeps its own safety net: a pre-flight that reaches the database from the NEW image
+# before anything running is touched, a readiness gate, and an automatic rollback to the last good
+# pair. The box never builds anything; it pulls by digest. See infra/algolens/deployment/DEPLOYMENT.md.
+#
+# Moved here from AlgoGators/AlgoLens (.github/workflows/deploy.yml); the old repo no longer deploys.
+
+on:
+  push:
+    branches: [prod]
+    paths:
+      - services/research-api/**
+      - apps/algolens-web/**
+      - libs/research-core/**
+      - platform/db/**
+      - infra/algolens/**
+      - .github/workflows/app-algolens.deploy.yml
+      - .github/workflows/_deploy-ssh.yml
+      - .github/workflows/_publish-container.yml
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Build the images without pushing or deploying.
+        type: boolean
+        default: true
+      deploy:
+        description: Deploy after building (only honoured on the prod branch).
+        type: boolean
+        default: false
+
+# One prod deploy at a time, and never cancel one mid-roll.
+concurrency:
+  group: algolens-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  quality-api:
+    uses: ./.github/workflows/_quality-python.yml
+    with:
+      path: services/research-api
+      coverage-min: 60
+    secrets: inherit
+
+  quality-web:
+    uses: ./.github/workflows/_quality-node.yml
+    with:
+      path: apps/algolens-web
+      coverage-min: 50
+      bundle-budget-kb: 500
+    secrets: inherit
+
+  backend-image:
+    needs: [quality-api, quality-web]
+    uses: ./.github/workflows/_publish-container.yml
+    with:
+      path: services/research-api
+      # repo-root context: the image installs the workspace libs (platform-db, research-core)
+      context: .
+      # The image names the box already runs, so the first monorepo deploy overrides them.
+      image: algogators/algolens-backend
+      push: ${{ !(inputs.dry-run || false) }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    secrets: inherit
+
+  frontend-image:
+    needs: [quality-api, quality-web]
+    uses: ./.github/workflows/_publish-container.yml
+    with:
+      path: apps/algolens-web
+      # repo-root context: the app is a member of the pnpm workspace
+      context: .
+      image: algogators/algolens-frontend
+      # Baked into the static build; the site is same-origin behind the edge nginx.
+      build-args: |
+        VITE_API_URL=${{ vars.ALGOLENS_PUBLIC_URL || 'https://algolens.algogators.com' }}
+      push: ${{ !(inputs.dry-run || false) }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    secrets: inherit
+
+  deploy:
+    if: >-
+      ${{ github.ref == 'refs/heads/prod'
+          && !(inputs.dry-run || false)
+          && (github.event_name == 'push' || inputs.deploy) }}
+    needs: [backend-image, frontend-image]
+    uses: ./.github/workflows/_deploy-ssh.yml
+    with:
+      # Only a name here: the environment's protection rules (reviewers) gate the deploy. The
+      # box's credentials are the ALGOLENS_SSH_* repository secrets below; the data-ngin deploy
+      # uses SSH_* for its own box, so the two never share a name.
+      environment: algolens-production
+      image: algogators/algolens-backend
+      digest: ${{ needs.backend-image.outputs.digest }}
+      deploy-args: ghcr.io/algogators/algolens-frontend@${{ needs.frontend-image.outputs.digest }}
+      remote-path: /home/ubuntu/algogators
+      deploy-script: infra/algolens/deployment/deploy.sh
+      sparse-paths: infra/algolens/deployment
+      timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    secrets:
+      SSH_HOST: ${{ secrets.ALGOLENS_SSH_HOST }}
+      SSH_USER: ${{ secrets.ALGOLENS_SSH_USER }}
+      SSH_KEY: ${{ secrets.ALGOLENS_SSH_KEY }}

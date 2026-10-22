@@ -41,7 +41,7 @@ def test_non_internal_roles_are_refused_incubation_access(client, role):
     assert response.get_json()["error"] == "Insufficient permissions"
 
 
-@pytest.mark.parametrize("role", ["admin", "general_member"])
+@pytest.mark.parametrize("role", ["admin", "exec_board", "general_member"])
 def test_internal_roles_can_access_incubation(client, role):
     _set_jwt_cookie(client, role)
 
@@ -49,3 +49,18 @@ def test_internal_roles_can_access_incubation(client, role):
 
     assert response.status_code == 200
     assert response.get_json() == {"incubating_strategies": []}
+
+
+@pytest.mark.parametrize("role", ["admin", "exec_board"])
+def test_exec_roles_fall_back_to_the_qt_screen(role):
+    """Before migration 003 (and in its backfill) exec gets the desk."""
+    from research_api.domain.identity.screens import QT, legacy_screens
+
+    assert QT in legacy_screens(role)
+
+
+@pytest.mark.parametrize("role", [None, "", "general_member", "team_lead", "investor", "viewer"])
+def test_other_roles_do_not_fall_back_to_the_qt_screen(role):
+    from research_api.domain.identity.screens import QT, legacy_screens
+
+    assert QT not in legacy_screens(role)

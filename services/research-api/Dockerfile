@@ -23,6 +23,10 @@ RUN pip install --no-cache-dir \
 # Create logs directory
 RUN mkdir -p logs
 
+# The AlgoLens repository's compose file starts `gunicorn ... wsgi:app`, and both deploys share one
+# rollback file, so a rollback can run this image under that command. Keep that entry point alive.
+RUN echo "from research_api.wsgi import app" > /app/wsgi.py
+
 # Create non-root user for security
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser

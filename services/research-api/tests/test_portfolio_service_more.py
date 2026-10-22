@@ -86,16 +86,16 @@ class FakeRepo:
         self.calls.append(("_fetch_equity_curve", (cursor, st, pid, portfolio_type)))
         return self.curves.get(portfolio_type, [])
 
-    def _fetch_current_positions(self, cursor: Any, st: str, pid: str) -> Any:
-        self.calls.append(("_fetch_current_positions", (cursor, st, pid)))
+    def _fetch_current_positions(self, cursor: Any, st: str, pid: str, book: str) -> Any:
+        self.calls.append(("_fetch_current_positions", (cursor, st, pid, book)))
         return [{"symbol": "ES.v.0"}]
 
     def _fetch_recent_executions(self, cursor: Any, st: str, pid: str) -> Any:
         self.calls.append(("_fetch_recent_executions", (cursor, st, pid)))
         return [{"symbol": "ES.v.0", "side": "BUY"}]
 
-    def _fetch_yesterday_positions(self, cursor: Any, st: str, pid: str) -> Any:
-        self.calls.append(("_fetch_yesterday_positions", (cursor, st, pid)))
+    def _fetch_yesterday_positions(self, cursor: Any, st: str, pid: str, book: str) -> Any:
+        self.calls.append(("_fetch_yesterday_positions", (cursor, st, pid, book)))
         return [{"symbol": "NQ.v.0"}]
 
     def fetch_detail_rows(self, st: str, pid: str) -> PortfolioDetailRows:
@@ -154,11 +154,11 @@ def test_fetch_equity_curve_defaults_portfolio_type_to_none(repo: FakeRepo) -> N
 
 
 def test_fetch_position_and_execution_wrappers_delegate(repo: FakeRepo) -> None:
-    assert svc._fetch_current_positions(CURSOR, "LIVE_TF", "MAIN") == [{"symbol": "ES.v.0"}]
+    assert svc._fetch_current_positions(CURSOR, "LIVE_TF", "MAIN", "qt") == [{"symbol": "ES.v.0"}]
     assert svc._fetch_recent_executions(CURSOR, "LIVE_TF", "MAIN") == [
         {"symbol": "ES.v.0", "side": "BUY"}
     ]
-    assert svc._fetch_yesterday_positions(CURSOR, "LIVE_TF", "MAIN") == [{"symbol": "NQ.v.0"}]
+    assert svc._fetch_yesterday_positions(CURSOR, "LIVE_TF", "MAIN", "qt") == [{"symbol": "NQ.v.0"}]
     assert [name for name, _ in repo.calls] == [
         "_fetch_current_positions",
         "_fetch_recent_executions",
@@ -179,14 +179,14 @@ def test_equity_by_stream_is_empty_without_portfolio_type_column(repo: FakeRepo)
 
 def test_equity_by_stream_transforms_rows_and_skips_empty_streams(repo: FakeRepo) -> None:
     repo.curves["qt"] = [{"timestamp": datetime(2026, 1, 1), "equity": 500000.0}]
-    repo.curves["benchmark"] = [{"timestamp": datetime(2026, 1, 2), "equity": 501000.0}]
-    # "system" has no rows and must not appear in the result.
+    repo.curves["system"] = [{"timestamp": datetime(2026, 1, 2), "equity": 501000.0}]
+    # A stream with no rows must not appear in the result (the repo returns [] for it).
 
     result = svc._fetch_equity_by_stream(CURSOR, "LIVE_TF", "MAIN")
 
     assert result == {
         "qt": [{"date": "2026-01-01T00:00:00", "value": 500000.0}],
-        "benchmark": [{"date": "2026-01-02T00:00:00", "value": 501000.0}],
+        "system": [{"date": "2026-01-02T00:00:00", "value": 501000.0}],
     }
     queried = [args[3] for name, args in repo.calls if name == "_fetch_equity_curve"]
     assert queried == list(svc.PORTFOLIO_STREAMS)
