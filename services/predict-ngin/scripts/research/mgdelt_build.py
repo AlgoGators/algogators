@@ -62,7 +62,8 @@ def word(r):
 
 meta["word"] = meta.apply(word, axis=1)
 p = p.merge(meta[["ticker", "word", "market_type"]], on="ticker", how="left")
-kw = json.load(open("data/vendor/release/wiki/kalshi_words.json"))
+with open("data/vendor/release/wiki/kalshi_words.json") as fh:
+    kw = json.load(fh)
 kwm = {t: w for ev in kw.values() for t, w in ev.items()}
 p["word"] = p.word.fillna(p.ticker.map(kwm))
 p = p[(p.market_type.isna()) | (p.market_type == "binary")]

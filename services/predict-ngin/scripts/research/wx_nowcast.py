@@ -69,7 +69,8 @@ def fit():
         rep = x.assign(split=np.where(x.date <= TRAIN_END, "train", "test")).groupby(["split", "hb"]).d.apply(
             lambda z: pd.Series({"P0": (z == 0).mean(), "P+1": (z == 1).mean(), "P<0": (z < 0).mean(), "n": len(z)})).unstack()
         print(meas, "\n", rep.round(3).to_string())
-    json.dump(dict(tables=tables, deltas=DELTAS.tolist()), open(OUT / "nowcast.json", "w"))
+    with open(OUT / "nowcast.json", "w") as fh:
+        json.dump(dict(tables=tables, deltas=DELTAS.tolist()), fh)
     return tables
 
 

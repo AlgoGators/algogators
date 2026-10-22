@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -189,7 +190,7 @@ def main() -> int:
             return {k: _sanitize(v) for k, v in obj.items()}
         if isinstance(obj, list):
             return [_sanitize(x) for x in obj]
-        if isinstance(obj, float) and (obj != obj or obj == float("inf") or obj == float("-inf")):
+        if isinstance(obj, float) and not math.isfinite(obj):
             return None
         return obj
 

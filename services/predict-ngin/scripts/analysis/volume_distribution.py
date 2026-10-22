@@ -490,7 +490,7 @@ def create_volume_visualizations_extra(
     print(f"Saved: {output_dir / 'volume_pareto_chart.png'}")
     
     # 3. Volume Buckets Bar Chart
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+    _, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
     
     bucket_labels = [b[2] for b in buckets]
     bucket_labels_short = [label.replace('$', '').replace(' ', '\n') for label in bucket_labels]

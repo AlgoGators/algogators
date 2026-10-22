@@ -1,6 +1,7 @@
 import unittest
 from typing import Any
 
+import pandas as pd
 from data_ngin.infrastructure.fetcher.fetcher import Fetcher
 
 
@@ -9,19 +10,22 @@ class MockFetcher(Fetcher):
     A mock subclass of Fetcher to test base functionality.
     """
 
-    def fetch_data(self, symbol: str, start_date: str, end_date: str) -> list[dict[str, Any]]:
+    async def fetch_data(
+        self, symbol: str, loaded_asset_type: str, start_date: str, end_date: str
+    ) -> pd.DataFrame:
         """
         Dummy implementation of the abstract method for testing.
 
         Args:
             symbol (str): The symbol to fetch data for.
+            loaded_asset_type (str): Asset type to load.
             start_date (str): Start date in 'YYYY-MM-DD' format.
             end_date (str): End date in 'YYYY-MM-DD' format.
 
         Returns:
-            List[Dict[str, Any]]: Mock data for testing purposes.
+            pd.DataFrame: Mock data for testing purposes.
         """
-        return [{"time": start_date, "open": 100.0}]
+        return pd.DataFrame([{"time": start_date, "open": 100.0}])
 
 
 class TestFetcher(unittest.TestCase):
