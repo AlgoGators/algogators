@@ -71,9 +71,8 @@ def test_get_user_screens_falls_back_only_when_the_table_is_missing():
             return []
 
     calls = []
-    assert GetUserScreens(Missing(), on_fallback=lambda: calls.append(1)).execute(
-        1, "team_lead"
-    ) == [
+    screens = GetUserScreens(Missing(), on_fallback=lambda: calls.append(1)).execute(1, "team_lead")
+    assert screens == [
         "member",
     ]
     assert calls == [1]
