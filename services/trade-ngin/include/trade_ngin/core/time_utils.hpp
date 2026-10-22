@@ -2,6 +2,7 @@
 
 #include <time.h>
 #include <chrono>
+#include <string>
 
 namespace trade_ngin {
 namespace core {
@@ -29,6 +30,12 @@ inline std::tm* safe_localtime(const std::time_t* time, std::tm* result) {
 #endif
 }
 
+/** Thread-local convenience overload for callers that need a tm pointer. */
+inline std::tm* safe_localtime(const std::time_t* time) {
+    thread_local std::tm result{};
+    return safe_localtime(time, &result);
+}
+
 /**
  * @brief Thread-safe wrapper for gmtime
  *
@@ -50,6 +57,12 @@ inline std::tm* safe_gmtime(const std::time_t* time, std::tm* result) {
     // POSIX
     return gmtime_r(time, result);
 #endif
+}
+
+/** Thread-local convenience overload for callers that need a tm pointer. */
+inline std::tm* safe_gmtime(const std::time_t* time) {
+    thread_local std::tm result{};
+    return safe_gmtime(time, &result);
 }
 
 /**

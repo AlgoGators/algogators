@@ -34,6 +34,21 @@ def test_register_rejects_weak_password(client):
     assert "12 characters" in resp.get_json()["error"]
 
 
+def test_api_rule_error_does_not_echo_exception_text(client):
+    from research_api.adapters.http.api import handled
+    from research_api.application.shared.errors import ValidationError
+
+    @handled
+    def failing_request():
+        raise ValidationError("private query text")
+
+    with client.application.app_context():
+        response, status = failing_request()
+
+    assert status == 400
+    assert response.get_json() == {"error": "Invalid request"}
+
+
 # --- rate limiting -----------------------------------------------------------
 
 

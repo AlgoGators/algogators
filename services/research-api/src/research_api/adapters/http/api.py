@@ -57,14 +57,14 @@ from research_api.infrastructure.config.dependencies import (
 api_bp = Blueprint("api", __name__)
 
 _ERRORS = (
-    (ScreenRuleError, 400),
-    (ReportRuleError, 400),
-    (LinkNotStoredError, 409),
-    (ValidationError, 400),
-    (ScreenUserNotFoundError, 404),
-    (ReportNotFoundError, 404),
-    (InvestorNotFoundError, 404),
-    (ScreenAccessUnavailableError, 503),
+    (ScreenRuleError, 400, "Invalid screen selection"),
+    (ReportRuleError, 400, "Invalid report request"),
+    (LinkNotStoredError, 409, "Investor links are not available"),
+    (ValidationError, 400, "Invalid request"),
+    (ScreenUserNotFoundError, 404, "User not found"),
+    (ReportNotFoundError, 404, "Report not found"),
+    (InvestorNotFoundError, 404, "Investor not found"),
+    (ScreenAccessUnavailableError, 503, "Screen access is not set up yet (migration 003)"),
 )
 
 
@@ -75,11 +75,11 @@ def handled(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
-        except tuple(e for e, _ in _ERRORS) as exc:
-            status = next(code for error, code in _ERRORS if isinstance(exc, error))
-            if isinstance(exc, ScreenAccessUnavailableError):
-                return jsonify({"error": "Screen access is not set up yet (migration 003)"}), status
-            return jsonify({"error": str(exc)}), status
+        except tuple(error for error, _, _ in _ERRORS) as exc:
+            status, message = next(
+                (status, message) for error, status, message in _ERRORS if isinstance(exc, error)
+            )
+            return jsonify({"error": message}), status
         except psycopg2.errors.UndefinedTable as exc:
             current_app.logger.error("[API] %s: table missing: %s", request.path, exc)
             return jsonify({"error": "This feature is not set up yet (migration 003)"}), 503

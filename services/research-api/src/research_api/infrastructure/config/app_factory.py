@@ -24,6 +24,11 @@ from research_api.infrastructure.db.postgres import get_db_connection
 ENV_PATH = Path(__file__).resolve().parents[3] / ".env"
 
 
+def _single_line_log(value: object) -> str:
+    """Keep untrusted request metadata from forging additional log entries."""
+    return str(value).replace("\r", "\\r").replace("\n", "\\n")
+
+
 def create_app():
     load_dotenv(dotenv_path=ENV_PATH)
 
@@ -94,9 +99,9 @@ def create_app():
     def log_request_info():
         app.logger.info(
             "Request: %s %s from %s",
-            request.method,
-            request.path,
-            request.remote_addr,
+            _single_line_log(request.method),
+            _single_line_log(request.path),
+            _single_line_log(request.remote_addr),
         )
         data = request.get_json(silent=True)
         if isinstance(data, dict) and data:
@@ -105,23 +110,23 @@ def create_app():
                 key: ("***" if key in ["password", "token"] else value)
                 for key, value in data.items()
             }
-            app.logger.debug("Request body: %s", safe_data)
+            app.logger.debug("Request body: %s", _single_line_log(safe_data))
 
     @app.after_request
     def log_response_info(response):
         app.logger.info(
             "Response: %s %s - Status %s",
-            request.method,
-            request.path,
+            _single_line_log(request.method),
+            _single_line_log(request.path),
             response.status_code,
         )
 
         origin = request.headers.get("Origin")
         if origin:
-            app.logger.info("[CORS] Request Origin: %s", origin)
+            app.logger.info("[CORS] Request Origin: %s", _single_line_log(origin))
             app.logger.info(
                 "[CORS] Response Access-Control-Allow-Origin: %s",
-                response.headers.get("Access-Control-Allow-Origin", "NOT SET"),
+                _single_line_log(response.headers.get("Access-Control-Allow-Origin", "NOT SET")),
             )
 
             if response.status_code >= 400 and not response.headers.get(
@@ -138,15 +143,15 @@ def create_app():
         if request.method == "OPTIONS":
             app.logger.info(
                 "[CORS] Preflight request from Origin: %s",
-                request.headers.get("Origin"),
+                _single_line_log(request.headers.get("Origin")),
             )
             app.logger.info(
                 "[CORS] Access-Control-Request-Method: %s",
-                request.headers.get("Access-Control-Request-Method"),
+                _single_line_log(request.headers.get("Access-Control-Request-Method")),
             )
             app.logger.info(
                 "[CORS] Access-Control-Request-Headers: %s",
-                request.headers.get("Access-Control-Request-Headers"),
+                _single_line_log(request.headers.get("Access-Control-Request-Headers")),
             )
 
     jwt_secret = os.getenv("JWT_SECRET_KEY")
@@ -232,7 +237,7 @@ def create_app():
             health_status["checks"]["database"] = "ok"
             app.logger.info("[HEALTH] Database connection successful")
         except Exception as exc:
-            health_status["checks"]["database"] = "error" if is_production else f"error: {exc!s}"
+            health_status["checks"]["database"] = "error"
             health_status["status"] = "degraded"
             app.logger.error("[HEALTH] Database connection failed: %s", str(exc), exc_info=True)
 

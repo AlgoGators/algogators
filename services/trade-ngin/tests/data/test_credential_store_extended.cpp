@@ -236,3 +236,22 @@ TEST_F(CredentialStoreExtendedTest, EnvVarPathOverrideIgnoresNonJsonExtension) {
     EXPECT_TRUE(r.is_ok());
     fs::remove(bogus);
 }
+
+TEST_F(CredentialStoreExtendedTest, EnvVarPathOverrideCannotEscapeConfiguredDirectory) {
+    const auto config_dir = path_.parent_path() / (path_.stem().string() + "_dir");
+    const auto configured_path = config_dir / "config.json";
+    write_minimal_config(configured_path);
+    {
+        std::ofstream outside(path_);
+        outside << R"({"outside": {"key": "wrong file"}})";
+    }
+
+    setenv("TRADING_CONFIG_PATH", path_.c_str(), 1);
+    CredentialStore cs(configured_path.string());
+    const auto allowed = cs.get_credential("existing", "key");
+    EXPECT_TRUE(allowed.is_ok());
+    EXPECT_TRUE(cs.get_credential("outside", "key").is_error());
+
+    fs::remove(configured_path);
+    fs::remove(config_dir);
+}

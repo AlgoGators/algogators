@@ -21,6 +21,7 @@ from research_api.application.identity.use_cases import (
     UserNotFoundError,
     VerifySession,
 )
+from research_api.domain.identity.password_policy import MIN_PASSWORD_LENGTH
 from research_api.extensions import limiter
 from research_api.infrastructure.config.dependencies import (
     check_password_hash,
@@ -182,8 +183,10 @@ def register():
             data["first_name"],
             data["last_name"],
         )
-    except PasswordPolicyViolationError as exc:
-        return jsonify({"error": str(exc)}), 400
+    except PasswordPolicyViolationError:
+        return jsonify(
+            {"error": f"Password must be at least {MIN_PASSWORD_LENGTH} characters long"}
+        ), 400
     except EmailNotAuthorizedError:
         return jsonify({"error": "Email not authorized. Contact an administrator."}), 403
     except AccountAlreadyRegisteredError:

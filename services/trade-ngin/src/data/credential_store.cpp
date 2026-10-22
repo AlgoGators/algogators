@@ -9,6 +9,7 @@
 #include <random>
 #include <regex>
 #include <sstream>
+#include <system_error>
 
 namespace trade_ngin {
 
@@ -16,11 +17,21 @@ CredentialStore::CredentialStore(const std::string& path, bool use_encryption)
     : config_path_(path), use_encryption_(use_encryption) {
     // Check for environment variable to override path
     const char* env_config = std::getenv("TRADING_CONFIG_PATH");
-    if (env_config) {
-        // Validate the environment path
+    if (env_config && *env_config) {
+        // An override may select another JSON file beside the configured file,
+        // but must not escape that directory through ".." or a symlink.
         std::filesystem::path env_path(env_config);
-        if (env_path.filename().extension() == ".json" && env_path.string().length() < 512) {
-            config_path_ = env_config;
+        if (env_path.extension() == ".json" && env_path.string().length() < 512) {
+            std::error_code ec;
+            const auto config_dir =
+                std::filesystem::weakly_canonical(std::filesystem::path(path), ec).parent_path();
+            if (!ec) {
+                const auto override_path = std::filesystem::canonical(env_path, ec);
+                const bool is_file = !ec && std::filesystem::is_regular_file(override_path, ec);
+                if (!ec && is_file && override_path.parent_path() == config_dir) {
+                    config_path_ = override_path.string();
+                }
+            }
         }
     }
 
