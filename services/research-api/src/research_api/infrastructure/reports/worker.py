@@ -34,6 +34,7 @@ from research_api.infrastructure.reports.mailer import SmtpMailer
 from research_api.infrastructure.reports.queue import PostgresReportQueue
 from research_api.infrastructure.reports.recipients import EnvRecipients
 from research_api.infrastructure.reports.renderer import HtmlReportRenderer
+from research_api.infrastructure.reports.symbols import PostgresContractSymbols
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ def run_once(env=None) -> int:
         parse_address_list(env.get("REPORT_PORTFOLIOS")),
         build_strategy_detail,
         held=PostgresHeldDays(),
+        symbols=PostgresContractSymbols(),
     )
     queued = enqueue()
     sent = SendQueuedReports(

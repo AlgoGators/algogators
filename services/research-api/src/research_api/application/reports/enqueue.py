@@ -38,7 +38,16 @@ class EnqueueDailyReports:
     """
 
     def __init__(
-        self, registry, reader, published, queue, portfolio_ids, build_detail, now=None, held=None
+        self,
+        registry,
+        reader,
+        published,
+        queue,
+        portfolio_ids,
+        build_detail,
+        now=None,
+        held=None,
+        symbols=None,
     ):
         self.registry = registry
         self.reader = reader
@@ -46,6 +55,7 @@ class EnqueueDailyReports:
         self.queue = queue
         self.portfolio_ids = tuple(portfolio_ids)
         self.build_detail = build_detail  # (cfg, rows) -> detail dict | None
+        self.symbols = symbols  # roots -> {rows, missing} (the symbols reference), or None
         self.held = held or (lambda portfolio_id, day: False)
         self.now = now or (lambda: dt.datetime.now(NEW_YORK))
 
@@ -74,7 +84,14 @@ class EnqueueDailyReports:
             if detail is None:
                 skipped += 1
                 continue
-            payload = build_daily_payload(detail, pid, cfg["name"], today)
+            roots = [p["symbol"].replace(".v.0", "") for p in detail["positions"]]
+            payload = build_daily_payload(
+                detail,
+                pid,
+                cfg["name"],
+                today,
+                symbols=self.symbols(roots) if self.symbols else None,
+            )
             self.queue.enqueue(REPORT_TYPE, pid, today, payload)
             queued += 1
         return EnqueueSummary(queued, skipped)

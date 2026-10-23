@@ -198,3 +198,31 @@ def composition(points):
             x + 0.02, y, f"{label}  {v / total * 100:.0f}%", va="center", fontsize=8.5, color=INK
         )
     return _png(fig)
+
+
+def drawdown(points):
+    """Percent below the running peak: an orange line under a zero baseline, worst point named."""
+    fig, ax = _figure(200)
+    xs = _dates([p[0] for p in points])
+    ys = [p[1] for p in points]
+    ax.plot(xs, ys, color=ORANGE, linewidth=2.2, solid_capstyle="round")
+    ax.fill_between(xs, ys, 0, color=ORANGE, alpha=0.07, linewidth=0)
+    ax.axhline(0, color=INK, linewidth=1)
+    low = min(range(len(ys)), key=ys.__getitem__)
+    if ys[low] < 0:
+        ax.scatter([xs[low]], [ys[low]], color=ORANGE, s=26, zorder=3)
+        ax.annotate(
+            f"{ys[low]:.2f}%",
+            (xs[low], ys[low]),
+            xytext=(0, -14),
+            textcoords="offset points",
+            ha="center",
+            fontsize=9,
+            color=INK,
+            fontweight="bold",
+        )
+    top = max(ys[low] * -0.25, 0.05) if ys[low] < 0 else 0.5
+    ax.set_ylim(min(ys) * 1.35 if min(ys) < 0 else -0.5, top)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p=None: f"{v:.1f}%"))
+    _date_axis(ax, len(xs))
+    return _png(fig)

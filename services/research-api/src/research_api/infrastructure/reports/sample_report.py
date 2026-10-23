@@ -103,13 +103,37 @@ def sample_payload(with_notice=True, days=30, seed=7):
             ],
         },
         "metrics": [
-            {"label": "Portfolio VaR", "value": "1.84%"},
-            {"label": "Total margin posted", "value": "$412,300"},
-            {"label": "Volatility", "value": "9.6%"},
-            {"label": "Cost per $1M traded", "value": "$7.80"},
+            {"label": "Realized PnL", "value": "+$1,190.00", "group": 0, "tone": "up"},
+            {"label": "Transaction costs", "value": "$25.40", "group": 0},
+            {"label": "Total cumulative return", "value": "4.21%", "group": 1, "tone": "up"},
+            {"label": "Volatility", "value": "9.60%", "group": 1},
+            {"label": "Margin posted", "value": "$412,300.00", "group": 2},
+            {"label": "Margin cushion", "value": "83.10%", "group": 2},
+            {"label": "Gross leverage", "value": "0.86x", "group": 3},
+            {"label": "Net leverage", "value": "0.24x", "group": 3},
         ],
+        "summary": {"margin_posted": 412300.0},
+        "previous_day": {
+            "label": "2026-10-20",
+            "metrics": [
+                {"label": "Total positions", "value": "6", "group": 0},
+                {"label": "Daily return", "value": "0.31%", "group": 0, "tone": "up"},
+                {"label": "Daily total PnL (net)", "value": "+$1,612.00", "group": 0, "tone": "up"},
+            ],
+        },
+        "symbols": {
+            "rows": [
+                {"db": "ES", "ib": "ES", "name": "E-mini S&P 500", "months": "HMUZ"},
+                {"db": "CL", "ib": "CL", "name": "Crude Oil", "months": "FGHJKMNQUVXZ"},
+            ],
+            "missing": ["6E"],
+        },
         "series": {
             "equity": equity,
+            "drawdown": [
+                {"date": e["date"], "value": -min(i, 6) * 0.2 + (0.4 if i > 6 else 0)}
+                for i, e in enumerate(equity[-14:])
+            ],
             "daily_pnl": pnl,
             "pnl_by_symbol": [
                 {"symbol": "ES", "value": 1612.5},

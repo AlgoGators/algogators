@@ -59,6 +59,7 @@ class HtmlReportRenderer(ReportRenderer):
         chart_rows = []
         for cid, title, data, draw in (
             ("equity", "Equity curve", report.equity, charts.equity_curve),
+            ("drawdown", "Drawdown from the peak", report.drawdown, charts.drawdown),
             ("daily_pnl", "Daily PnL", report.daily_pnl, charts.daily_pnl),
             ("pnl_by_symbol", "PnL by symbol", report.pnl_by_symbol, charts.pnl_by_symbol),
             ("composition", "Portfolio composition", report.composition, charts.composition),
