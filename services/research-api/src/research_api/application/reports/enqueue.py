@@ -33,15 +33,32 @@ class EnqueueDailyReports:
     reader:     fetch_detail_rows(strategy_type, portfolio_id) (the portfolio repository)
     published:  latest_published_day(portfolio_id) -> date | None (the investor repository)
     queue:      has_report(...) and enqueue(...) (PostgresReportQueue)
+    held:       held(portfolio_id, day) -> bool, a day approved without its e-mail (D-66) that the
+                desk has not released with Send yet; it is not queued until it is
     """
 
-    def __init__(self, registry, reader, published, queue, portfolio_ids, build_detail, now=None):
+    def __init__(
+        self,
+        registry,
+        reader,
+        published,
+        queue,
+        portfolio_ids,
+        build_detail,
+        now=None,
+        held=None,
+        symbols=None,
+        history=None,
+    ):
         self.registry = registry
         self.reader = reader
         self.published = published
         self.queue = queue
         self.portfolio_ids = tuple(portfolio_ids)
         self.build_detail = build_detail  # (cfg, rows) -> detail dict | None
+        self.history = history  # (portfolio_id, strategy_type) -> series dict, or None
+        self.symbols = symbols  # roots -> {rows, missing} (the symbols reference), or None
+        self.held = held or (lambda portfolio_id, day: False)
         self.now = now or (lambda: dt.datetime.now(NEW_YORK))
 
     def __call__(self):
@@ -61,12 +78,33 @@ class EnqueueDailyReports:
             if day != today or self.queue.has_report(REPORT_TYPE, pid, today):
                 skipped += 1
                 continue
+            if self.held(pid, today):
+                skipped += 1
+                continue
             rows = self.reader.fetch_detail_rows(cfg["strategy_type"], pid)
             detail = self.build_detail(cfg, rows)
             if detail is None:
                 skipped += 1
                 continue
-            payload = build_daily_payload(detail, pid, cfg["name"], today)
+            roots = [p["symbol"].replace(".v.0", "") for p in detail["positions"]]
+            payload = build_daily_payload(
+                detail,
+                pid,
+                cfg["name"],
+                today,
+                symbols=self.symbols(roots) if self.symbols else None,
+                history=self._history(pid, cfg),
+            )
             self.queue.enqueue(REPORT_TYPE, pid, today, payload)
             queued += 1
         return EnqueueSummary(queued, skipped)
+
+    def _history(self, pid, cfg):
+        """The history series, or none: a failed read costs the charts, never the report."""
+        if self.history is None:
+            return None
+        try:
+            return self.history(pid, cfg["strategy_type"])
+        except Exception:
+            logger.exception("report history for %s failed; sending without those charts", pid)
+            return None

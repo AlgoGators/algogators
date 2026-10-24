@@ -62,8 +62,8 @@
 
   <!-- notices -->
   {% for n in report.notices %}
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:22px 0 0 0;background:#F6F4EF;border-left:3px solid {{ '#14141A' if n.kind == 'info' else '#FF5C00' }};"><tr><td style="padding:16px 20px;">
-    <div style="font-size:15px;font-weight:700;color:#14141A;margin:0 0 6px 0;">{{ n.title }}</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:22px 0 0 0;background:#F6F4EF;border-left:3px solid {{ '#14141A' if n.kind == 'info' else '#D94A00' if n.kind == 'alert' else '#FF5C00' }};"><tr><td style="padding:{{ '12px' if n.kind in ('info', 'alert') else '16px' }} 20px;">
+    <div style="font-size:{{ 13 if n.kind in ('info', 'alert') else 15 }}px;font-weight:700;color:{{ '#D94A00' if n.kind == 'alert' else '#14141A' }};margin:0 0 6px 0;">{{ n.title }}</div>
     <div style="font-size:13px;color:#2B2A30;">{{ n.body }}</div>
     {% if n.footnote %}<div style="font-size:12px;font-weight:600;color:#14141A;margin-top:8px;">{{ n.footnote }}</div>{% endif %}
   </td></tr></table>
@@ -84,11 +84,16 @@
     </tr>
     {% endfor %}
   </table>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;">
+    <tr><td class="mono label" style="padding:3px 0;">Positions</td><td class="num r" style="font-weight:600;color:#14141A;">{{ report.positions|length }}</td></tr>
+    <tr><td class="mono label" style="padding:3px 0;">Total notional</td><td class="num r" style="font-weight:600;color:#14141A;">{{ fmt.money(report.total_notional, 2) }}</td></tr>
+    {% if report.margin_posted is not none %}<tr><td class="mono label" style="padding:3px 0;">Total margin posted</td><td class="num r" style="font-weight:600;color:#14141A;">{{ fmt.money(report.margin_posted, 2) }}</td></tr>{% endif %}
+  </table>
   {% endif %}
 
   <!-- executions -->
   {% if report.executions %}
-  {{ section("Executions") }}
+  {{ section("Daily executions") }}
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
     <tr><td class="th mono">Symbol</td><td class="th mono">Side</td><td class="th mono r">Quantity</td><td class="th mono r">Price</td><td class="th mono r">Notional</td><td class="th mono r">Cost</td></tr>
     {% for e in report.executions %}
@@ -102,13 +107,18 @@
     </tr>
     {% endfor %}
   </table>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;">
+    <tr><td class="mono label" style="padding:3px 0;">Total trades</td><td class="num r" style="font-weight:600;color:#14141A;">{{ report.executions|length }}</td></tr>
+    <tr><td class="mono label" style="padding:3px 0;">Total notional traded</td><td class="num r" style="font-weight:600;color:#14141A;">{{ fmt.money(report.total_traded, 2) }}</td></tr>
+    <tr><td class="mono label" style="padding:3px 0;">Today's transaction costs</td><td class="num r" style="font-weight:600;color:#14141A;">{{ fmt.money(report.total_cost, 2) }}</td></tr>
+  </table>
   {% endif %}
 
   <!-- realized -->
   {% if report.realized %}
-  {{ section("Realized PnL" ~ (" · " ~ report.realized_label if report.realized_label else "")) }}
+  {{ section("Yesterday's finalized position results" ~ (" · " ~ report.realized_label if report.realized_label else "")) }}
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-    <tr><td class="th mono">Symbol</td><td class="th mono r">Quantity</td><td class="th mono r">Entry</td><td class="th mono r">Exit</td><td class="th mono r">PnL</td></tr>
+    <tr><td class="th mono">Symbol</td><td class="th mono r">Quantity</td><td class="th mono r">Previous price</td><td class="th mono r">Latest price</td><td class="th mono r">Realized PnL</td></tr>
     {% for r in report.realized %}
     <tr>
       <td class="td" style="font-weight:600;color:#14141A;">{{ r.symbol }}</td>
@@ -123,6 +133,26 @@
   </table>
   {% endif %}
 
+  <!-- previous trading day -->
+  {% if report.previous_day %}
+  {{ section("Previous trading day" ~ (" · " ~ report.previous_day_label if report.previous_day_label else "")) }}
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+    {% for m in report.previous_day %}
+    <tr><td class="td" style="color:#6C6A66;">{{ m.label }}</td><td class="td num r {{ m.tone }}" style="font-weight:600;{% if not m.tone %}color:#14141A;{% endif %}">{{ m.value }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  <!-- metrics -->
+  {% if report.metrics %}
+  {{ section("Performance metrics") }}
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+    {% for m in report.metrics %}
+    <tr><td class="td" style="color:#6C6A66;{% if loop.previtem is defined and loop.previtem.group != m.group %}border-top:2px solid #14141A;{% endif %}">{{ m.label }}</td><td class="td num r {{ m.tone }}" style="font-weight:600;{% if not m.tone %}color:#14141A;{% endif %}{% if loop.previtem is defined and loop.previtem.group != m.group %}border-top:2px solid #14141A;{% endif %}">{{ m.value }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
   <!-- charts -->
   {% if charts %}
   {{ section("Performance") }}
@@ -130,16 +160,6 @@
   <div style="font-size:13px;font-weight:600;color:#14141A;margin:{{ '0' if loop.first else '26px' }} 0 8px 0;">{{ c.title }}</div>
   <img src="cid:{{ c.cid }}" width="640" alt="{{ c.title }}" style="width:100%;max-width:640px;">
   {% endfor %}
-  {% endif %}
-
-  <!-- metrics -->
-  {% if report.metrics %}
-  {{ section("Risk and efficiency") }}
-  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
-    {% for m in report.metrics %}
-    <tr><td class="td" style="color:#6C6A66;">{{ m.label }}</td><td class="td num r" style="font-weight:600;color:#14141A;">{{ m.value }}</td></tr>
-    {% endfor %}
-  </table>
   {% endif %}
 
   <!-- rollovers -->
@@ -151,6 +171,19 @@
     <div class="num" style="font-size:13px;color:#14141A;padding:3px 0;"><strong>{{ r.symbol }}</strong> &nbsp;<span class="muted">{{ r.current }}</span> &nbsp;&rarr;&nbsp; <strong>{{ r.next }}</strong></div>
     {% endfor %}
   </td></tr></table>
+  {% endif %}
+
+  <!-- symbols reference -->
+  {% if report.symbols %}
+  {{ section("Symbols reference") }}
+  <div class="mono muted" style="font-size:11px;margin:0 0 10px 0;"><strong>Month codes</strong> F=Jan, G=Feb, H=Mar, J=Apr, K=May, M=Jun, N=Jul, Q=Aug, U=Sep, V=Oct, X=Nov, Z=Dec</div>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+    <tr><td class="th mono">Symbol</td><td class="th mono">IB symbol</td><td class="th mono">Name</td><td class="th mono">Contract months</td></tr>
+    {% for r in report.symbols %}
+    <tr><td class="td" style="font-weight:600;color:#14141A;">{{ r.db_symbol }}</td><td class="td">{{ r.ib_symbol }}</td><td class="td">{{ r.name }}</td><td class="td mono" style="font-size:12px;">{{ r.months }}</td></tr>
+    {% endfor %}
+  </table>
+  {% if report.symbols_missing %}<div style="font-size:12px;color:#D94A00;margin-top:8px;"><strong>Note:</strong> metadata not found for: {{ report.symbols_missing|join(', ') }}.</div>{% endif %}
   {% endif %}
 
   <!-- footnotes + footer -->
