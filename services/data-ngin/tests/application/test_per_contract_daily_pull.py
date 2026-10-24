@@ -1,13 +1,15 @@
 from datetime import date
 from unittest.mock import MagicMock, patch
-import pytest
 
 from data_ngin.application.pipeline_tasks import write_contract_futures_readiness
 
 
 def test_write_contract_readiness_marks_complete():
     mock_readiness_repo = MagicMock()
-    with patch("data_ngin.infrastructure.repository.readiness_repository.ReadinessRepository", return_value=mock_readiness_repo):
+    with patch(
+        "data_ngin.infrastructure.repository.readiness_repository.ReadinessRepository",
+        return_value=mock_readiness_repo,
+    ):
         row = write_contract_futures_readiness(
             "new_config.yaml",
             date(2026, 10, 21),
@@ -27,7 +29,10 @@ def test_write_contract_readiness_marks_complete():
 
 def test_write_contract_readiness_marks_partial():
     mock_readiness_repo = MagicMock()
-    with patch("data_ngin.infrastructure.repository.readiness_repository.ReadinessRepository", return_value=mock_readiness_repo):
+    with patch(
+        "data_ngin.infrastructure.repository.readiness_repository.ReadinessRepository",
+        return_value=mock_readiness_repo,
+    ):
         row = write_contract_futures_readiness(
             "new_config.yaml",
             date(2026, 10, 21),

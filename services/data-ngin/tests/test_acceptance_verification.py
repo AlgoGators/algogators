@@ -1,11 +1,9 @@
 from unittest.mock import MagicMock
-import pytest
 
 from scripts.verify_acceptance_criteria import (
-    verify_immutability,
     verify_close_parity,
+    verify_immutability,
     verify_roll_coverage,
-    BASELINE_FINGERPRINTS,
 )
 
 

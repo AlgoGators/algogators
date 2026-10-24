@@ -4,7 +4,7 @@ from data_ngin.infrastructure.db_models import ContractOHLCV
 def test_contract_ohlcv_table_columns_and_keys():
     assert ContractOHLCV.__tablename__ == "contract_ohlcv_1d"
     assert ContractOHLCV.__table_args__["schema"] == "futures_data"
-    
+
     col_names = set(ContractOHLCV.__table__.columns.keys())
     expected_cols = {
         "instrument_id",

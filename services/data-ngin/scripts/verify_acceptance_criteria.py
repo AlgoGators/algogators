@@ -9,8 +9,7 @@ Verification script for Issue #37 Acceptance Criteria:
 import json
 import logging
 import os
-import sys
-from typing import Any, Dict
+from typing import Any
 
 import psycopg2
 from dotenv import load_dotenv
@@ -49,7 +48,7 @@ def get_connection():
     )
 
 
-def verify_immutability(conn) -> Dict[str, Any]:
+def verify_immutability(conn) -> dict[str, Any]:
     """Check (iii): Fingerprint immutability"""
     sql = """
     SELECT 'futures_data.ohlcv_1d' AS table_name, count(*) AS post_count,
@@ -76,15 +75,15 @@ def verify_immutability(conn) -> Dict[str, Any]:
     return results
 
 
-def verify_close_parity(conn) -> Dict[str, Any]:
+def verify_close_parity(conn) -> dict[str, Any]:
     """Check (ii): Close price parity"""
     sql = """
     SELECT count(*) AS total_compared,
            count(*) FILTER (WHERE ABS(v.close - c.close) > 1e-4) AS mismatch_count
     FROM futures_data.ohlcv_1d v
-    JOIN futures_data.ohlcv_1d_raw r 
+    JOIN futures_data.ohlcv_1d_raw r
       ON r.ts_event = v.time AND r.symbol = v.symbol
-    JOIN futures_data.contract_ohlcv_1d c 
+    JOIN futures_data.contract_ohlcv_1d c
       ON c.instrument_id = r.instrument_id AND c.date = v.time::date
     WHERE v.time::date NOT IN ('2026-09-12', '2026-09-15');
     """
@@ -98,30 +97,30 @@ def verify_close_parity(conn) -> Dict[str, Any]:
         }
 
 
-def verify_roll_coverage(conn) -> Dict[str, Any]:
+def verify_roll_coverage(conn) -> dict[str, Any]:
     """Check (i): Roll date dual-contract coverage"""
     sql = """
     WITH roll_events AS (
-        SELECT 
-            ts_event::date AS roll_date, 
-            symbol AS root, 
+        SELECT
+            ts_event::date AS roll_date,
+            symbol AS root,
             instrument_id AS new_id,
             LAG(instrument_id) OVER (PARTITION BY symbol ORDER BY ts_event) AS prior_id
         FROM futures_data.ohlcv_1d_raw
     ),
     rolls_only AS (
-        SELECT * 
-        FROM roll_events 
+        SELECT *
+        FROM roll_events
         WHERE prior_id IS NOT NULL AND prior_id <> new_id
     )
-    SELECT 
+    SELECT
         count(*) AS total_rolls,
         count(*) FILTER (WHERE c_prior.instrument_id IS NOT NULL AND c_new.instrument_id IS NOT NULL) AS covered_rolls,
         count(*) FILTER (WHERE c_prior.instrument_id IS NULL OR c_new.instrument_id IS NULL) AS missing_rolls
     FROM rolls_only r
-    LEFT JOIN futures_data.contract_ohlcv_1d c_prior 
+    LEFT JOIN futures_data.contract_ohlcv_1d c_prior
            ON c_prior.instrument_id = r.prior_id AND c_prior.date = r.roll_date
-    LEFT JOIN futures_data.contract_ohlcv_1d c_new 
+    LEFT JOIN futures_data.contract_ohlcv_1d c_new
            ON c_new.instrument_id = r.new_id AND c_new.date = r.roll_date;
     """
     with conn.cursor() as cur:

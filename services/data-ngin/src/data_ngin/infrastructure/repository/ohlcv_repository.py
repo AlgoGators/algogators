@@ -286,7 +286,9 @@ class OhlcvRepository(Inserter):
         ]
         cols_sql = ", ".join(f'"{c}"' if c == "date" else c for c in columns)
         update_cols = [c for c in columns if c not in ("instrument_id", "date")]
-        updates_sql = ", ".join(f'"{c}" = EXCLUDED."{c}"' if c == "date" else f"{c} = EXCLUDED.{c}" for c in update_cols)
+        updates_sql = ", ".join(
+            f'"{c}" = EXCLUDED."{c}"' if c == "date" else f"{c} = EXCLUDED.{c}" for c in update_cols
+        )
 
         insert_sql = f"""
         INSERT INTO {schema}.{table} ({cols_sql})
@@ -296,10 +298,7 @@ class OhlcvRepository(Inserter):
             loaded_at = now()
         """
 
-        tuple_values = [
-            tuple(r.get(col) for col in columns)
-            for r in records
-        ]
+        tuple_values = [tuple(r.get(col) for col in columns) for r in records]
 
         try:
             with self.connection.cursor() as cur:

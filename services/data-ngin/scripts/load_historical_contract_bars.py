@@ -11,15 +11,17 @@ import logging
 import os
 import sys
 import tarfile
-from datetime import UTC, datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any
 
 import databento as db
 from dotenv import load_dotenv
 
 # Ensure local imports work whether run from repo root or package dir
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../platform/db/src")))
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../platform/db/src"))
+)
 
 from data_ngin.domain.contract_filter import is_outright_contract, parse_contract_symbol
 from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository
@@ -34,7 +36,7 @@ logger = logging.getLogger("load_historical_contract_bars")
 def process_dbn_stream(
     dbn_bytes: bytes,
     repo: OhlcvRepository,
-    definitions: Optional[Dict[str, Any]] = None,
+    definitions: dict[str, Any] | None = None,
     chunk_size: int = 5000,
 ) -> tuple[int, int]:
     """
@@ -46,7 +48,7 @@ def process_dbn_stream(
     if df.empty:
         return 0, 0
 
-    records: List[Dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
     spreads_dropped = 0
 
     # Ensure index (ts_event) is accessible as a column or series
@@ -64,31 +66,33 @@ def process_dbn_stream(
             spreads_dropped += 1
             continue
 
-        ts_event = getattr(row, "ts_event")
+        ts_event = row.ts_event
         if isinstance(ts_event, datetime):
             bar_date = ts_event.date()
         else:
             bar_date = datetime.fromisoformat(str(ts_event)).date()
 
-        inst_id = str(getattr(row, "instrument_id"))
-        
+        inst_id = str(row.instrument_id)
+
         # Resolve expiration date if definition record is available
         expiration = None
         if definitions and inst_id in definitions:
             expiration = definitions[inst_id].get("expiration")
 
-        records.append({
-            "instrument_id": inst_id,
-            "date": bar_date,
-            "root": root,
-            "raw_symbol": str(raw_sym),
-            "expiration": expiration,
-            "open": float(getattr(row, "open")),
-            "high": float(getattr(row, "high")),
-            "low": float(getattr(row, "low")),
-            "close": float(getattr(row, "close")),
-            "volume": int(getattr(row, "volume")),
-        })
+        records.append(
+            {
+                "instrument_id": inst_id,
+                "date": bar_date,
+                "root": root,
+                "raw_symbol": str(raw_sym),
+                "expiration": expiration,
+                "open": float(row.open),
+                "high": float(row.high),
+                "low": float(row.low),
+                "close": float(row.close),
+                "volume": int(row.volume),
+            }
+        )
 
     if records:
         repo.insert_contract_bars(records, chunk_size=chunk_size)
@@ -96,7 +100,9 @@ def process_dbn_stream(
     return len(records), spreads_dropped
 
 
-def process_tar_archive(tar_path: str, repo: OhlcvRepository, chunk_size: int = 5000) -> tuple[int, int]:
+def process_tar_archive(
+    tar_path: str, repo: OhlcvRepository, chunk_size: int = 5000
+) -> tuple[int, int]:
     """
     Process all .ohlcv-1d.dbn.zst members inside a tar archive.
     """
@@ -144,15 +150,17 @@ def main() -> None:
             load_dotenv(p)
             break
 
-    repo = OhlcvRepository(config={
-        "database": {
-            "target_schema": "futures_data",
-            "table": "contract_ohlcv_1d",
+    repo = OhlcvRepository(
+        config={
+            "database": {
+                "target_schema": "futures_data",
+                "table": "contract_ohlcv_1d",
+            }
         }
-    })
+    )
     repo.connect()
 
-    tar_files: List[str] = []
+    tar_files: list[str] = []
     if args.tar:
         for t in args.tar:
             tar_files.extend(glob.glob(t))

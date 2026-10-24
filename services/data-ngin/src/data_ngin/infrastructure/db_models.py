@@ -82,7 +82,6 @@ class ContractOHLCV(Base):
     loaded_at: Column = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
-
 def get_engine() -> Engine:
     """
     Create and configure a SQLAlchemy Engine to connect to the TimescaleDB database.

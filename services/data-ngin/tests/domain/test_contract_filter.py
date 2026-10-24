@@ -1,4 +1,3 @@
-import pytest
 from data_ngin.domain.contract_filter import (
     is_outright_contract,
     parse_contract_symbol,

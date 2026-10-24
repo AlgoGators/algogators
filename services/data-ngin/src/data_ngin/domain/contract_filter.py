@@ -5,7 +5,6 @@ per AlgoGators/algogators#37.
 """
 
 import re
-from typing import Optional, Tuple
 
 MONTH_CODES = set("FGHJKMNQUVXZ")
 
@@ -13,7 +12,7 @@ MONTH_CODES = set("FGHJKMNQUVXZ")
 OUTRIGHT_SYMBOL_REGEX = re.compile(r"^([A-Z0-9]+?)([FGHJKMNQUVXZ])(\d{1,4})$")
 
 
-def is_outright_contract(symbol: str, instrument_class: Optional[str] = "F") -> bool:
+def is_outright_contract(symbol: str, instrument_class: str | None = "F") -> bool:
     """
     Determine if a given contract symbol and instrument class represents an outright future.
 
@@ -37,13 +36,10 @@ def is_outright_contract(symbol: str, instrument_class: Optional[str] = "F") -> 
 
     # Symbol must match outright contract pattern (root + month code + year)
     match = OUTRIGHT_SYMBOL_REGEX.match(symbol)
-    if not match:
-        return False
-
-    return True
+    return bool(match)
 
 
-def parse_contract_symbol(symbol: str) -> Tuple[str, str, str]:
+def parse_contract_symbol(symbol: str) -> tuple[str, str, str]:
     """
     Parse an outright futures symbol into root, month code, and year.
 
