@@ -48,6 +48,7 @@ class EnqueueDailyReports:
         now=None,
         held=None,
         symbols=None,
+        history=None,
     ):
         self.registry = registry
         self.reader = reader
@@ -55,6 +56,7 @@ class EnqueueDailyReports:
         self.queue = queue
         self.portfolio_ids = tuple(portfolio_ids)
         self.build_detail = build_detail  # (cfg, rows) -> detail dict | None
+        self.history = history  # (portfolio_id, strategy_type) -> series dict, or None
         self.symbols = symbols  # roots -> {rows, missing} (the symbols reference), or None
         self.held = held or (lambda portfolio_id, day: False)
         self.now = now or (lambda: dt.datetime.now(NEW_YORK))
@@ -91,7 +93,18 @@ class EnqueueDailyReports:
                 cfg["name"],
                 today,
                 symbols=self.symbols(roots) if self.symbols else None,
+                history=self._history(pid, cfg),
             )
             self.queue.enqueue(REPORT_TYPE, pid, today, payload)
             queued += 1
         return EnqueueSummary(queued, skipped)
+
+    def _history(self, pid, cfg):
+        """The history series, or none: a failed read costs the charts, never the report."""
+        if self.history is None:
+            return None
+        try:
+            return self.history(pid, cfg["strategy_type"])
+        except Exception:
+            logger.exception("report history for %s failed; sending without those charts", pid)
+            return None

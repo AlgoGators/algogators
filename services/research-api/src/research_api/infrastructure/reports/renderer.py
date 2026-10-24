@@ -60,7 +60,20 @@ class HtmlReportRenderer(ReportRenderer):
         for cid, title, data, draw in (
             ("equity", "Equity curve", report.equity, charts.equity_curve),
             ("drawdown", "Drawdown from the peak", report.drawdown, charts.drawdown),
+            (
+                "leverage",
+                "Leverage",
+                report.leverage,
+                lambda pts: charts.leverage(pts, report.net_leverage),
+            ),
+            ("margin", "Margin posted", report.margin_history, charts.margin_posted),
             ("daily_pnl", "Daily PnL", report.daily_pnl, charts.daily_pnl),
+            (
+                "contracts",
+                "Contracts traded per day",
+                report.contracts_per_day,
+                charts.contracts_per_day,
+            ),
             ("pnl_by_symbol", "PnL by symbol", report.pnl_by_symbol, charts.pnl_by_symbol),
             ("composition", "Portfolio composition", report.composition, charts.composition),
         ):

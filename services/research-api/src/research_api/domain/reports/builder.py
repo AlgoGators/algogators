@@ -309,6 +309,7 @@ def build_daily_payload(
     report_date: date,
     rollovers: Sequence[Mapping[str, str]] = (),
     symbols: Mapping[str, Any] | None = None,
+    history: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The queue payload for one portfolio's report on report_date."""
     return {
@@ -323,7 +324,7 @@ def build_daily_payload(
         "executions": _executions(detail),
         "realized": _realized(detail, report_date),
         "metrics": _metrics(detail),
-        "series": {**_series(detail), "drawdown": _drawdown(detail)},
+        "series": {**_series(detail), "drawdown": _drawdown(detail), **dict(history or {})},
         "summary": {"margin_posted": float(detail["metrics"]["marginPosted"])},
         "previous_day": _previous_day(detail, report_date),
         "symbols": dict(symbols or {}),

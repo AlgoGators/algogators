@@ -134,6 +134,20 @@ def sample_payload(with_notice=True, days=30, seed=7):
                 {"date": e["date"], "value": -min(i, 6) * 0.2 + (0.4 if i > 6 else 0)}
                 for i, e in enumerate(equity[-14:])
             ],
+            "leverage": [
+                {"date": e["date"], "value": 1.6 + 0.05 * (i % 5)}
+                for i, e in enumerate(equity[-14:])
+            ],
+            "net_leverage": [
+                {"date": e["date"], "value": 0.7 + 0.04 * (i % 4)}
+                for i, e in enumerate(equity[-14:])
+            ],
+            "margin_posted": [
+                {"date": e["date"], "value": 400000 + 3000 * i} for i, e in enumerate(equity[-14:])
+            ],
+            "contracts_per_day": [
+                {"date": e["date"], "value": 4 + (i * 3) % 9} for i, e in enumerate(equity[-14:])
+            ],
             "daily_pnl": pnl,
             "pnl_by_symbol": [
                 {"symbol": "ES", "value": 1612.5},

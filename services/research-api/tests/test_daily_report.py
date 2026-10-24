@@ -98,7 +98,10 @@ def test_render_has_every_section_and_inline_images():
         "brandmark",
         "equity",
         "drawdown",
+        "leverage",
+        "margin",
         "daily_pnl",
+        "contracts",
         "pnl_by_symbol",
         "composition",
     }

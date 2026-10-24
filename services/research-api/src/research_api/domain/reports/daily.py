@@ -94,6 +94,10 @@ class DailyReport:
     pnl_by_symbol: tuple = ()  # ((symbol, value), ...)
     composition: tuple = ()  # ((label, value), ...)
     drawdown: tuple = ()  # ((date label, percent below the peak), ...)
+    leverage: tuple = ()  # ((date label, gross leverage), ...)
+    net_leverage: tuple = ()  # ((date label, net leverage), ...)
+    margin_history: tuple = ()  # ((date label, margin posted), ...)
+    contracts_per_day: tuple = ()  # ((date label, contracts traded), ...)
     rollovers: tuple = ()
     footnotes: tuple = ()
     margin_posted: float | None = None
@@ -284,6 +288,10 @@ def parse_daily_report(payload):
         pnl_by_symbol=_series(series, "pnl_by_symbol", "symbol"),
         composition=_series(series, "composition", "label"),
         drawdown=_series(series, "drawdown", "date"),
+        leverage=_series(series, "leverage", "date"),
+        net_leverage=_series(series, "net_leverage", "date"),
+        margin_history=_series(series, "margin_posted", "date"),
+        contracts_per_day=_series(series, "contracts_per_day", "date"),
         rollovers=rollovers,
         footnotes=tuple(footnotes),
         margin_posted=float(margin) if isinstance(margin, (int, float)) else None,

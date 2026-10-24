@@ -29,6 +29,7 @@ from research_api.infrastructure.investor.repositories import PostgresInvestorRe
 from research_api.infrastructure.portfolio.repositories import PostgresPortfolioRepository
 from research_api.infrastructure.portfolio.strategy_registry import PostgresStrategyRegistry
 from research_api.infrastructure.reports.book import PostgresBookSentMarker
+from research_api.infrastructure.reports.history import PostgresReportHistory
 from research_api.infrastructure.reports.holds import PostgresHeldDays
 from research_api.infrastructure.reports.mailer import SmtpMailer
 from research_api.infrastructure.reports.queue import PostgresReportQueue
@@ -66,6 +67,7 @@ def run_once(env=None) -> int:
         build_strategy_detail,
         held=PostgresHeldDays(),
         symbols=PostgresContractSymbols(),
+        history=PostgresReportHistory(),
     )
     queued = enqueue()
     sent = SendQueuedReports(
