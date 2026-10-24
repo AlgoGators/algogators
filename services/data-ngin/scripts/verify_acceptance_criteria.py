@@ -9,7 +9,9 @@ import sys
 
 # Ensure local imports resolve
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../platform/db/src")))
+sys.path.insert(
+    0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../platform/db/src"))
+)
 
 from data_ngin.ops.contract_verification import run_all_checks
 
