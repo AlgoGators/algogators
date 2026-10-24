@@ -12,8 +12,8 @@ from datetime import date, timedelta
 from itertools import pairwise
 from typing import Any
 
+from research_api.domain.reports.cme_calendar import CLOSURES, GROUP_OF_ROOT
 from research_api.domain.reports.daily import SCHEMA_VERSION, money, percent, signed_money
-from research_api.domain.reports.holidays import HOLIDAYS
 
 DAILY_CHART_DAYS = 30
 COMPOSITION_TOP = 7
@@ -26,8 +26,16 @@ FOOTNOTES = (
 )
 
 
-def holiday_name(day: date) -> str | None:
-    return HOLIDAYS.get(day.isoformat())
+def holiday_name(day: date, roots: Sequence[str] = ()) -> str | None:
+    """The CME closure on day when it closed every product group the book holds, else None."""
+    closure = CLOSURES.get(day.isoformat())
+    if closure is None:
+        return None
+    name, closes = closure
+    if "all" in closes:
+        return name
+    groups = {GROUP_OF_ROOT[r] for r in roots if r in GROUP_OF_ROOT}
+    return name if groups and groups <= closes else None
 
 
 _MONITOR = "Please monitor these positions closely."
@@ -42,7 +50,9 @@ def _notice(kind: str, title: str, body: str, footnote: str = "") -> dict[str, s
     return {"kind": kind, "title": title, "body": body, "footnote": footnote}
 
 
-def calendar_notices(report_date: date, settled: bool = False) -> list[dict[str, str]]:
+def calendar_notices(
+    report_date: date, settled: bool = False, roots: Sequence[str] = ()
+) -> list[dict[str, str]]:
     """The day-before banners: why yesterday's PnL may be missing, in trade-ngin's wording.
 
     Yesterday is the settled day. When it was a Saturday, a Sunday or a market holiday and the
@@ -53,7 +63,7 @@ def calendar_notices(report_date: date, settled: bool = False) -> list[dict[str,
     day = report_date - timedelta(days=1)
     label = day.isoformat()
     weekday = day.weekday()  # Monday is 0
-    holiday = holiday_name(day)
+    holiday = holiday_name(day, roots)
     if weekday == 6:
         body = (
             f"Agricultural futures settlement prices for Sunday ({label}) are not yet "
@@ -116,6 +126,11 @@ def _no_session(label: str) -> str:
 
 def _symbol(name: str) -> str:
     return name.replace(".v.0", "")
+
+
+def _roots(detail: Mapping[str, Any]) -> list[str]:
+    held = [*detail["positions"], *detail["finalizedPositions"]]
+    return sorted({_symbol(p["symbol"]) for p in held})
 
 
 def _signed(quantity: float, notional: float) -> float:
@@ -301,7 +316,9 @@ def build_daily_payload(
         "report_date": report_date.isoformat(),
         "portfolio_id": portfolio_id,
         "portfolio_name": portfolio_name,
-        "notices": calendar_notices(report_date, settled=bool(detail["finalizedPositions"])),
+        "notices": calendar_notices(
+            report_date, settled=bool(detail["finalizedPositions"]), roots=_roots(detail)
+        ),
         "positions": _positions(detail),
         "executions": _executions(detail),
         "realized": _realized(detail, report_date),

@@ -124,3 +124,15 @@ def test_the_payload_carries_trade_ngins_metric_groups_and_the_drawdown():
     assert report.margin_posted is not None and report.drawdown
     assert all(v <= 0 for _, v in report.drawdown)
     assert report.previous_day and report.previous_day_label == "2026-10-20"
+
+
+def test_cme_closure_applies_only_when_every_held_group_was_closed():
+    from research_api.domain.reports.builder import holiday_name
+
+    good_friday = date(2026, 4, 3)  # CME rates and FX settled; equity index, energy, metals closed
+    assert holiday_name(good_friday, ["ES", "CL", "GC"]) == "Good Friday"
+    assert holiday_name(good_friday, ["ES", "ZN"]) is None  # ZN settled
+    assert holiday_name(good_friday) is None  # unknown book: a partial closure is not a closure
+    assert holiday_name(date(2025, 1, 9), ["ES"]) == "National Day of Mourning (Jimmy Carter)"
+    assert holiday_name(date(2025, 1, 9), ["ES", "CL"]) is None  # NYSE closed, CME traded the rest
+    assert holiday_name(date(2025, 12, 25), []) == "Christmas Day"  # every group closed
