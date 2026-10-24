@@ -75,37 +75,42 @@ def verify_immutability(conn: Any) -> dict[str, Any]:
 
 def verify_close_parity(conn: Any) -> dict[str, Any]:
     """Check (ii): Close price parity against continuous .v.0 series"""
-    sql_total = """
-    SELECT count(*) AS total_compared
+    sql = """
+    SELECT count(*) AS total_compared,
+           count(*) FILTER (WHERE ABS(v.close - c.close) > 1e-4) AS mismatch_count
     FROM futures_data.ohlcv_1d v
     JOIN futures_data.ohlcv_1d_raw r
       ON r.ts_event = v.time AND r.symbol = v.symbol
     JOIN futures_data.contract_ohlcv_1d c
       ON c.instrument_id = r.instrument_id AND c.date = v.time::date;
     """
-    sql_mismatches = """
-    SELECT v.time::date AS mismatch_date, count(*) AS cnt
-    FROM futures_data.ohlcv_1d v
-    JOIN futures_data.ohlcv_1d_raw r
-      ON r.ts_event = v.time AND r.symbol = v.symbol
-    JOIN futures_data.contract_ohlcv_1d c
-      ON c.instrument_id = r.instrument_id AND c.date = v.time::date
-    WHERE ABS(v.close - c.close) > 1e-4
-    GROUP BY mismatch_date
-    ORDER BY mismatch_date;
-    """
     with conn.cursor() as cur:
-        cur.execute(sql_total)
-        total = cur.fetchone()[0]
-        cur.execute(sql_mismatches)
-        mismatches_by_date = {str(d): cnt for d, cnt in cur.fetchall()}
-        total_mismatches = sum(mismatches_by_date.values())
-        return {
+        cur.execute(sql)
+        total, mismatches = cur.fetchone()
+        result: dict[str, Any] = {
             "total_compared": total,
-            "total_mismatches": total_mismatches,
-            "mismatches_by_date": mismatches_by_date,
-            "passed": total_mismatches == 0,
+            "mismatch_count": mismatches,
+            "passed": mismatches == 0,
         }
+        if mismatches > 0:
+            try:
+                cur.execute(
+                    """
+                    SELECT v.time::date AS mismatch_date, count(*) AS cnt
+                    FROM futures_data.ohlcv_1d v
+                    JOIN futures_data.ohlcv_1d_raw r
+                      ON r.ts_event = v.time AND r.symbol = v.symbol
+                    JOIN futures_data.contract_ohlcv_1d c
+                      ON c.instrument_id = r.instrument_id AND c.date = v.time::date
+                    WHERE ABS(v.close - c.close) > 1e-4
+                    GROUP BY mismatch_date
+                    ORDER BY mismatch_date;
+                    """
+                )
+                result["mismatches_by_date"] = {str(d): cnt for d, cnt in cur.fetchall()}
+            except Exception:
+                pass
+        return result
 
 
 def verify_roll_coverage(conn: Any) -> dict[str, Any]:
