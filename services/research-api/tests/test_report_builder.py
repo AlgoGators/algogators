@@ -94,3 +94,45 @@ def test_calendar_notices_follow_the_weekday_and_the_holiday_table():
     assert calendar_notices(date(2026, 10, 26))[0]["title"] == "Yesterday was Sunday"  # Monday
     assert calendar_notices(date(2026, 10, 21)) == []  # Wednesday
     assert calendar_notices(date(2025, 12, 26))[0]["title"] == "Yesterday was Christmas Day"
+
+
+def test_a_closed_day_says_nothing_was_executed_in_trade_ngins_words():
+    kinds = [n["kind"] for n in calendar_notices(date(2025, 12, 26))]
+    assert kinds == ["holiday", "info", "alert"]
+    alert = calendar_notices(date(2025, 12, 26))[2]
+    assert alert["title"] == "No Executions"
+    assert alert["body"].startswith("Since yesterday (2025-12-25) was a market holiday")
+    saturday = calendar_notices(date(2026, 10, 25))
+    assert "the next trading" in saturday[2]["body"]
+    sunday = calendar_notices(date(2026, 10, 26))
+    assert "agricultural contracts" in sunday[1]["body"]
+
+
+def test_a_day_with_settled_positions_gets_only_the_partial_banner():
+    (only,) = calendar_notices(date(2025, 12, 26), settled=True)
+    assert only["body"].startswith("Some futures settlement prices for 2025-12-25")
+    assert only["footnote"] == "Please monitor these positions closely."
+
+
+def test_the_payload_carries_trade_ngins_metric_groups_and_the_drawdown():
+    payload = build_daily_payload(
+        _detail(), "QT_CONSERVATIVE", "QT Conservative", date(2026, 10, 21)
+    )
+    report = parse_daily_report(payload)
+    assert [m.group for m in report.metrics] == sorted(m.group for m in report.metrics)
+    assert {m.group for m in report.metrics} == {0, 1, 2, 3}
+    assert report.margin_posted is not None and report.drawdown
+    assert all(v <= 0 for _, v in report.drawdown)
+    assert report.previous_day and report.previous_day_label == "2026-10-20"
+
+
+def test_cme_closure_applies_only_when_every_held_group_was_closed():
+    from research_api.domain.reports.builder import holiday_name
+
+    good_friday = date(2026, 4, 3)  # CME rates and FX settled; equity index, energy, metals closed
+    assert holiday_name(good_friday, ["ES", "CL", "GC"]) == "Good Friday"
+    assert holiday_name(good_friday, ["ES", "ZN"]) is None  # ZN settled
+    assert holiday_name(good_friday) is None  # unknown book: a partial closure is not a closure
+    assert holiday_name(date(2025, 1, 9), ["ES"]) == "National Day of Mourning (Jimmy Carter)"
+    assert holiday_name(date(2025, 1, 9), ["ES", "CL"]) is None  # NYSE closed, CME traded the rest
+    assert holiday_name(date(2025, 12, 25), []) == "Christmas Day"  # every group closed

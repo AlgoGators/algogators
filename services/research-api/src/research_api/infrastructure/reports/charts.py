@@ -198,3 +198,80 @@ def composition(points):
             x + 0.02, y, f"{label}  {v / total * 100:.0f}%", va="center", fontsize=8.5, color=INK
         )
     return _png(fig)
+
+
+def _line(points, color=ORANGE):
+    xs = _dates([p[0] for p in points])
+    return xs, [p[1] for p in points], color
+
+
+def leverage(gross, net=()):
+    """Gross leverage in orange and net in ink, each labelled at its last point."""
+    fig, ax = _figure(200)
+    ys_all = []
+    for points, color in ((gross, ORANGE), (net, INK)):
+        if not points:
+            continue
+        xs, ys, color = _line(points, color)
+        ax.plot(xs, ys, color=color, linewidth=2.0, solid_capstyle="round")
+        ax.annotate(
+            f"{ys[-1]:.2f}x",
+            (xs[-1], ys[-1]),
+            xytext=(0, 8),
+            textcoords="offset points",
+            ha="right",
+            fontsize=9,
+            color=color,
+            fontweight="bold",
+        )
+        ys_all += ys
+    lo, hi = min([*ys_all, 0]), max(ys_all)
+    ax.set_ylim(lo - (hi - lo or 1) * 0.08, hi + (hi - lo or 1) * 0.22)
+    ax.axhline(0, color=INK, linewidth=1)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p=None: f"{v:.1f}x"))
+    _date_axis(ax, len(ys_all))
+    return _png(fig)
+
+
+def margin_posted(points):
+    """Margin posted per day: a single line, latest value labelled."""
+    return equity_curve(points)
+
+
+def contracts_per_day(points):
+    """Contracts traded per day as ink bars."""
+    fig, ax = _figure(200)
+    xs = _dates([p[0] for p in points])
+    ax.bar(xs, [p[1] for p in points], color=INK, width=0.62, linewidth=0)
+    ax.axhline(0, color=INK, linewidth=1)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p=None: f"{v:,.0f}"))
+    _date_axis(ax, len(xs))
+    return _png(fig)
+
+
+def drawdown(points):
+    """Percent below the running peak: an orange line under a zero baseline, worst point named."""
+    fig, ax = _figure(200)
+    xs = _dates([p[0] for p in points])
+    ys = [p[1] for p in points]
+    ax.plot(xs, ys, color=ORANGE, linewidth=2.2, solid_capstyle="round")
+    ax.fill_between(xs, ys, 0, color=ORANGE, alpha=0.07, linewidth=0)
+    ax.axhline(0, color=INK, linewidth=1)
+    low = min(range(len(ys)), key=ys.__getitem__)
+    if ys[low] < 0:
+        ax.scatter([xs[low]], [ys[low]], color=ORANGE, s=26, zorder=3)
+        ax.annotate(
+            f"{ys[low]:.2f}%",
+            (xs[low], ys[low]),
+            xytext=(0, -14),
+            textcoords="offset points",
+            ha="center",
+            fontsize=9,
+            color=INK,
+            fontweight="bold",
+        )
+    top = max(ys[low] * -0.25, 0.05) if ys[low] < 0 else 0.5
+    ax.set_ylim(min(ys) * 1.35 if min(ys) < 0 else -0.5, top)
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _p=None: f"{v:.1f}%"))
+    _date_axis(ax, len(xs))
+    return _png(fig)

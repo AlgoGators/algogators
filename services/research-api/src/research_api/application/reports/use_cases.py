@@ -23,7 +23,9 @@ class SendQueuedReports:
     point: the error is on the row for whoever enqueued it.
     """
 
-    def __init__(self, queue, renderer, mailer, recipients, approvers, excluded=(), limit=50):
+    def __init__(
+        self, queue, renderer, mailer, recipients, approvers, excluded=(), limit=50, book_sent=None
+    ):
         self.queue = queue
         self.renderer = renderer
         self.mailer = mailer
@@ -31,6 +33,7 @@ class SendQueuedReports:
         self.approvers = approvers
         self.excluded = excluded
         self.limit = limit
+        self.book_sent = book_sent  # a BookSentMarker, or None to leave the record to the engine
 
     def __call__(self):
         sent = failed = 0
@@ -54,9 +57,20 @@ class SendQueuedReports:
             else:
                 self.queue.mark_sent(item.id)
                 sent += 1
+                self._record_book_sent(item)
         return SendSummary(sent=sent, failed=failed)
 
     def _render(self, item):
         if item.report_type != "daily_trading":
             raise ReportPayloadError(f"unknown report_type {item.report_type!r}")
         return self.renderer.render_daily(parse_daily_report(item.payload))
+
+    def _record_book_sent(self, item):
+        """Tell the engine the day's book went out. It never undoes the send or fails the row:
+        the email is already delivered, so a retry would mail the fund twice."""
+        if self.book_sent is None:
+            return
+        try:
+            self.book_sent.mark_book_sent(item.portfolio_id, item.payload["report_date"])
+        except Exception:
+            logger.exception("report %s sent but the book's sent_at was not recorded", item.id)
