@@ -147,3 +147,26 @@ def build_definition_map(tar_paths: list[str]) -> dict[str, date]:
         m = extract_definitions_from_tar(p)
         unified.update(m)
     return unified
+
+
+def resolve_contract_expiration(
+    root: str,
+    month_code: str,
+    year_str: str,
+    bar_date: date,
+) -> date | None:
+    """
+    Resolve outright contract expiration date using year string and CME specifications.
+    """
+    if len(year_str) == 1:
+        decade = (bar_date.year // 10) * 10
+        full_year = decade + int(year_str)
+        if full_year < bar_date.year - 1:
+            full_year += 10
+        elif full_year > bar_date.year + 8:
+            full_year -= 10
+    elif len(year_str) == 2:
+        full_year = 2000 + int(year_str)
+    else:
+        full_year = int(year_str)
+    return get_cme_expiration_fallback(root, month_code, full_year)

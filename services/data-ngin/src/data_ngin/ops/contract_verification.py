@@ -74,24 +74,37 @@ def verify_immutability(conn: Any) -> dict[str, Any]:
 
 
 def verify_close_parity(conn: Any) -> dict[str, Any]:
-    """Check (ii): Close price parity"""
-    sql = """
-    SELECT count(*) AS total_compared,
-           count(*) FILTER (WHERE ABS(v.close - c.close) > 1e-4) AS mismatch_count
+    """Check (ii): Close price parity against continuous .v.0 series"""
+    sql_total = """
+    SELECT count(*) AS total_compared
+    FROM futures_data.ohlcv_1d v
+    JOIN futures_data.ohlcv_1d_raw r
+      ON r.ts_event = v.time AND r.symbol = v.symbol
+    JOIN futures_data.contract_ohlcv_1d c
+      ON c.instrument_id = r.instrument_id AND c.date = v.time::date;
+    """
+    sql_mismatches = """
+    SELECT v.time::date AS mismatch_date, count(*) AS cnt
     FROM futures_data.ohlcv_1d v
     JOIN futures_data.ohlcv_1d_raw r
       ON r.ts_event = v.time AND r.symbol = v.symbol
     JOIN futures_data.contract_ohlcv_1d c
       ON c.instrument_id = r.instrument_id AND c.date = v.time::date
-    WHERE v.time::date NOT IN ('2026-09-12', '2026-09-15');
+    WHERE ABS(v.close - c.close) > 1e-4
+    GROUP BY mismatch_date
+    ORDER BY mismatch_date;
     """
     with conn.cursor() as cur:
-        cur.execute(sql)
-        total, mismatches = cur.fetchone()
+        cur.execute(sql_total)
+        total = cur.fetchone()[0]
+        cur.execute(sql_mismatches)
+        mismatches_by_date = {str(d): cnt for d, cnt in cur.fetchall()}
+        total_mismatches = sum(mismatches_by_date.values())
         return {
             "total_compared": total,
-            "mismatch_count": mismatches,
-            "passed": mismatches == 0,
+            "total_mismatches": total_mismatches,
+            "mismatches_by_date": mismatches_by_date,
+            "passed": total_mismatches == 0,
         }
 
 

@@ -139,3 +139,20 @@ def should_retry_run(result: dict[str, Any], try_number: int, max_tries: int) ->
     published_through = result.get("published_through")
     published = published_through is None or published_through >= result["bar_date"]
     return should_retry_for_missing(result["missing"], try_number, max_tries, published)
+
+
+def run_contract_close(config_name: str, bar_date: date) -> dict[str, Any]:
+    """Pull per-contract bars for the 40 roots for bar date `bar_date`."""
+    from data_ngin.application.close_pipeline import run_contract_close_pipeline
+    from data_ngin.utils.dynamic_loader import load_config
+
+    path = config_path(config_name)
+    logging.info(f"Running daily contract pipeline {config_name} for {bar_date}, config={path}")
+    return run_contract_close_pipeline(load_config(path), bar_date)
+
+
+def should_retry_contract_run(result: dict[str, Any], try_number: int, max_tries: int) -> bool:
+    """Whether a contract run's result should fail the try so Airflow retries it."""
+    from data_ngin.application.close_pipeline import should_retry_contract_run as should_retry
+
+    return should_retry(result, try_number, max_tries)

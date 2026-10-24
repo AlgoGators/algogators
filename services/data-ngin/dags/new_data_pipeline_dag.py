@@ -57,6 +57,21 @@ def write_readiness(result: dict) -> None:
 
 
 @task
+def run_contract_pipeline() -> dict:
+    context = get_current_context()
+    bar_date = pipeline_tasks.bar_date_from_context(context)
+    result = pipeline_tasks.run_contract_close(CONFIG_NAME, bar_date)
+    ti = context["ti"]
+    if pipeline_tasks.should_retry_contract_run(
+        result, ti.try_number, getattr(ti, "max_tries", RETRIES)
+    ):
+        raise RuntimeError(
+            f"{bar_date}: contract bars still missing for {result['missing']}; retrying"
+        )
+    return result
+
+
+@task
 def write_contract_readiness(result: dict) -> None:
     """
     Upsert ops.data_ready for dataset 'futures_contract_ohlcv_1d' (AlgoGators/algogators#37).
@@ -66,9 +81,9 @@ def write_contract_readiness(result: dict) -> None:
     context = get_current_context()
     bar_date = pipeline_tasks.bar_date_from_context(context)
     run_id = pipeline_tasks.run_id_from_context(context)
-    expected_count = len(result.get("expected", []))
+    expected_count = result.get("expected", 40)
     missing_list = result.get("missing", [])
-    loaded_count = expected_count - len(missing_list)
+    loaded_count = result.get("loaded", 0)
     pipeline_tasks.write_contract_futures_readiness(
         CONFIG_NAME,
         bar_date,
@@ -76,6 +91,7 @@ def write_contract_readiness(result: dict) -> None:
         expected=expected_count,
         loaded=loaded_count,
         missing=missing_list,
+        failed=(result.get("status") == "failed"),
     )
 
 
@@ -97,10 +113,14 @@ def write_contract_readiness(result: dict) -> None:
     max_active_runs=1,
 )
 def new_data_pipeline_dag():
-    # write_readiness and write_contract_readiness run when the pull succeeded
+    # Continuous pull and readiness
     pipeline_result = run_pipeline()
     write_readiness(pipeline_result)
-    write_contract_readiness(pipeline_result)
+
+    # Per-contract daily pull runs after continuous close
+    contract_result = run_contract_pipeline()
+    pipeline_result >> contract_result
+    write_contract_readiness(contract_result)
 
 
 new_data_pipeline_dag()

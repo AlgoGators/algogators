@@ -352,6 +352,28 @@ class OhlcvRepository(Inserter):
                 "loaded_at": row[10],
             }
 
+    def get_contract_roots_for_date(
+        self,
+        bar_date: Any,
+        roots: list[str],
+        schema: str = "futures_data",
+        table: str = "contract_ohlcv_1d",
+    ) -> set[str]:
+        """
+        Returns the set of roots that have at least one outright bar on `bar_date`.
+        """
+        self._ensure_connected()
+        if not self.connection:
+            raise RuntimeError("Database connection is not established.")
+        query = f"""
+        SELECT DISTINCT root
+        FROM {schema}.{table}
+        WHERE "date" = %s AND root = ANY(%s)
+        """
+        with self.connection.cursor() as cur:
+            cur.execute(query, (bar_date, roots))
+            return {row[0] for row in cur.fetchall()}
+
     def close(self) -> None:
         """
         Returns the connection to the shared pool (rather than closing the

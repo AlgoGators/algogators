@@ -41,6 +41,49 @@ AVAILABILITY_POLL_SECONDS = 300.0
 
 CONTRACT_COLUMNS = ("dataSymbol", "instrumentType", "exchange", "underlying")
 
+CONTRACT_ROOTS: tuple[str, ...] = (
+    "6A",
+    "6B",
+    "6C",
+    "6E",
+    "6J",
+    "6L",
+    "6M",
+    "6N",
+    "6S",
+    "CL",
+    "ES",
+    "GC",
+    "GF",
+    "HE",
+    "HG",
+    "HO",
+    "KE",
+    "LE",
+    "M2K",
+    "MBT",
+    "MES",
+    "MNQ",
+    "MYM",
+    "NG",
+    "NQ",
+    "PL",
+    "RB",
+    "RTY",
+    "SI",
+    "UB",
+    "YM",
+    "ZC",
+    "ZF",
+    "ZL",
+    "ZM",
+    "ZN",
+    "ZR",
+    "ZS",
+    "ZT",
+    "ZW",
+)
+
 
 def bar_date_for_run(reference: datetime) -> date:
     """
@@ -400,3 +443,123 @@ def should_retry_for_missing(
     Airflow's try_number starts at 1 and max_tries equals the task's retries.
     """
     return bool(missing) and published and try_number <= max_tries
+
+
+def run_contract_close_pipeline(
+    config: dict[str, Any],
+    bar_date: date,
+    roots: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """
+    Fetch and ingest daily per-contract bars for the 40 roots for bar date `bar_date`.
+    Evaluates loaded vs missing roots and returns a readiness summary.
+    """
+    import databento as db
+
+    from data_ngin.domain.contract_definition import resolve_contract_expiration
+    from data_ngin.domain.contract_filter import is_outright_contract, parse_contract_symbol
+    from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository
+
+    target_roots = sorted(set(roots) if roots is not None else set(CONTRACT_ROOTS))
+
+    contracts = load_contracts(config)
+    expected_today = expected_contracts(contracts, bar_date)
+    if not expected_today:
+        logger.info("No contract traded on %s (UTC); skipping per-contract pull.", bar_date)
+        return {
+            "bar_date": bar_date.isoformat(),
+            "skipped": True,
+            "expected": len(target_roots),
+            "loaded": 0,
+            "missing": [],
+            "status": "complete",
+        }
+
+    api_key = os.getenv("DATABENTO_API_KEY")
+    repository = OhlcvRepository(config)
+    repository.connect()
+
+    if api_key:
+        client = db.Historical(api_key)
+        start_str = bar_date.isoformat()
+        end_str = (bar_date + timedelta(days=1)).isoformat()
+        for root in target_roots:
+            try:
+                parent_sym = f"{root}.FUT"
+                data = client.timeseries.get_range(
+                    dataset="GLBX.MDP3",
+                    symbols=parent_sym,
+                    schema="ohlcv-1d",
+                    start=start_str,
+                    end=end_str,
+                    stype_in="parent",
+                    stype_out="instrument_id",
+                )
+                df = data.to_df()
+                if df.empty:
+                    continue
+                df = df.reset_index()
+                records = []
+                for row in df.itertuples(index=False):
+                    raw_sym = getattr(row, "symbol", None)
+                    if not raw_sym or not is_outright_contract(str(raw_sym)):
+                        continue
+                    try:
+                        sym_root, month_code, year_str = parse_contract_symbol(str(raw_sym))
+                    except ValueError:
+                        continue
+                    inst_id = str(row.instrument_id)
+                    exp = resolve_contract_expiration(sym_root, month_code, year_str, bar_date)
+                    records.append(
+                        {
+                            "instrument_id": inst_id,
+                            "date": bar_date,
+                            "root": sym_root,
+                            "raw_symbol": str(raw_sym),
+                            "expiration": exp,
+                            "open": float(row.open),
+                            "high": float(row.high),
+                            "low": float(row.low),
+                            "close": float(row.close),
+                            "volume": int(row.volume),
+                        }
+                    )
+                if records:
+                    repository.insert_contract_bars(records)
+            except Exception as e:
+                logger.warning(
+                    "Failed to fetch contract bars for root %s on %s: %s", root, bar_date, e
+                )
+
+    try:
+        present_roots = repository.get_contract_roots_for_date(bar_date, target_roots)
+    finally:
+        repository.close()
+
+    missing = sorted(set(target_roots) - present_roots)
+    loaded = len(present_roots)
+    expected = len(target_roots)
+
+    if not missing and loaded == expected:
+        status = "complete"
+    elif loaded > 0:
+        status = "partial"
+    else:
+        status = "failed"
+
+    return {
+        "bar_date": bar_date.isoformat(),
+        "skipped": False,
+        "expected": expected,
+        "loaded": loaded,
+        "missing": missing,
+        "status": status,
+    }
+
+
+def should_retry_contract_run(result: dict[str, Any], try_number: int, max_tries: int) -> bool:
+    """
+    Whether a per-contract run with missing roots should fail so Airflow retries it:
+    only while retries remain.
+    """
+    return bool(result.get("missing")) and try_number <= max_tries
