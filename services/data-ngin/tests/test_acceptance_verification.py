@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock
 
-from scripts.verify_acceptance_criteria import (
+from data_ngin.ops.contract_verification import (
     verify_close_parity,
     verify_immutability,
     verify_roll_coverage,
