@@ -34,6 +34,7 @@ from data_ngin.application.trading_calendar import expected_contracts
 logger = logging.getLogger(__name__)
 
 DATASET = "futures_ohlcv_1d"
+CONTRACT_DATASET = "futures_contract_ohlcv_1d"
 BACKFILL_DAYS = 5
 DEFAULT_AVAILABILITY_WAIT_MINUTES = 60.0
 AVAILABILITY_POLL_SECONDS = 300.0
@@ -335,6 +336,50 @@ def write_readiness(
     expected_symbols = [storage_symbol(config, c["dataSymbol"]) for c in expected_today]
     present = {s for s, _d in _present_bars(config, expected_symbols, bar_date, bar_date)}
     row = readiness_row(expected_symbols, present, bar_date, run_id, failed=failed)
+    repository = ReadinessRepository(config)
+    try:
+        repository.upsert_readiness(row)
+    finally:
+        repository.close()
+    return row
+
+
+def write_contract_readiness(
+    config: dict[str, Any],
+    bar_date: date,
+    run_id: str | None,
+    failed: bool = False,
+    expected: int | None = None,
+    loaded: int | None = None,
+    missing: list[str] | None = None,
+) -> dict[str, Any]:
+    """
+    Upsert ops.data_ready row for dataset 'futures_contract_ohlcv_1d'.
+    """
+    from data_ngin.infrastructure.repository.readiness_repository import ReadinessRepository
+
+    exp_count = expected if expected is not None else 0
+    load_count = loaded if loaded is not None else 0
+    miss_list = missing if missing is not None else []
+
+    if not miss_list and exp_count == load_count and exp_count > 0:
+        status = "complete"
+    elif failed:
+        status = "failed"
+    else:
+        status = "partial"
+
+    row = {
+        "dataset": CONTRACT_DATASET,
+        "bar_date": bar_date,
+        "expected": exp_count,
+        "loaded": load_count,
+        "missing": miss_list,
+        "status": status,
+        "run_id": run_id,
+        "finished_at": datetime.now(UTC),
+    }
+
     repository = ReadinessRepository(config)
     try:
         repository.upsert_readiness(row)

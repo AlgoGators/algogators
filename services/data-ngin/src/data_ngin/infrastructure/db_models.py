@@ -2,7 +2,17 @@ from typing import ClassVar
 
 from dotenv import load_dotenv
 from platform_db import DatabaseConfig
-from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine
+from sqlalchemy import (
+    BigInteger,
+    Column,
+    Date,
+    DateTime,
+    Float,
+    Integer,
+    String,
+    create_engine,
+    func,
+)
 from sqlalchemy.engine.base import Engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.orm.session import Session
@@ -35,6 +45,42 @@ class OHLCV(Base):
     low: Column = Column(Float, nullable=False)
     close: Column = Column(Float, nullable=False)
     volume: Column = Column(Integer, nullable=False)
+
+
+class ContractOHLCV(Base):
+    """
+    SQLAlchemy model representing the `contract_ohlcv_1d` table in the `futures_data` schema.
+    Stores per-contract daily bars across each outright contract's entire lifecycle.
+
+    Attributes:
+        instrument_id (str): The unique instrument identifier (primary key).
+        date (date): Calendar date of the bar in UTC (primary key).
+        root (str): The underlying future root symbol (e.g. 'ES', 'CL', 'ZB').
+        raw_symbol (str): The specific contract symbol (e.g. 'ESZ24', 'CLV25').
+        expiration (date, optional): Contract expiration date from definition record.
+        open (float): Opening price.
+        high (float): High price.
+        low (float): Low price.
+        close (float): Close price.
+        volume (int): Total traded volume for the session.
+        loaded_at (datetime): Ingestion timestamp.
+    """
+
+    __tablename__ = "contract_ohlcv_1d"
+    __table_args__: ClassVar[dict[str, str]] = {"schema": "futures_data"}
+
+    instrument_id: Column = Column(String, primary_key=True, nullable=False)
+    date: Column = Column(Date, primary_key=True, nullable=False)
+    root: Column = Column(String, nullable=False)
+    raw_symbol: Column = Column(String, nullable=False)
+    expiration: Column = Column(Date, nullable=True)
+    open: Column = Column(Float, nullable=False)
+    high: Column = Column(Float, nullable=False)
+    low: Column = Column(Float, nullable=False)
+    close: Column = Column(Float, nullable=False)
+    volume: Column = Column(BigInteger, nullable=False)
+    loaded_at: Column = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
 
 
 def get_engine() -> Engine:

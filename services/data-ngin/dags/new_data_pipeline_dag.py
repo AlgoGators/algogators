@@ -56,6 +56,29 @@ def write_readiness(result: dict) -> None:
     )
 
 
+@task
+def write_contract_readiness(result: dict) -> None:
+    """
+    Upsert ops.data_ready for dataset 'futures_contract_ohlcv_1d' (AlgoGators/algogators#37).
+    """
+    if result["skipped"]:
+        return
+    context = get_current_context()
+    bar_date = pipeline_tasks.bar_date_from_context(context)
+    run_id = pipeline_tasks.run_id_from_context(context)
+    expected_count = len(result.get("expected", []))
+    missing_list = result.get("missing", [])
+    loaded_count = expected_count - len(missing_list)
+    pipeline_tasks.write_contract_futures_readiness(
+        CONFIG_NAME,
+        bar_date,
+        run_id,
+        expected=expected_count,
+        loaded=loaded_count,
+        missing=missing_list,
+    )
+
+
 @dag(
     dag_id="new_data_pipeline_dag",
     default_args=default_args,
@@ -74,12 +97,10 @@ def write_readiness(result: dict) -> None:
     max_active_runs=1,
 )
 def new_data_pipeline_dag():
-    # write_readiness is the leaf and runs only when the pull succeeded, so a
-    # failed pull is a failed DAG run (and a GitHub issue plus a 'failed'
-    # readiness row via on_failure_callback). A trailing always-run task (a
-    # trigger rule that ignores upstream failures) would turn that into a
-    # green run.
-    write_readiness(run_pipeline())
+    # write_readiness and write_contract_readiness run when the pull succeeded
+    pipeline_result = run_pipeline()
+    write_readiness(pipeline_result)
+    write_contract_readiness(pipeline_result)
 
 
 new_data_pipeline_dag()
