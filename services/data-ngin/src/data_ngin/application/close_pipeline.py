@@ -29,16 +29,84 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from data_ngin.application.trading_calendar import expected_contracts
+from data_ngin.application.trading_calendar import contract_traded_on, expected_contracts
 
 logger = logging.getLogger(__name__)
 
 DATASET = "futures_ohlcv_1d"
+CONTRACT_DATASET = "futures_contract_ohlcv_1d"
 BACKFILL_DAYS = 5
 DEFAULT_AVAILABILITY_WAIT_MINUTES = 60.0
 AVAILABILITY_POLL_SECONDS = 300.0
 
 CONTRACT_COLUMNS = ("dataSymbol", "instrumentType", "exchange", "underlying")
+
+CONTRACT_ROOTS: tuple[str, ...] = (
+    "6A",
+    "6B",
+    "6C",
+    "6E",
+    "6J",
+    "6L",
+    "6M",
+    "6N",
+    "6S",
+    "CL",
+    "ES",
+    "GC",
+    "GF",
+    "HE",
+    "HG",
+    "HO",
+    "KE",
+    "LE",
+    "M2K",
+    "MBT",
+    "MES",
+    "MNQ",
+    "MYM",
+    "NG",
+    "NQ",
+    "PL",
+    "RB",
+    "RTY",
+    "SI",
+    "UB",
+    "YM",
+    "ZC",
+    "ZF",
+    "ZL",
+    "ZM",
+    "ZN",
+    "ZR",
+    "ZS",
+    "ZT",
+    "ZW",
+)
+
+
+# A per-contract root trades on the calendar of the contract-CSV row that shares its
+# exchange hours: the micros and their full-size contracts are one CSV row each.
+CONTRACT_CSV_SYMBOL = {"MES": "ES", "MNQ": "NQ", "MYM": "YM", "M2K": "RTY"}
+
+
+def expected_contract_roots(
+    contracts: list[dict[str, Any]], day: date, roots: Iterable[str] | None = None
+) -> list[str]:
+    """
+    The roots expected to have a per-contract bar for UTC day `day`: those whose exchange
+    calendar has a session overlapping it (MBT alone on a Saturday since it went 24/7, no
+    grains or livestock on a Sunday or on their holidays). A root with no CSV row is
+    expected (fail safe, as contract_traded_on).
+    """
+    by_symbol = {c["dataSymbol"]: c for c in contracts}
+    target = sorted(set(roots) if roots is not None else set(CONTRACT_ROOTS))
+    expected = []
+    for root in target:
+        row = by_symbol.get(CONTRACT_CSV_SYMBOL.get(root, root))
+        if row is None or contract_traded_on(row, day):
+            expected.append(root)
+    return expected
 
 
 def bar_date_for_run(reference: datetime) -> date:
@@ -343,6 +411,73 @@ def write_readiness(
     return row
 
 
+def write_contract_readiness(
+    config: dict[str, Any],
+    bar_date: date,
+    run_id: str | None,
+    failed: bool = False,
+    expected: int | None = None,
+    loaded: int | None = None,
+    missing: list[str] | None = None,
+) -> dict[str, Any]:
+    """
+    Upsert ops.data_ready row for dataset 'futures_contract_ohlcv_1d'. Called without
+    counts (the failure callback), it counts the roots from what the table holds for
+    `bar_date`, so a failed row still says how many roots were expected and loaded.
+    """
+    from data_ngin.infrastructure.repository.readiness_repository import ReadinessRepository
+
+    if expected is None:
+        expected, loaded, missing = contract_readiness_counts(config, bar_date)
+    exp_count = expected
+    load_count = loaded if loaded is not None else 0
+    miss_list = missing if missing is not None else []
+
+    if not miss_list and exp_count == load_count and exp_count > 0:
+        status = "complete"
+    elif failed:
+        status = "failed"
+    else:
+        status = "partial"
+
+    row = {
+        "dataset": CONTRACT_DATASET,
+        "bar_date": bar_date,
+        "expected": exp_count,
+        "loaded": load_count,
+        "missing": miss_list,
+        "status": status,
+        "run_id": run_id,
+        "finished_at": datetime.now(UTC),
+    }
+
+    repository = ReadinessRepository(config)
+    try:
+        repository.upsert_readiness(row)
+    finally:
+        repository.close()
+    return row
+
+
+def contract_readiness_counts(
+    config: dict[str, Any], bar_date: date, roots: Iterable[str] | None = None
+) -> tuple[int, int, list[str]]:
+    """(expected, loaded, missing roots) for `bar_date` from what contract_ohlcv_1d holds."""
+    from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository
+
+    target_roots = expected_contract_roots(load_contracts(config), bar_date, roots)
+    if not target_roots:
+        return 0, 0, []
+    repository = OhlcvRepository(config)
+    repository.connect()
+    try:
+        present = repository.get_contract_roots_for_date(bar_date, target_roots)
+    finally:
+        repository.close()
+    missing = sorted(set(target_roots) - set(present))
+    return len(target_roots), len(target_roots) - len(missing), missing
+
+
 def should_retry_for_missing(
     missing: list[str], try_number: int, max_tries: int, published: bool = True
 ) -> bool:
@@ -355,3 +490,161 @@ def should_retry_for_missing(
     Airflow's try_number starts at 1 and max_tries equals the task's retries.
     """
     return bool(missing) and published and try_number <= max_tries
+
+
+def run_contract_close_pipeline(
+    config: dict[str, Any],
+    bar_date: date,
+    roots: Iterable[str] | None = None,
+    days: int = BACKFILL_DAYS,
+) -> dict[str, Any]:
+    """
+    Fetch and ingest per-contract daily bars for the 40 roots over D-days .. D, like the
+    continuous pull: a bar first fetched provisionally (an early partial print) is
+    overwritten by the vendor's final bar on the next runs. The readiness summary counts
+    the roots expected on D.
+    """
+    import databento as db
+    import pandas as pd
+
+    from data_ngin.domain.contract_definition import (
+        extract_definitions_from_df,
+        lookup_expiration,
+    )
+    from data_ngin.domain.contract_filter import is_outright_contract, parse_contract_symbol
+    from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository
+
+    contracts = load_contracts(config)
+    target_roots = expected_contract_roots(contracts, bar_date, roots)
+    if not target_roots:
+        logger.info("No contract traded on %s (UTC); skipping per-contract pull.", bar_date)
+        return {
+            "bar_date": bar_date.isoformat(),
+            "skipped": True,
+            "expected": 0,
+            "loaded": 0,
+            "missing": [],
+            "status": "complete",
+        }
+
+    api_key = os.getenv("DATABENTO_API_KEY")
+    repository = OhlcvRepository(config)
+    repository.connect()
+
+    if api_key:
+        client = db.Historical(api_key)
+        start_str = (bar_date - timedelta(days=days)).isoformat()
+        end_str = (bar_date + timedelta(days=1)).isoformat()
+        fetch_roots = sorted(set(roots) if roots is not None else set(CONTRACT_ROOTS))
+        for root in fetch_roots:
+            try:
+                parent_sym = f"{root}.FUT"
+                data = client.timeseries.get_range(
+                    dataset="GLBX.MDP3",
+                    symbols=parent_sym,
+                    schema="ohlcv-1d",
+                    start=start_str,
+                    end=end_str,
+                    stype_in="parent",
+                    stype_out="instrument_id",
+                )
+                df = data.to_df()
+                if df.empty:
+                    continue
+                df = df.reset_index()
+                # Expiration comes from the same day's definition records, matched on
+                # (instrument_id, raw_symbol); never from a calendar rule.
+                definitions = extract_definitions_from_df(
+                    client.timeseries.get_range(
+                        dataset="GLBX.MDP3",
+                        symbols=parent_sym,
+                        schema="definition",
+                        start=start_str,
+                        end=end_str,
+                        stype_in="parent",
+                        stype_out="instrument_id",
+                    )
+                    .to_df()
+                    .reset_index()
+                )
+                records = []
+                for row in df.itertuples(index=False):
+                    raw_sym = getattr(row, "symbol", None)
+                    if not raw_sym or not is_outright_contract(str(raw_sym)):
+                        continue
+                    try:
+                        sym_root, _month_code, _year_str = parse_contract_symbol(str(raw_sym))
+                    except ValueError:
+                        continue
+                    inst_id = str(row.instrument_id)
+                    row_date = pd.Timestamp(row.ts_event).tz_convert("UTC").date()
+                    exp = lookup_expiration(definitions, inst_id, str(raw_sym), row_date)
+                    if exp is None:
+                        logger.warning(
+                            "No definition for %s (%s) on %s; stored without expiration",
+                            raw_sym,
+                            inst_id,
+                            row_date,
+                        )
+                    records.append(
+                        {
+                            "instrument_id": inst_id,
+                            "date": row_date,
+                            "root": sym_root,
+                            "raw_symbol": str(raw_sym),
+                            "expiration": exp,
+                            "open": float(row.open),
+                            "high": float(row.high),
+                            "low": float(row.low),
+                            "close": float(row.close),
+                            "volume": int(row.volume),
+                        }
+                    )
+                if records:
+                    repository.insert_contract_bars(records)
+            except Exception as e:
+                logger.warning(
+                    "Failed to fetch contract bars for root %s on %s: %s", root, bar_date, e
+                )
+
+    try:
+        present_roots = repository.get_contract_roots_for_date(bar_date, target_roots)
+    finally:
+        repository.close()
+
+    missing = sorted(set(target_roots) - present_roots)
+    loaded = len(present_roots)
+    expected = len(target_roots)
+
+    if not missing and loaded == expected:
+        status = "complete"
+    elif loaded > 0:
+        status = "partial"
+    else:
+        status = "failed"
+
+    return {
+        "bar_date": bar_date.isoformat(),
+        "skipped": False,
+        "expected": expected,
+        "loaded": loaded,
+        "missing": missing,
+        "status": status,
+    }
+
+
+def should_retry_contract_run(result: dict[str, Any], try_number: int, max_tries: int) -> bool:
+    """
+    Whether a per-contract run with missing roots should fail so Airflow retries it:
+    only while retries remain.
+    """
+    return bool(result.get("missing")) and try_number <= max_tries
+
+
+def contract_run_failed(result: dict[str, Any]) -> bool:
+    """
+    Whether a per-contract run that will not be retried loaded no expected root at all, so
+    the DAG run must fail (and raise its alert) instead of finishing green with a
+    'failed' readiness row.
+    """
+    return not result.get("skipped") and result.get("status") == "failed"
