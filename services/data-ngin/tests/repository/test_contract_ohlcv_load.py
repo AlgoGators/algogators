@@ -57,3 +57,27 @@ def test_roots_for_date_count_only_bars_with_an_expiration():
     assert repo.get_contract_roots_for_date("2026-10-21", ["GC", "ZN"]) == {"GC"}
     sql = cur.execute.call_args[0][0]
     assert "expiration IS NOT NULL" in sql
+
+
+def test_upsert_keeps_a_stored_expiration_when_the_new_one_is_null():
+    repo = OhlcvRepository(config={"database": {}})
+    repo.connection = MagicMock()
+    repo._ensure_connected = MagicMock()
+    record = {
+        "instrument_id": "41271",
+        "date": "2026-10-21",
+        "root": "GC",
+        "raw_symbol": "GCZ6",
+        "expiration": None,
+        "open": 1.0,
+        "high": 1.0,
+        "low": 1.0,
+        "close": 1.0,
+        "volume": 1,
+    }
+    with patch("psycopg2.extras.execute_values") as mock_exec_values:
+        repo.insert_contract_bars([record])
+    sql = " ".join(mock_exec_values.call_args[0][1].split())
+    assert "AS stored" in sql
+    assert "expiration = COALESCE(EXCLUDED.expiration, stored.expiration)" in sql
+    assert "expiration = EXCLUDED.expiration," not in sql

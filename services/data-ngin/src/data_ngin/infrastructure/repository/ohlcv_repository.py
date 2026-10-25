@@ -262,7 +262,8 @@ class OhlcvRepository(Inserter):
     ) -> None:
         """
         Batch upserts per-contract OHLCV records using execute_values for high throughput.
-        Matches primary key on (instrument_id, date) with ON CONFLICT DO UPDATE.
+        Matches primary key on (instrument_id, date) with ON CONFLICT DO UPDATE; a NULL
+        expiration never replaces a stored one.
         """
         if not records:
             self.logger.info("No contract records to insert; skipping.")
@@ -285,13 +286,14 @@ class OhlcvRepository(Inserter):
             "volume",
         ]
         cols_sql = ", ".join(f'"{c}"' if c == "date" else c for c in columns)
-        update_cols = [c for c in columns if c not in ("instrument_id", "date")]
-        updates_sql = ", ".join(
-            f'"{c}" = EXCLUDED."{c}"' if c == "date" else f"{c} = EXCLUDED.{c}" for c in update_cols
-        )
+        update_cols = [c for c in columns if c not in ("instrument_id", "date", "expiration")]
+        updates_sql = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+        # A bar re-pulled without a fitting definition (an empty or short definition response
+        # under the D-5..D re-pull) comes in with expiration NULL: keep the stored date.
+        updates_sql += ", expiration = COALESCE(EXCLUDED.expiration, stored.expiration)"
 
         insert_sql = f"""
-        INSERT INTO {schema}.{table} ({cols_sql})
+        INSERT INTO {schema}.{table} AS stored ({cols_sql})
         VALUES %s
         ON CONFLICT (instrument_id, "date") DO UPDATE SET
             {updates_sql},
