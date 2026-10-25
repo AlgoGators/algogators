@@ -397,11 +397,15 @@ def write_contract_readiness(
     missing: list[str] | None = None,
 ) -> dict[str, Any]:
     """
-    Upsert ops.data_ready row for dataset 'futures_contract_ohlcv_1d'.
+    Upsert ops.data_ready row for dataset 'futures_contract_ohlcv_1d'. Called without
+    counts (the failure callback), it counts the roots from what the table holds for
+    `bar_date`, so a failed row still says how many roots were expected and loaded.
     """
     from data_ngin.infrastructure.repository.readiness_repository import ReadinessRepository
 
-    exp_count = expected if expected is not None else 0
+    if expected is None:
+        expected, loaded, missing = contract_readiness_counts(config, bar_date)
+    exp_count = expected
     load_count = loaded if loaded is not None else 0
     miss_list = missing if missing is not None else []
 
@@ -429,6 +433,23 @@ def write_contract_readiness(
     finally:
         repository.close()
     return row
+
+
+def contract_readiness_counts(
+    config: dict[str, Any], bar_date: date, roots: Iterable[str] | None = None
+) -> tuple[int, int, list[str]]:
+    """(expected, loaded, missing roots) for `bar_date` from what contract_ohlcv_1d holds."""
+    from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository
+
+    target_roots = sorted(set(roots) if roots is not None else set(CONTRACT_ROOTS))
+    repository = OhlcvRepository(config)
+    repository.connect()
+    try:
+        present = repository.get_contract_roots_for_date(bar_date, target_roots)
+    finally:
+        repository.close()
+    missing = sorted(set(target_roots) - set(present))
+    return len(target_roots), len(target_roots) - len(missing), missing
 
 
 def should_retry_for_missing(

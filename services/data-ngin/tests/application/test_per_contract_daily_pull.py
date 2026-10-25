@@ -207,3 +207,31 @@ def test_daily_pull_leaves_expiration_empty_without_a_definition(monkeypatch):
     (records,), _ = mock_repo.insert_contract_bars.call_args
     assert records[0]["expiration"] is None
     assert res["missing"] == ["ZN"]
+
+
+def test_failed_contract_row_counts_the_roots_from_the_table():
+    # The failure callback passes no counts. The row must still say 40 expected and how
+    # many roots are in the table, not 'failed, expected 0' (production's 2026-10-12 row).
+    from data_ngin.application.close_pipeline import CONTRACT_ROOTS
+
+    mock_readiness_repo = MagicMock()
+    mock_repo = MagicMock()
+    mock_repo.get_contract_roots_for_date.return_value = set(CONTRACT_ROOTS) - {"ZC", "ZS"}
+    with (
+        patch(
+            "data_ngin.infrastructure.repository.readiness_repository.ReadinessRepository",
+            return_value=mock_readiness_repo,
+        ),
+        patch(
+            "data_ngin.infrastructure.repository.ohlcv_repository.OhlcvRepository",
+            return_value=mock_repo,
+        ),
+    ):
+        row = write_contract_futures_readiness(
+            "new_config.yaml", date(2026, 10, 12), "scheduled__2026-10-13", failed=True
+        )
+    assert row["expected"] == 40
+    assert row["loaded"] == 38
+    assert row["missing"] == ["ZC", "ZS"]
+    assert row["status"] == "failed"
+    mock_readiness_repo.upsert_readiness.assert_called_once_with(row)
