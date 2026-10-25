@@ -8,6 +8,8 @@ Verification routines for Issue #37 Acceptance Criteria:
 import json
 import logging
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 import psycopg2
@@ -15,15 +17,21 @@ from dotenv import load_dotenv
 
 logger = logging.getLogger("contract_verification")
 
-BASELINE_FINGERPRINTS = {
-    "futures_data.ohlcv_1d": {
-        "count": 166477,
-        "fingerprint": "ec786348663adab6c2690d065f909922",
-    },
-    "futures_data.ohlcv_1d_raw": {
-        "count": 166477,
-        "fingerprint": "d2d47dfa1c65e0bffa086dd4e0974e0a",
-    },
+# Check (iii) fingerprints every column of both continuous tables, row by row in key order. There
+# is no stored baseline: a load takes one before it writes and compares after it
+# (continuous_tables_unchanged), so the check proves that load changed nothing.
+FINGERPRINT_SQL = {
+    "futures_data.ohlcv_1d": """
+        SELECT count(*), md5(string_agg(
+            ROW(time, symbol, open, high, low, close, volume)::text, E'\\n' ORDER BY time, symbol))
+        FROM futures_data.ohlcv_1d
+    """,
+    "futures_data.ohlcv_1d_raw": """
+        SELECT count(*), md5(string_agg(
+            ROW(ts_event, symbol, instrument_id, open, high, low, close, volume, rtype, publisher_id)::text,
+            E'\\n' ORDER BY ts_event, symbol, instrument_id))
+        FROM futures_data.ohlcv_1d_raw
+    """,
 }
 
 
@@ -48,31 +56,46 @@ def get_connection() -> Any:
     )
 
 
-def verify_immutability(conn: Any) -> dict[str, Any]:
-    """Check (iii): Fingerprint immutability"""
-    sql = """
-    SELECT 'futures_data.ohlcv_1d' AS table_name, count(*) AS post_count,
-           md5(string_agg(time::text || symbol || close::text, '' ORDER BY time, symbol)) AS post_fingerprint
-    FROM futures_data.ohlcv_1d
-    UNION ALL
-    SELECT 'futures_data.ohlcv_1d_raw' AS table_name, count(*) AS post_count,
-           md5(string_agg(ts_event::text || symbol || close::text, '' ORDER BY ts_event, symbol)) AS post_fingerprint
-    FROM futures_data.ohlcv_1d_raw;
-    """
-    results = {}
+def table_fingerprints(conn: Any) -> dict[str, dict[str, Any]]:
+    """{table: {"count", "fingerprint"}} over every column of both continuous tables."""
+    out: dict[str, dict[str, Any]] = {}
     with conn.cursor() as cur:
-        cur.execute(sql)
-        for table, count, fp in cur.fetchall():
-            expected = BASELINE_FINGERPRINTS.get(table, {})
-            passed = (count == expected.get("count")) and (fp == expected.get("fingerprint"))
-            results[table] = {
-                "count": count,
-                "expected_count": expected.get("count"),
-                "fingerprint": fp,
-                "expected_fingerprint": expected.get("fingerprint"),
-                "passed": passed,
-            }
+        for table, sql in FINGERPRINT_SQL.items():
+            cur.execute(sql)
+            count, fingerprint = cur.fetchone()
+            out[table] = {"count": count, "fingerprint": fingerprint}
+    return out
+
+
+def verify_immutability(conn: Any, baseline: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Check (iii): both continuous tables match the fingerprints taken before the load."""
+    results = {}
+    for table, now in table_fingerprints(conn).items():
+        before = baseline.get(table, {})
+        results[table] = {
+            "count": now["count"],
+            "expected_count": before.get("count"),
+            "fingerprint": now["fingerprint"],
+            "expected_fingerprint": before.get("fingerprint"),
+            "passed": now == before,
+        }
     return results
+
+
+@contextmanager
+def continuous_tables_unchanged(conn: Any) -> Iterator[dict[str, dict[str, Any]]]:
+    """
+    A step of a per-contract load: fingerprint ohlcv_1d and ohlcv_1d_raw before it writes and
+    raise after it if either changed.
+    """
+    baseline = table_fingerprints(conn)
+    logger.info("Check (iii) baseline before the load: %s", json.dumps(baseline))
+    yield baseline
+    results = verify_immutability(conn, baseline)
+    logger.info("Check (iii) after the load: %s", json.dumps(results))
+    changed = [table for table, r in results.items() if not r["passed"]]
+    if changed:
+        raise RuntimeError(f"check (iii) failed: the load changed {', '.join(changed)}")
 
 
 def verify_close_parity(conn: Any) -> dict[str, Any]:
@@ -156,8 +179,9 @@ def run_all_checks() -> None:
     conn = get_connection()
     logger.info("Connected to database. Running acceptance checks...")
 
-    immutability = verify_immutability(conn)
-    logger.info("Check (iii) Immutability: %s", json.dumps(immutability, indent=2))
+    # Check (iii) is enforced by the loads themselves (continuous_tables_unchanged); here the
+    # current fingerprints are printed for the record.
+    logger.info("Check (iii) fingerprints now: %s", json.dumps(table_fingerprints(conn), indent=2))
 
     parity = verify_close_parity(conn)
     logger.info("Check (ii) Close Parity: %s", json.dumps(parity, indent=2))

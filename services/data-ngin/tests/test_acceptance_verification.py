@@ -1,23 +1,58 @@
 from unittest.mock import MagicMock
 
+import pytest
 from data_ngin.ops.contract_verification import (
+    continuous_tables_unchanged,
+    table_fingerprints,
     verify_close_parity,
     verify_immutability,
     verify_roll_coverage,
 )
 
 
-def test_verify_immutability_passes_on_exact_match():
+def _conn_returning(*fingerprints):
+    """A connection whose fingerprint queries return the given (count, md5) pairs in order."""
     mock_conn = MagicMock()
-    mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
-    mock_cursor.fetchall.return_value = [
-        ("futures_data.ohlcv_1d", 166477, "ec786348663adab6c2690d065f909922"),
-        ("futures_data.ohlcv_1d_raw", 166477, "d2d47dfa1c65e0bffa086dd4e0974e0a"),
-    ]
+    cur = mock_conn.cursor.return_value.__enter__.return_value
+    cur.fetchone.side_effect = list(fingerprints)
+    return mock_conn, cur
 
-    res = verify_immutability(mock_conn)
+
+def test_fingerprint_covers_every_column_of_both_tables():
+    mock_conn, cur = _conn_returning((10, "a"), (10, "b"))
+    assert table_fingerprints(mock_conn) == {
+        "futures_data.ohlcv_1d": {"count": 10, "fingerprint": "a"},
+        "futures_data.ohlcv_1d_raw": {"count": 10, "fingerprint": "b"},
+    }
+    kept, raw = (" ".join(c[0][0].split()) for c in cur.execute.call_args_list)
+    assert "ROW(time, symbol, open, high, low, close, volume)" in kept
+    assert (
+        "ROW(ts_event, symbol, instrument_id, open, high, low, close, volume, rtype, publisher_id)"
+        in raw
+    )
+
+
+def test_verify_immutability_compares_with_the_baseline_taken_before():
+    baseline = {
+        "futures_data.ohlcv_1d": {"count": 10, "fingerprint": "a"},
+        "futures_data.ohlcv_1d_raw": {"count": 10, "fingerprint": "b"},
+    }
+    mock_conn, _ = _conn_returning((10, "a"), (10, "b-changed"))
+    res = verify_immutability(mock_conn, baseline)
     assert res["futures_data.ohlcv_1d"]["passed"] is True
-    assert res["futures_data.ohlcv_1d_raw"]["passed"] is True
+    assert res["futures_data.ohlcv_1d_raw"]["passed"] is False
+
+
+def test_a_load_that_changes_a_continuous_table_fails():
+    mock_conn, _ = _conn_returning((10, "a"), (10, "b"), (10, "a"), (10, "b-changed"))
+    with (
+        pytest.raises(RuntimeError, match=r"futures_data\.ohlcv_1d_raw"),
+        continuous_tables_unchanged(mock_conn),
+    ):
+        pass
+    mock_conn, _ = _conn_returning((10, "a"), (10, "b"), (10, "a"), (10, "b"))
+    with continuous_tables_unchanged(mock_conn) as baseline:
+        assert baseline["futures_data.ohlcv_1d"]["fingerprint"] == "a"
 
 
 def test_verify_close_parity_passes_with_zero_mismatches():

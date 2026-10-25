@@ -86,3 +86,29 @@ def test_populate_refuses_to_write_null_over_a_stored_expiration():
     assert populate.unresolved_spans_holding_values(rows, spans) == [
         ("777", "GCZ7", date(2026, 11, 2), date(2026, 11, 2))
     ]
+
+
+def test_the_load_runs_inside_the_continuous_tables_check(monkeypatch):
+    from contextlib import contextmanager
+    from unittest.mock import MagicMock
+
+    loader = _loader()
+    calls = []
+
+    @contextmanager
+    def guard(_conn):
+        calls.append("baseline")
+        yield {}
+        calls.append("compare")
+
+    monkeypatch.setattr(loader, "get_connection", MagicMock())
+    monkeypatch.setattr(loader, "continuous_tables_unchanged", guard)
+    monkeypatch.setattr(loader, "OhlcvRepository", MagicMock())
+    monkeypatch.setattr(loader, "build_definition_map", MagicMock(return_value={}))
+    monkeypatch.setattr(
+        loader, "process_tar_archive", lambda *a, **k: calls.append("load") or (0, 0)
+    )
+    monkeypatch.setattr(loader.glob, "glob", lambda pattern: [pattern])
+    monkeypatch.setattr("sys.argv", ["load", "--tar", "a.tar", "--definition-tar", "d.tar"])
+    loader.main()
+    assert calls == ["baseline", "load", "compare"]

@@ -32,6 +32,7 @@ from data_ngin.domain.contract_definition import (
 )
 from data_ngin.domain.contract_filter import is_outright_contract, parse_contract_symbol
 from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository
+from data_ngin.ops.contract_verification import continuous_tables_unchanged, get_connection
 
 logging.basicConfig(
     level=logging.INFO,
@@ -254,15 +255,22 @@ def main() -> None:
     grand_outrights = 0
     grand_spreads = 0
 
-    for tf in tar_files:
-        try:
-            outrights, spreads = process_tar_archive(
-                tf, repo, definitions=definitions, chunk_size=args.chunk_size
-            )
-            grand_outrights += outrights
-            grand_spreads += spreads
-        except Exception as e:
-            logger.exception("Failed processing archive %s: %s", tf, e)
+    # Check (iii) as a step of the load: ohlcv_1d and ohlcv_1d_raw fingerprinted before any
+    # write and compared after; a change fails the load.
+    conn = get_connection()
+    try:
+        with continuous_tables_unchanged(conn):
+            for tf in tar_files:
+                try:
+                    outrights, spreads = process_tar_archive(
+                        tf, repo, definitions=definitions, chunk_size=args.chunk_size
+                    )
+                    grand_outrights += outrights
+                    grand_spreads += spreads
+                except Exception as e:
+                    logger.exception("Failed processing archive %s: %s", tf, e)
+    finally:
+        conn.close()
 
     logger.info(
         "HISTORICAL LOAD COMPLETE: Total Outright Bars Inserted = %d | Total Spreads Dropped = %d",

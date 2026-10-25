@@ -17,6 +17,7 @@ sys.path.insert(
 )
 
 from data_ngin.application.close_pipeline import CONTRACT_ROOTS, run_contract_close_pipeline
+from data_ngin.ops.contract_verification import continuous_tables_unchanged, get_connection
 from data_ngin.utils.dynamic_loader import load_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s]: %(message)s")
@@ -63,21 +64,27 @@ def main() -> None:
     total_pulled = 0
     total_skipped = 0
 
-    for current_d in daterange(start_d, end_d):
-        result = run_contract_close_pipeline(config, current_d, roots=target_roots)
-        if result.get("skipped"):
-            total_skipped += 1
-            logger.info("Date %s skipped (non-trading day).", current_d)
-        else:
-            total_pulled += 1
-            logger.info(
-                "Date %s: %s (%d/%d loaded, missing: %s)",
-                current_d,
-                result["status"],
-                result["loaded"],
-                result["expected"],
-                result["missing"],
-            )
+    # Check (iii) as a step of the load (see load_historical_contract_bars.py).
+    conn = get_connection()
+    try:
+        with continuous_tables_unchanged(conn):
+            for current_d in daterange(start_d, end_d):
+                result = run_contract_close_pipeline(config, current_d, roots=target_roots)
+                if result.get("skipped"):
+                    total_skipped += 1
+                    logger.info("Date %s skipped (non-trading day).", current_d)
+                else:
+                    total_pulled += 1
+                    logger.info(
+                        "Date %s: %s (%d/%d loaded, missing: %s)",
+                        current_d,
+                        result["status"],
+                        result["loaded"],
+                        result["expected"],
+                        result["missing"],
+                    )
+    finally:
+        conn.close()
 
     logger.info(
         "Backfill complete: %d days processed (%d active trading days, %d skipped).",

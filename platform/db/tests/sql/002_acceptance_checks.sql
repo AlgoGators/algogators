@@ -1,8 +1,10 @@
--- Acceptance Validation Queries for Issue #37 (run with SET TIME ZONE 'UTC': the joins cast timestamptz to date)
+-- Acceptance Validation Queries for Issue #37
+-- The joins cast timestamptz to date, so the session runs in UTC.
+SET TIME ZONE 'UTC';
 -- Criteria:
 --   (i)   Roll date dual-contract coverage against ohlcv_1d_raw
 --   (ii)  Close price parity against ohlcv_1d (.v.0) outside #36
---   (iii) Pre- vs post-load fingerprint immutability on ohlcv_1d and ohlcv_1d_raw
+--   (iii) Pre- vs post-load fingerprint immutability on ohlcv_1d and ohlcv_1d_raw (every column)
 
 -- Acceptance Criterion (i): Roll Date Dual-Contract Coverage
 WITH roll_events AS (
@@ -47,13 +49,14 @@ WHERE v.close IS DISTINCT FROM c.close;
 
 
 -- Acceptance Criterion (iii): Fingerprint Immutability Check
--- Must match baseline hashes:
--- futures_data.ohlcv_1d:     166477 rows | md5: ec786348663adab6c2690d065f909922
--- futures_data.ohlcv_1d_raw: 166477 rows | md5: d2d47dfa1c65e0bffa086dd4e0974e0a
-SELECT 'futures_data.ohlcv_1d' AS table_name, count(*) AS post_count,
-       md5(string_agg(time::text || symbol || close::text, '' ORDER BY time, symbol)) AS post_fingerprint
+-- Every column of both continuous tables, row by row in key order. There is no stored baseline:
+-- run these two queries before the load and again after it; both counts and both md5s must match.
+-- (The loaders run this as a step of the load: data_ngin.ops.contract_verification.continuous_tables_unchanged.)
+SELECT 'futures_data.ohlcv_1d' AS table_name, count(*) AS row_count,
+       md5(string_agg(ROW(time, symbol, open, high, low, close, volume)::text, E'\n' ORDER BY time, symbol)) AS fingerprint
 FROM futures_data.ohlcv_1d
 UNION ALL
-SELECT 'futures_data.ohlcv_1d_raw' AS table_name, count(*) AS post_count,
-       md5(string_agg(ts_event::text || symbol || close::text, '' ORDER BY ts_event, symbol)) AS post_fingerprint
+SELECT 'futures_data.ohlcv_1d_raw' AS table_name, count(*) AS row_count,
+       md5(string_agg(ROW(ts_event, symbol, instrument_id, open, high, low, close, volume, rtype, publisher_id)::text,
+                      E'\n' ORDER BY ts_event, symbol, instrument_id)) AS fingerprint
 FROM futures_data.ohlcv_1d_raw;
