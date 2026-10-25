@@ -96,7 +96,7 @@ def process_dbn_stream(
 
         inst_id = str(row.instrument_id)
 
-        # Resolve expiration date from definition mapping or fallback calculation
+        # Expiration from the definition records of this (instrument_id, raw_symbol), or None
         expiration = resolve_expiration(inst_id, str(raw_sym), bar_date, definitions)
 
         records.append(

@@ -4,7 +4,6 @@ import pandas as pd
 from data_ngin.domain.contract_definition import (
     contract_expiration_spans,
     extract_definitions_from_df,
-    get_cme_expiration_fallback,
     lookup_expiration,
 )
 
@@ -102,23 +101,6 @@ def test_spans_split_two_contracts_sharing_id_and_symbol():
     ]
 
 
-def test_get_cme_expiration_fallback_equities():
-    # ES 3rd Friday: ESH6 in 2026 -> March 20, 2026
-    exp = get_cme_expiration_fallback("ES", "H", 2026)
-    assert exp == date(2026, 3, 20)
-
-    # NQ 3rd Friday: NQU0 in 2020 -> September 18, 2020
-    exp = get_cme_expiration_fallback("NQ", "U", 2020)
-    assert exp == date(2020, 9, 18)
-
-
-def test_get_cme_expiration_fallback_general():
-    # General monthly contract defaults to 3rd Friday or approx delivery
-    exp = get_cme_expiration_fallback("CL", "Z", 2020)
-    assert exp.year == 2020
-    assert exp.month in (11, 12)
-
-
 def test_one_id_carrying_two_live_contracts_is_split_by_symbol():
     # Her defect's shape: id 42003082 carried RTYU5 (expiring 2025-09-19) and MYMZ6
     # (2026-12-18) at overlapping times. Keyed on the id alone, a MYMZ6 bar of 2025-06-02
@@ -133,3 +115,10 @@ def test_one_id_carrying_two_live_contracts_is_split_by_symbol():
     )
     assert lookup_expiration(index, "42003082", "MYMZ6", date(2025, 6, 2)) == date(2026, 12, 18)
     assert lookup_expiration(index, "42003082", "RTYU5", date(2025, 6, 2)) == date(2025, 9, 19)
+
+
+def test_no_calendar_guess_is_left_to_call():
+    from data_ngin.domain import contract_definition
+
+    assert not hasattr(contract_definition, "get_cme_expiration_fallback")
+    assert not hasattr(contract_definition, "resolve_contract_expiration")
