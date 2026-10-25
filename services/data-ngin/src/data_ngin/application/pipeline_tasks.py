@@ -107,6 +107,30 @@ def write_futures_readiness(
     return write_readiness(load_config(config_path(config_name)), bar_date, run_id, failed=failed)
 
 
+def write_contract_futures_readiness(
+    config_name: str,
+    bar_date: date,
+    run_id: str | None,
+    failed: bool = False,
+    expected: int | None = None,
+    loaded: int | None = None,
+    missing: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """Upsert ops.data_ready for `bar_date` under dataset 'futures_contract_ohlcv_1d'."""
+    from data_ngin.application.close_pipeline import write_contract_readiness
+    from data_ngin.utils.dynamic_loader import load_config
+
+    return write_contract_readiness(
+        load_config(config_path(config_name)),
+        bar_date,
+        run_id,
+        failed=failed,
+        expected=expected,
+        loaded=loaded,
+        missing=missing,
+    )
+
+
 def should_retry_run(result: dict[str, Any], try_number: int, max_tries: int) -> bool:
     """Whether a futures run's result should fail the try so Airflow retries it
     (see close_pipeline.should_retry_for_missing)."""
@@ -115,3 +139,27 @@ def should_retry_run(result: dict[str, Any], try_number: int, max_tries: int) ->
     published_through = result.get("published_through")
     published = published_through is None or published_through >= result["bar_date"]
     return should_retry_for_missing(result["missing"], try_number, max_tries, published)
+
+
+def run_contract_close(config_name: str, bar_date: date) -> dict[str, Any]:
+    """Pull per-contract bars for the 40 roots for bar date `bar_date`."""
+    from data_ngin.application.close_pipeline import run_contract_close_pipeline
+    from data_ngin.utils.dynamic_loader import load_config
+
+    path = config_path(config_name)
+    logging.info(f"Running daily contract pipeline {config_name} for {bar_date}, config={path}")
+    return run_contract_close_pipeline(load_config(path), bar_date)
+
+
+def should_retry_contract_run(result: dict[str, Any], try_number: int, max_tries: int) -> bool:
+    """Whether a contract run's result should fail the try so Airflow retries it."""
+    from data_ngin.application.close_pipeline import should_retry_contract_run as should_retry
+
+    return should_retry(result, try_number, max_tries)
+
+
+def contract_run_failed(result: dict[str, Any]) -> bool:
+    """Whether a contract run that is not retried must fail the DAG run."""
+    from data_ngin.application.close_pipeline import contract_run_failed as failed
+
+    return failed(result)

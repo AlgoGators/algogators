@@ -22,8 +22,10 @@ def make_readiness_failure_callback(config_name: str) -> Callable[[Any], None]:
             from data_ngin.application import pipeline_tasks
 
             bar_date = pipeline_tasks.bar_date_from_context(context)
-            pipeline_tasks.write_futures_readiness(
-                config_name, bar_date, pipeline_tasks.run_id_from_context(context), failed=True
+            run_id = pipeline_tasks.run_id_from_context(context)
+            pipeline_tasks.write_futures_readiness(config_name, bar_date, run_id, failed=True)
+            pipeline_tasks.write_contract_futures_readiness(
+                config_name, bar_date, run_id, failed=True
             )
         except Exception:
             logger.exception("Could not write the failed readiness row (non-fatal)")
