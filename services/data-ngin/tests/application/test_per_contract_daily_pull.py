@@ -104,3 +104,106 @@ def test_run_contract_close_pipeline_evaluates_readiness():
         assert res["loaded"] == 4
         assert res["missing"] == ["CL"]
         assert res["status"] == "partial"
+
+
+def _client_for(bars, definitions):
+    """A fake databento.Historical whose get_range returns `bars` or `definitions` by schema."""
+    import pandas as pd
+
+    def get_range(**kwargs):
+        frame = definitions if kwargs["schema"] == "definition" else bars
+        store = MagicMock()
+        store.to_df.return_value = pd.DataFrame(frame)
+        return store
+
+    client = MagicMock()
+    client.timeseries.get_range.side_effect = get_range
+    return client
+
+
+def test_daily_pull_takes_expiration_from_the_definitions(monkeypatch):
+    import pandas as pd
+    from data_ngin.application.close_pipeline import run_contract_close_pipeline
+
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+    bars = {
+        "ts_event": pd.to_datetime(["2026-10-21"], utc=True),
+        "symbol": ["GCZ6"],
+        "instrument_id": [41271],
+        "open": [4100.0],
+        "high": [4120.0],
+        "low": [4090.0],
+        "close": [4110.0],
+        "volume": [150000],
+    }
+    definitions = {
+        "ts_recv": pd.to_datetime(["2026-10-21"], utc=True),
+        "instrument_id": [41271],
+        "raw_symbol": ["GCZ6"],
+        "instrument_class": ["F"],
+        "expiration": pd.to_datetime(["2026-12-29 17:30"], utc=True),
+    }
+    mock_repo = MagicMock()
+    mock_repo.get_contract_roots_for_date.return_value = {"GC"}
+    with (
+        patch(
+            "data_ngin.application.close_pipeline.expected_contracts",
+            return_value=[{"dataSymbol": "GC"}],
+        ),
+        patch("data_ngin.application.close_pipeline.load_contracts", return_value=[]),
+        patch(
+            "data_ngin.infrastructure.repository.ohlcv_repository.OhlcvRepository",
+            return_value=mock_repo,
+        ),
+        patch("databento.Historical", return_value=_client_for(bars, definitions)),
+    ):
+        res = run_contract_close_pipeline({}, date(2026, 10, 21), roots=["GC"])
+
+    (records,), _ = mock_repo.insert_contract_bars.call_args
+    # the definition's date, not the third-Friday guess (2026-12-18)
+    assert records[0]["expiration"] == date(2026, 12, 29)
+    assert records[0]["raw_symbol"] == "GCZ6"
+    assert res["status"] == "complete"
+
+
+def test_daily_pull_leaves_expiration_empty_without_a_definition(monkeypatch):
+    import pandas as pd
+    from data_ngin.application.close_pipeline import run_contract_close_pipeline
+
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+    bars = {
+        "ts_event": pd.to_datetime(["2026-10-21"], utc=True),
+        "symbol": ["ZNZ6"],
+        "instrument_id": [555],
+        "open": [111.0],
+        "high": [111.5],
+        "low": [110.5],
+        "close": [111.25],
+        "volume": [900000],
+    }
+    definitions = {
+        "ts_recv": pd.to_datetime([], utc=True),
+        "instrument_id": [],
+        "raw_symbol": [],
+        "instrument_class": [],
+        "expiration": pd.to_datetime([], utc=True),
+    }
+    mock_repo = MagicMock()
+    mock_repo.get_contract_roots_for_date.return_value = set()
+    with (
+        patch(
+            "data_ngin.application.close_pipeline.expected_contracts",
+            return_value=[{"dataSymbol": "ZN"}],
+        ),
+        patch("data_ngin.application.close_pipeline.load_contracts", return_value=[]),
+        patch(
+            "data_ngin.infrastructure.repository.ohlcv_repository.OhlcvRepository",
+            return_value=mock_repo,
+        ),
+        patch("databento.Historical", return_value=_client_for(bars, definitions)),
+    ):
+        res = run_contract_close_pipeline({}, date(2026, 10, 21), roots=["ZN"])
+
+    (records,), _ = mock_repo.insert_contract_bars.call_args
+    assert records[0]["expiration"] is None
+    assert res["missing"] == ["ZN"]

@@ -45,3 +45,15 @@ def test_batch_upsert_contract_ohlcv():
         assert args[0] == mock_cursor
         assert "futures_data.contract_ohlcv_1d" in args[1]
         assert len(args[2]) == 1
+
+
+def test_roots_for_date_count_only_bars_with_an_expiration():
+    repo = OhlcvRepository(config={"database": {}})
+    repo.connection = MagicMock()
+    repo._ensure_connected = MagicMock()
+    cur = repo.connection.cursor.return_value.__enter__.return_value
+    cur.fetchall.return_value = [("GC",)]
+
+    assert repo.get_contract_roots_for_date("2026-10-21", ["GC", "ZN"]) == {"GC"}
+    sql = cur.execute.call_args[0][0]
+    assert "expiration IS NOT NULL" in sql

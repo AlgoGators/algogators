@@ -456,7 +456,10 @@ def run_contract_close_pipeline(
     """
     import databento as db
 
-    from data_ngin.domain.contract_definition import resolve_contract_expiration
+    from data_ngin.domain.contract_definition import (
+        extract_definitions_from_df,
+        lookup_expiration,
+    )
     from data_ngin.domain.contract_filter import is_outright_contract, parse_contract_symbol
     from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository
 
@@ -499,17 +502,39 @@ def run_contract_close_pipeline(
                 if df.empty:
                     continue
                 df = df.reset_index()
+                # Expiration comes from the same day's definition records, matched on
+                # (instrument_id, raw_symbol); never from a calendar rule.
+                definitions = extract_definitions_from_df(
+                    client.timeseries.get_range(
+                        dataset="GLBX.MDP3",
+                        symbols=parent_sym,
+                        schema="definition",
+                        start=start_str,
+                        end=end_str,
+                        stype_in="parent",
+                        stype_out="instrument_id",
+                    )
+                    .to_df()
+                    .reset_index()
+                )
                 records = []
                 for row in df.itertuples(index=False):
                     raw_sym = getattr(row, "symbol", None)
                     if not raw_sym or not is_outright_contract(str(raw_sym)):
                         continue
                     try:
-                        sym_root, month_code, year_str = parse_contract_symbol(str(raw_sym))
+                        sym_root, _month_code, _year_str = parse_contract_symbol(str(raw_sym))
                     except ValueError:
                         continue
                     inst_id = str(row.instrument_id)
-                    exp = resolve_contract_expiration(sym_root, month_code, year_str, bar_date)
+                    exp = lookup_expiration(definitions, inst_id, str(raw_sym), bar_date)
+                    if exp is None:
+                        logger.warning(
+                            "No definition for %s (%s) on %s; stored without expiration",
+                            raw_sym,
+                            inst_id,
+                            bar_date,
+                        )
                     records.append(
                         {
                             "instrument_id": inst_id,

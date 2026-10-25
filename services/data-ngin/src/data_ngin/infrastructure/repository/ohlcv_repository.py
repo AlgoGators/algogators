@@ -360,7 +360,8 @@ class OhlcvRepository(Inserter):
         table: str = "contract_ohlcv_1d",
     ) -> set[str]:
         """
-        Returns the set of roots that have at least one outright bar on `bar_date`.
+        Returns the set of roots that have at least one outright bar on `bar_date`, counting
+        only bars with an expiration (the engine cannot order a contract without one).
         """
         self._ensure_connected()
         if not self.connection:
@@ -368,7 +369,7 @@ class OhlcvRepository(Inserter):
         query = f"""
         SELECT DISTINCT root
         FROM {schema}.{table}
-        WHERE "date" = %s AND root = ANY(%s)
+        WHERE "date" = %s AND root = ANY(%s) AND expiration IS NOT NULL
         """
         with self.connection.cursor() as cur:
             cur.execute(query, (bar_date, roots))
