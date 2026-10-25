@@ -51,7 +51,7 @@ promotion or a demotion takes effect on the next click.
 |---|---|
 | from 06:45 | The **model run** builds the day's book: the model's book **A**. It is retried every 15 min until done. If there is no model book by 08:30, the President gets an alert. |
 | until 09:30 | The QT edits, saves, requests overrides and **approves**. An approval freezes the day and sends nothing yet. |
-| **09:30** | **Send.** Every approved day is e-mailed (the daily report and CSV). An approval made between 09:30 and 10:00 is sent at once. |
+| **09:30** | **Send.** Every approved day is e-mailed by trade-ngin's engine-rpc (the book e-mail); AlgoLens does not build or send it. An approval made between 09:30 and 10:00 is sent at once. |
 | **10:00** | **Fallback.** If the day is not approved, the model's book A is published and sent, any unapproved desk edits are thrown away, and the President is alerted: "QT did not approve … the model's book was sent at 10:00". |
 | a future day | A book dated after today (New York) is approved, edited or overridden as soon as its model run has written it (Dominick 2026-10-18); an approval stands once the next day is built on it. |
 | after 10:00 | Approving is refused: "Approval of the <day> book closed at 10:00 New York…". Saving, override requests and decisions are refused because the day is published. |
