@@ -32,6 +32,14 @@ def test_fingerprint_covers_every_column_of_both_tables():
     )
 
 
+def test_fingerprints_end_their_read_transaction():
+    mock_conn, cur = _conn_returning((10, "a"), (10, "b"))
+    table_fingerprints(mock_conn)
+    assert cur.execute.call_count == 2
+    mock_conn.rollback.assert_called_once_with()
+    mock_conn.commit.assert_not_called()
+
+
 def test_verify_immutability_compares_with_the_baseline_taken_before():
     baseline = {
         "futures_data.ohlcv_1d": {"count": 10, "fingerprint": "a"},

@@ -64,6 +64,9 @@ def table_fingerprints(conn: Any) -> dict[str, dict[str, Any]]:
             cur.execute(sql)
             count, fingerprint = cur.fetchone()
             out[table] = {"count": count, "fingerprint": fingerprint}
+    # End the read: with autocommit off it would stay idle in transaction, holding its locks on
+    # both tables for the whole load.
+    conn.rollback()
     return out
 
 
@@ -86,7 +89,9 @@ def verify_immutability(conn: Any, baseline: dict[str, dict[str, Any]]) -> dict[
 def continuous_tables_unchanged(conn: Any) -> Iterator[dict[str, dict[str, Any]]]:
     """
     A step of a per-contract load: fingerprint ohlcv_1d and ohlcv_1d_raw before it writes and
-    raise after it if either changed.
+    raise after it if either changed. It detects a change, it cannot stop one: the load's writes are
+    committed by then. The daily pull writes both tables at 04:30 ET, so a load run across that
+    time fails here without having changed anything; run backfills outside it.
     """
     baseline = table_fingerprints(conn)
     logger.info("Check (iii) baseline before the load: %s", json.dumps(baseline))
