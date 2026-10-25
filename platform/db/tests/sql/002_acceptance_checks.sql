@@ -1,4 +1,4 @@
--- Acceptance Validation Queries for Issue #37
+-- Acceptance Validation Queries for Issue #37 (run with SET TIME ZONE 'UTC': the joins cast timestamptz to date)
 -- Criteria:
 --   (i)   Roll date dual-contract coverage against ohlcv_1d_raw
 --   (ii)  Close price parity against ohlcv_1d (.v.0) outside #36
@@ -36,15 +36,14 @@ WHERE c_prior.instrument_id IS NULL OR c_new.instrument_id IS NULL;
 
 
 -- Acceptance Criterion (ii): Close Price Parity Check
--- 0 mismatches expected outside the known corrupt dates from issue #36
+-- 0 mismatches expected outside the known corrupt dates from issue #36 (list them by date)
 SELECT count(*) AS mismatch_count
 FROM futures_data.ohlcv_1d v
 JOIN futures_data.ohlcv_1d_raw r 
   ON r.ts_event = v.time AND r.symbol = v.symbol
 JOIN futures_data.contract_ohlcv_1d c 
   ON c.instrument_id = r.instrument_id AND c.date = v.time::date
-WHERE ABS(v.close - c.close) > 1e-4
-  AND v.time::date NOT IN ('2026-09-12', '2026-09-15');
+WHERE v.close IS DISTINCT FROM c.close;
 
 
 -- Acceptance Criterion (iii): Fingerprint Immutability Check

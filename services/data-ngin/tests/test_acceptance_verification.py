@@ -41,3 +41,26 @@ def test_verify_roll_coverage_checks_roll_counts():
     assert res["covered_rolls"] == 5505
     assert res["missing_rolls"] == 0
     assert res["passed"] is True
+
+
+def test_close_parity_compares_exactly():
+    # An absolute 1e-4 tolerance hid every 6J mismatch (6J trades near 0.0065, a tick is
+    # 0.0000005): 6J 2020-02-28 0.0092815 against 0.0092615 was not counted.
+    mock_conn = MagicMock()
+    mock_cursor = mock_conn.cursor.return_value.__enter__.return_value
+    mock_cursor.fetchone.return_value = (10, 1)
+    mock_cursor.fetchall.return_value = []
+    verify_close_parity(mock_conn)
+    sql = mock_cursor.execute.call_args_list[0][0][0]
+    assert "1e-4" not in sql
+    assert "v.close IS DISTINCT FROM c.close" in sql
+
+
+def test_checks_run_in_utc(monkeypatch):
+    from unittest.mock import patch
+
+    from data_ngin.ops import contract_verification
+
+    with patch.object(contract_verification.psycopg2, "connect") as connect:
+        contract_verification.get_connection()
+    assert "TimeZone=UTC" in connect.call_args.kwargs["options"]

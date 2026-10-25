@@ -43,6 +43,8 @@ def get_connection() -> Any:
         dbname=os.getenv("DB_NAME"),
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
+        # time::date and time::text follow the session time zone; the tables' dates are UTC.
+        options="-c TimeZone=UTC",
     )
 
 
@@ -77,7 +79,7 @@ def verify_close_parity(conn: Any) -> dict[str, Any]:
     """Check (ii): Close price parity against continuous .v.0 series"""
     sql = """
     SELECT count(*) AS total_compared,
-           count(*) FILTER (WHERE ABS(v.close - c.close) > 1e-4) AS mismatch_count
+           count(*) FILTER (WHERE v.close IS DISTINCT FROM c.close) AS mismatch_count
     FROM futures_data.ohlcv_1d v
     JOIN futures_data.ohlcv_1d_raw r
       ON r.ts_event = v.time AND r.symbol = v.symbol
@@ -102,7 +104,7 @@ def verify_close_parity(conn: Any) -> dict[str, Any]:
                       ON r.ts_event = v.time AND r.symbol = v.symbol
                     JOIN futures_data.contract_ohlcv_1d c
                       ON c.instrument_id = r.instrument_id AND c.date = v.time::date
-                    WHERE ABS(v.close - c.close) > 1e-4
+                    WHERE v.close IS DISTINCT FROM c.close
                     GROUP BY mismatch_date
                     ORDER BY mismatch_date;
                     """
