@@ -25,9 +25,10 @@ sys.path.insert(
 )
 
 from data_ngin.domain.contract_definition import (
+    DefinitionIndex,
+    build_definition_map,
     extract_definitions_from_dbn_bytes,
-    extract_definitions_from_tar,
-    get_cme_expiration_fallback,
+    lookup_expiration,
 )
 from data_ngin.domain.contract_filter import is_outright_contract, parse_contract_symbol
 from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository
@@ -43,39 +44,21 @@ def resolve_expiration(
     inst_id: str,
     raw_sym: str,
     bar_date: date,
-    root: str,
-    definitions: dict[str, Any] | None,
+    definitions: DefinitionIndex | None,
 ) -> date | None:
-    """Resolve expiration date from definition lookup or fallback CME specification."""
-    if definitions and inst_id in definitions:
-        val = definitions[inst_id]
-        if isinstance(val, date):
-            return val
-        if isinstance(val, dict):
-            return val.get("expiration")
-
-    try:
-        _, month_code, year_str = parse_contract_symbol(raw_sym)
-        if len(year_str) == 1:
-            decade = (bar_date.year // 10) * 10
-            full_year = decade + int(year_str)
-            if full_year < bar_date.year - 1:
-                full_year += 10
-            elif full_year > bar_date.year + 8:
-                full_year -= 10
-        elif len(year_str) == 2:
-            full_year = 2000 + int(year_str)
-        else:
-            full_year = int(year_str)
-        return get_cme_expiration_fallback(root, month_code, full_year)
-    except Exception:
+    """
+    Expiration from the definition records of this (instrument_id, raw_symbol), or None.
+    Never a calendar-rule guess: a NULL is visible, a wrong date is not.
+    """
+    if not definitions:
         return None
+    return lookup_expiration(definitions, inst_id, raw_sym, bar_date)
 
 
 def process_dbn_stream(
     dbn_bytes: bytes,
     repo: OhlcvRepository,
-    definitions: dict[str, Any] | None = None,
+    definitions: DefinitionIndex | None = None,
     chunk_size: int = 5000,
 ) -> tuple[int, int]:
     """
@@ -114,7 +97,7 @@ def process_dbn_stream(
         inst_id = str(row.instrument_id)
 
         # Resolve expiration date from definition mapping or fallback calculation
-        expiration = resolve_expiration(inst_id, str(raw_sym), bar_date, root, definitions)
+        expiration = resolve_expiration(inst_id, str(raw_sym), bar_date, definitions)
 
         records.append(
             {
@@ -140,7 +123,7 @@ def process_dbn_stream(
 def process_tar_archive(
     tar_path: str,
     repo: OhlcvRepository,
-    definitions: dict[str, Any] | None = None,
+    definitions: DefinitionIndex | None = None,
     chunk_size: int = 5000,
 ) -> tuple[int, int]:
     """
@@ -151,7 +134,7 @@ def process_tar_archive(
     total_outrights = 0
     total_spreads = 0
 
-    defs = dict(definitions) if definitions else {}
+    defs: DefinitionIndex = {k: list(v) for k, v in (definitions or {}).items()}
 
     with tarfile.open(tar_path, "r") as tar:
         # Pre-load definition files if present in this archive
@@ -161,7 +144,7 @@ def process_tar_archive(
             for dm in def_members:
                 f_def = tar.extractfile(dm)
                 if f_def:
-                    defs.update(extract_definitions_from_dbn_bytes(f_def.read()))
+                    extract_definitions_from_dbn_bytes(f_def.read(), defs)
 
         ohlcv_members = [m for m in tar.getmembers() if m.name.endswith(".ohlcv-1d.dbn.zst")]
         logger.info("Found %d OHLCV DBN files in archive", len(ohlcv_members))
@@ -220,7 +203,7 @@ def main() -> None:
     repo.connect()
 
     # Pre-load definition archives if supplied or in Downloads
-    definitions: dict[str, Any] = {}
+    definitions: DefinitionIndex = {}
     def_tar_files: list[str] = []
     if args.definition_tar:
         for dt in args.definition_tar:
@@ -251,10 +234,8 @@ def main() -> None:
 
     if def_tar_files:
         logger.info("Pre-loading definitions from %d archives...", len(def_tar_files))
-        for dtf in def_tar_files:
-            m = extract_definitions_from_tar(dtf)
-            definitions.update(m)
-        logger.info("Loaded %d unique instrument definition records.", len(definitions))
+        definitions = build_definition_map(def_tar_files)
+        logger.info("Indexed %d (instrument_id, raw_symbol) definitions.", len(definitions))
 
     tar_files: list[str] = []
     if args.tar:

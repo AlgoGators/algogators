@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 """
 Populate expiration dates in futures_data.contract_ohlcv_1d from definition archives.
-Maps all instrument_ids to their official vendor expiration date.
+Matches each contract on (instrument_id, raw_symbol) and its bar dates, never on the id alone.
 """
 
 import logging
 import os
-import tarfile
+import sys
 import time
-from datetime import UTC, datetime
 
-import databento as db
 import psycopg2
 from dotenv import load_dotenv
 from psycopg2.extras import execute_values
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../src")))
+
+from data_ngin.domain.contract_definition import (
+    build_definition_map,
+    contract_expiration_spans,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,10 +58,6 @@ def main() -> None:
     conn.autocommit = False
     cur = conn.cursor()
 
-    cur.execute("SELECT DISTINCT instrument_id FROM futures_data.contract_ohlcv_1d;")
-    db_inst_ids = {str(r[0]) for r in cur.fetchall()}
-    logger.info("Found %d distinct instrument_ids in DB.", len(db_inst_ids))
-
     def_tar_files = [
         "GLBX-20261004-RYHYB9WSYW.tar",
         "GLBX-20261004-URPWAJGS93.tar",
@@ -65,7 +66,6 @@ def main() -> None:
         "GLBX-20261004-FLAXFVF8CJ.tar",
         "GLBX-20261004-96YHEC75N5.tar",
         "GLBX-20261004-XE8SBN5GWS.tar",
-        "GLBX-20261004-F7BGLFMDHN.tar",
         "GLBX-20261004-D7QEK5DNF9.tar",
         "GLBX-20261004-JKCBL4AGAX.tar",
         "GLBX-20261004-VYXHGYQY3T.tar",
@@ -74,72 +74,76 @@ def main() -> None:
         "GLBX-20261004-VHKMCQMTU3.tar",
     ]
     downloads_dir = os.path.expanduser("~/Downloads")
-
-    inst_map: dict[str, str] = {}
-    t0 = time.time()
+    paths = []
     for fname in def_tar_files:
         tar_path = os.path.join(downloads_dir, fname)
         if not os.path.exists(tar_path):
-            logger.warning("Archive not found: %s", tar_path)
-            continue
-        logger.info("Extracting definitions from %s...", fname)
-        with tarfile.open(tar_path, "r") as tar:
-            for m in tar.getmembers():
-                if m.name.endswith(".definition.dbn.zst"):
-                    f = tar.extractfile(m)
-                    if not f:
-                        continue
-                    arr = db.DBNStore.from_bytes(f.read()).to_ndarray()
-                    for rec in arr:
-                        exp_ns = rec["expiration"]
-                        if exp_ns > 0:
-                            exp_date = datetime.fromtimestamp(exp_ns / 1e9, UTC).date()
-                            inst_map[str(rec["instrument_id"])] = str(exp_date)
+            raise FileNotFoundError(f"Definition archive not found: {tar_path}")
+        paths.append(tar_path)
 
-    t1 = time.time()
-    logger.info("Extracted %d definitions in %.2fs.", len(inst_map), t1 - t0)
-
-    matched = db_inst_ids.intersection(inst_map.keys())
+    t0 = time.time()
+    index = build_definition_map(paths)
     logger.info(
-        "Matched %d / %d (%.2f%%) DB instrument IDs.",
-        len(matched),
-        len(db_inst_ids),
-        len(matched) / len(db_inst_ids) * 100,
+        "Indexed %d (instrument_id, raw_symbol) definitions in %.2fs.", len(index), time.time() - t0
     )
 
-    # Filter to only the instrument_ids that exist in the DB
-    update_data = [(inst_id, inst_map[inst_id]) for inst_id in matched]
+    cur.execute('SELECT instrument_id, raw_symbol, "date" FROM futures_data.contract_ohlcv_1d;')
+    spans = contract_expiration_spans(cur.fetchall(), index)
+    unresolved = [s for s in spans if s[4] is None]
+    logger.info(
+        "Resolved %d contract spans; %d without a fitting definition.", len(spans), len(unresolved)
+    )
+    for inst_id, symbol, first, last, _ in unresolved[:50]:
+        logger.warning(
+            "No definition fits %s %s (%s..%s); expiration set to NULL",
+            inst_id,
+            symbol,
+            first,
+            last,
+        )
 
-    logger.info("Creating temporary table and staging %d expiration records...", len(update_data))
     cur.execute(
         """
-        CREATE TEMP TABLE tmp_instrument_expirations (
-            instrument_id text PRIMARY KEY,
-            expiration date NOT NULL
+        CREATE TEMP TABLE tmp_contract_expirations (
+            instrument_id text NOT NULL,
+            raw_symbol text NOT NULL,
+            first_date date NOT NULL,
+            last_date date NOT NULL,
+            expiration date
         ) ON COMMIT DROP;
         """
     )
     execute_values(
         cur,
-        "INSERT INTO tmp_instrument_expirations (instrument_id, expiration) VALUES %s;",
-        update_data,
+        "INSERT INTO tmp_contract_expirations VALUES %s;",
+        spans,
         page_size=5000,
     )
-
-    logger.info("Updating futures_data.contract_ohlcv_1d in batch...")
     t_update_start = time.time()
     cur.execute(
         """
         UPDATE futures_data.contract_ohlcv_1d c
         SET expiration = t.expiration
-        FROM tmp_instrument_expirations t
+        FROM tmp_contract_expirations t
         WHERE c.instrument_id = t.instrument_id
-          AND (c.expiration IS NULL OR c.expiration != t.expiration);
+          AND c.raw_symbol = t.raw_symbol
+          AND c."date" BETWEEN t.first_date AND t.last_date
+          AND c.expiration IS DISTINCT FROM t.expiration;
         """
     )
-    updated_rows = cur.rowcount
-    t_update_end = time.time()
-    logger.info("Updated %d rows in %.2fs.", updated_rows, t_update_end - t_update_start)
+    logger.info("Updated %d rows in %.2fs.", cur.rowcount, time.time() - t_update_start)
+    cur.execute(
+        """
+        SELECT count(*) FROM futures_data.contract_ohlcv_1d
+        WHERE expiration < "date";
+        """
+    )
+    (expired_bars,) = cur.fetchone()
+    if expired_bars:
+        conn.rollback()
+        raise RuntimeError(
+            f"refusing: {expired_bars} bar(s) dated after their contract's expiration"
+        )
 
     conn.commit()
 
