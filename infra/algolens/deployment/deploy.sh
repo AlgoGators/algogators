@@ -41,7 +41,7 @@ PREFLIGHT_TIMEOUT="${PREFLIGHT_TIMEOUT:-60}"
 CURRENT_FILE="$STATE_DIR/algolens.current-images"
 PREVIOUS_FILE="$STATE_DIR/algolens.previous-images"
 # AlgoLens' own containers, stopped before the new ones start.
-CONTAINERS=(algolens-edge algolens-frontend algolens-report-worker algolens-backend)
+CONTAINERS=(algolens-edge algolens-frontend algolens-backend)
 
 log() { echo "[$(date -Is)] $*"; }
 mem() { log "memory ($1): $(free -m | awk 'NR==2 {print $7 " MiB available of " $2 " MiB"}')"; }
