@@ -29,7 +29,7 @@ from collections.abc import Callable, Iterable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from data_ngin.application.trading_calendar import expected_contracts
+from data_ngin.application.trading_calendar import contract_traded_on, expected_contracts
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +83,30 @@ CONTRACT_ROOTS: tuple[str, ...] = (
     "ZT",
     "ZW",
 )
+
+
+# A per-contract root trades on the calendar of the contract-CSV row that shares its
+# exchange hours: the micros and their full-size contracts are one CSV row each.
+CONTRACT_CSV_SYMBOL = {"MES": "ES", "MNQ": "NQ", "MYM": "YM", "M2K": "RTY"}
+
+
+def expected_contract_roots(
+    contracts: list[dict[str, Any]], day: date, roots: Iterable[str] | None = None
+) -> list[str]:
+    """
+    The roots expected to have a per-contract bar for UTC day `day`: those whose exchange
+    calendar has a session overlapping it (MBT alone on a Saturday since it went 24/7, no
+    grains or livestock on a Sunday or on their holidays). A root with no CSV row is
+    expected (fail safe, as contract_traded_on).
+    """
+    by_symbol = {c["dataSymbol"]: c for c in contracts}
+    target = sorted(set(roots) if roots is not None else set(CONTRACT_ROOTS))
+    expected = []
+    for root in target:
+        row = by_symbol.get(CONTRACT_CSV_SYMBOL.get(root, root))
+        if row is None or contract_traded_on(row, day):
+            expected.append(root)
+    return expected
 
 
 def bar_date_for_run(reference: datetime) -> date:
@@ -441,7 +465,9 @@ def contract_readiness_counts(
     """(expected, loaded, missing roots) for `bar_date` from what contract_ohlcv_1d holds."""
     from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository
 
-    target_roots = sorted(set(roots) if roots is not None else set(CONTRACT_ROOTS))
+    target_roots = expected_contract_roots(load_contracts(config), bar_date, roots)
+    if not target_roots:
+        return 0, 0, []
     repository = OhlcvRepository(config)
     repository.connect()
     try:
@@ -484,16 +510,14 @@ def run_contract_close_pipeline(
     from data_ngin.domain.contract_filter import is_outright_contract, parse_contract_symbol
     from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository
 
-    target_roots = sorted(set(roots) if roots is not None else set(CONTRACT_ROOTS))
-
     contracts = load_contracts(config)
-    expected_today = expected_contracts(contracts, bar_date)
-    if not expected_today:
+    target_roots = expected_contract_roots(contracts, bar_date, roots)
+    if not target_roots:
         logger.info("No contract traded on %s (UTC); skipping per-contract pull.", bar_date)
         return {
             "bar_date": bar_date.isoformat(),
             "skipped": True,
-            "expected": len(target_roots),
+            "expected": 0,
             "loaded": 0,
             "missing": [],
             "status": "complete",

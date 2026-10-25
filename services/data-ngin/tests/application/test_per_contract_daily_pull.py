@@ -67,13 +67,13 @@ def test_run_contract_close_pipeline_skips_weekend():
     from data_ngin.application.close_pipeline import run_contract_close_pipeline
 
     with (
-        patch("data_ngin.application.close_pipeline.expected_contracts", return_value=[]),
+        patch("data_ngin.application.close_pipeline.expected_contract_roots", return_value=[]),
         patch("data_ngin.application.close_pipeline.load_contracts", return_value=[]),
     ):
         res = run_contract_close_pipeline({}, date(2026, 10, 24))
         assert res["skipped"] is True
         assert res["status"] == "complete"
-        assert res["expected"] == 40
+        assert res["expected"] == 0
         assert res["loaded"] == 0
         assert res["missing"] == []
 
@@ -235,3 +235,30 @@ def test_failed_contract_row_counts_the_roots_from_the_table():
     assert row["missing"] == ["ZC", "ZS"]
     assert row["status"] == "failed"
     mock_readiness_repo.upsert_readiness.assert_called_once_with(row)
+
+
+def _csv_rows():
+    return [
+        {"dataSymbol": "MBT", "exchange": "CME", "underlying": "Crypto"},
+        {"dataSymbol": "6E", "exchange": "CME", "underlying": "FX"},
+        {"dataSymbol": "ZC", "exchange": "CBOT", "underlying": "Ags"},
+        {"dataSymbol": "ES", "exchange": "CME", "underlying": "Equity"},
+    ]
+
+
+def test_expected_roots_follow_the_exchange_calendar():
+    from data_ngin.application.close_pipeline import expected_contract_roots
+
+    roots = ["6E", "MBT", "MES", "ES", "ZC"]
+    # Saturday: only MBT trades (24/7 since 2026-06-13); expecting all 40 made every
+    # Saturday a 'partial' row with 39 roots missing, after three retries.
+    assert expected_contract_roots(_csv_rows(), date(2026, 10, 24), roots) == ["MBT"]
+    # Sunday: FX, equity index and crypto open on Sunday evening; grains open on Monday UTC.
+    assert expected_contract_roots(_csv_rows(), date(2026, 10, 25), roots) == [
+        "6E",
+        "ES",
+        "MBT",
+        "MES",
+    ]
+    # Wednesday: all of them.
+    assert expected_contract_roots(_csv_rows(), date(2026, 10, 21), roots) == sorted(roots)
