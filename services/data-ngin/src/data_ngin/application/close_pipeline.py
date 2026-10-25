@@ -496,12 +496,16 @@ def run_contract_close_pipeline(
     config: dict[str, Any],
     bar_date: date,
     roots: Iterable[str] | None = None,
+    days: int = BACKFILL_DAYS,
 ) -> dict[str, Any]:
     """
-    Fetch and ingest daily per-contract bars for the 40 roots for bar date `bar_date`.
-    Evaluates loaded vs missing roots and returns a readiness summary.
+    Fetch and ingest per-contract daily bars for the 40 roots over D-days .. D, like the
+    continuous pull: a bar first fetched provisionally (an early partial print) is
+    overwritten by the vendor's final bar on the next runs. The readiness summary counts
+    the roots expected on D.
     """
     import databento as db
+    import pandas as pd
 
     from data_ngin.domain.contract_definition import (
         extract_definitions_from_df,
@@ -529,9 +533,10 @@ def run_contract_close_pipeline(
 
     if api_key:
         client = db.Historical(api_key)
-        start_str = bar_date.isoformat()
+        start_str = (bar_date - timedelta(days=days)).isoformat()
         end_str = (bar_date + timedelta(days=1)).isoformat()
-        for root in target_roots:
+        fetch_roots = sorted(set(roots) if roots is not None else set(CONTRACT_ROOTS))
+        for root in fetch_roots:
             try:
                 parent_sym = f"{root}.FUT"
                 data = client.timeseries.get_range(
@@ -572,18 +577,19 @@ def run_contract_close_pipeline(
                     except ValueError:
                         continue
                     inst_id = str(row.instrument_id)
-                    exp = lookup_expiration(definitions, inst_id, str(raw_sym), bar_date)
+                    row_date = pd.Timestamp(row.ts_event).tz_convert("UTC").date()
+                    exp = lookup_expiration(definitions, inst_id, str(raw_sym), row_date)
                     if exp is None:
                         logger.warning(
                             "No definition for %s (%s) on %s; stored without expiration",
                             raw_sym,
                             inst_id,
-                            bar_date,
+                            row_date,
                         )
                     records.append(
                         {
                             "instrument_id": inst_id,
-                            "date": bar_date,
+                            "date": row_date,
                             "root": sym_root,
                             "raw_symbol": str(raw_sym),
                             "expiration": exp,

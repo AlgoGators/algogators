@@ -270,3 +270,48 @@ def test_a_contract_run_that_loads_nothing_fails_the_dag():
     assert contract_run_failed({"skipped": False, "status": "failed", "missing": ["CL"]}) is True
     assert contract_run_failed({"skipped": False, "status": "partial", "missing": ["CL"]}) is False
     assert contract_run_failed({"skipped": True, "status": "complete", "missing": []}) is False
+
+
+def test_daily_pull_rewrites_the_window_with_each_bar_on_its_own_date(monkeypatch):
+    import pandas as pd
+    from data_ngin.application.close_pipeline import run_contract_close_pipeline
+
+    monkeypatch.setenv("DATABENTO_API_KEY", "test-key")
+    bars = {
+        "ts_event": pd.to_datetime(["2026-10-19", "2026-10-21"], utc=True),
+        "symbol": ["GCZ6", "GCZ6"],
+        "instrument_id": [41271, 41271],
+        "open": [4000.0, 4100.0],
+        "high": [4020.0, 4120.0],
+        "low": [3990.0, 4090.0],
+        "close": [4010.0, 4110.0],
+        "volume": [140000, 150000],
+    }
+    definitions = {
+        "ts_recv": pd.to_datetime(["2026-10-19"], utc=True),
+        "instrument_id": [41271],
+        "raw_symbol": ["GCZ6"],
+        "instrument_class": ["F"],
+        "expiration": pd.to_datetime(["2026-12-29 17:30"], utc=True),
+    }
+    client = _client_for(bars, definitions)
+    mock_repo = MagicMock()
+    mock_repo.get_contract_roots_for_date.return_value = {"GC"}
+    with (
+        patch(
+            "data_ngin.application.close_pipeline.expected_contract_roots",
+            return_value=["GC"],
+        ),
+        patch("data_ngin.application.close_pipeline.load_contracts", return_value=[]),
+        patch(
+            "data_ngin.infrastructure.repository.ohlcv_repository.OhlcvRepository",
+            return_value=mock_repo,
+        ),
+        patch("databento.Historical", return_value=client),
+    ):
+        run_contract_close_pipeline({}, date(2026, 10, 21), roots=["GC"])
+
+    starts = {c.kwargs["start"] for c in client.timeseries.get_range.call_args_list}
+    assert starts == {"2026-10-16"}
+    (records,), _ = mock_repo.insert_contract_bars.call_args
+    assert [r["date"] for r in records] == [date(2026, 10, 19), date(2026, 10, 21)]
