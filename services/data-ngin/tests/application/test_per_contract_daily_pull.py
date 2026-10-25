@@ -262,3 +262,11 @@ def test_expected_roots_follow_the_exchange_calendar():
     ]
     # Wednesday: all of them.
     assert expected_contract_roots(_csv_rows(), date(2026, 10, 21), roots) == sorted(roots)
+
+
+def test_a_contract_run_that_loads_nothing_fails_the_dag():
+    from data_ngin.application.pipeline_tasks import contract_run_failed
+
+    assert contract_run_failed({"skipped": False, "status": "failed", "missing": ["CL"]}) is True
+    assert contract_run_failed({"skipped": False, "status": "partial", "missing": ["CL"]}) is False
+    assert contract_run_failed({"skipped": True, "status": "complete", "missing": []}) is False

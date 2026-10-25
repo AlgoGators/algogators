@@ -156,3 +156,10 @@ def should_retry_contract_run(result: dict[str, Any], try_number: int, max_tries
     from data_ngin.application.close_pipeline import should_retry_contract_run as should_retry
 
     return should_retry(result, try_number, max_tries)
+
+
+def contract_run_failed(result: dict[str, Any]) -> bool:
+    """Whether a contract run that is not retried must fail the DAG run."""
+    from data_ngin.application.close_pipeline import contract_run_failed as failed
+
+    return failed(result)

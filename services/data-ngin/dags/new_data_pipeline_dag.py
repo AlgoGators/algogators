@@ -68,6 +68,9 @@ def run_contract_pipeline() -> dict:
         raise RuntimeError(
             f"{bar_date}: contract bars still missing for {result['missing']}; retrying"
         )
+    if pipeline_tasks.contract_run_failed(result):
+        # The failure callback writes the 'failed' row with the counts from the table.
+        raise RuntimeError(f"{bar_date}: no contract bars loaded for {result['missing']}")
     return result
 
 

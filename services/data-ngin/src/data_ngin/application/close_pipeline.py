@@ -633,3 +633,12 @@ def should_retry_contract_run(result: dict[str, Any], try_number: int, max_tries
     only while retries remain.
     """
     return bool(result.get("missing")) and try_number <= max_tries
+
+
+def contract_run_failed(result: dict[str, Any]) -> bool:
+    """
+    Whether a per-contract run that will not be retried loaded no expected root at all, so
+    the DAG run must fail (and raise its alert) instead of finishing green with a
+    'failed' readiness row.
+    """
+    return not result.get("skipped") and result.get("status") == "failed"
