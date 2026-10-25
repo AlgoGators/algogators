@@ -59,3 +59,30 @@ def test_loader_splits_one_id_carrying_two_live_contracts():
     assert loader.resolve_expiration("42003082", "RTYU5", date(2025, 6, 2), index) == date(
         2025, 9, 19
     )
+
+
+def _populate():
+    path = SCRIPT.parent / "populate_contract_expirations.py"
+    spec = importlib.util.spec_from_file_location("populate_contract_expirations", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_populate_refuses_to_write_null_over_a_stored_expiration():
+    populate = _populate()
+    rows = [
+        ("2017", "GCQ4", date(2024, 5, 1), date(2024, 8, 28)),
+        # a contract listed after the archives: the daily pull stored its date
+        ("777", "GCZ7", date(2026, 11, 2), date(2027, 12, 29)),
+        # no definition and no stored date: nothing to protect
+        ("888", "GCG8", date(2026, 11, 2), None),
+    ]
+    spans = [
+        ("2017", "GCQ4", date(2024, 5, 1), date(2024, 5, 1), date(2024, 8, 28)),
+        ("777", "GCZ7", date(2026, 11, 2), date(2026, 11, 2), None),
+        ("888", "GCG8", date(2026, 11, 2), date(2026, 11, 2), None),
+    ]
+    assert populate.unresolved_spans_holding_values(rows, spans) == [
+        ("777", "GCZ7", date(2026, 11, 2), date(2026, 11, 2))
+    ]

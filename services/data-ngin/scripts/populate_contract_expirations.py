@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import time
+from datetime import date
 
 import psycopg2
 from dotenv import load_dotenv
@@ -25,6 +26,27 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("populate_contract_expirations")
+
+
+def unresolved_spans_holding_values(
+    rows: list[tuple[str, str, date, date | None]],
+    spans: list[tuple[str, str, date, date, date | None]],
+) -> list[tuple[str, str, date, date]]:
+    """
+    The spans no definition resolves whose stored rows already hold an expiration. Writing NULL
+    over them would erase dates (the daily pull's, for contracts listed after the archives).
+    """
+    unresolved = [(str(i), s, first, last) for i, s, first, last, exp in spans if exp is None]
+    keys = {(i, s) for i, s, _, _ in unresolved}
+    dated: dict[tuple[str, str], list[date]] = {}
+    for i, s, d, exp in rows:
+        if exp is not None and (str(i), s) in keys:
+            dated.setdefault((str(i), s), []).append(d)
+    return [
+        (i, s, first, last)
+        for i, s, first, last in unresolved
+        if any(first <= d <= last for d in dated.get((i, s), []))
+    ]
 
 
 def main() -> None:
@@ -87,19 +109,29 @@ def main() -> None:
         "Indexed %d (instrument_id, raw_symbol) definitions in %.2fs.", len(index), time.time() - t0
     )
 
-    cur.execute('SELECT instrument_id, raw_symbol, "date" FROM futures_data.contract_ohlcv_1d;')
-    spans = contract_expiration_spans(cur.fetchall(), index)
+    cur.execute(
+        'SELECT instrument_id, raw_symbol, "date", expiration FROM futures_data.contract_ohlcv_1d;'
+    )
+    rows = cur.fetchall()
+    spans = contract_expiration_spans(((i, s, d) for i, s, d, _ in rows), index)
     unresolved = [s for s in spans if s[4] is None]
     logger.info(
         "Resolved %d contract spans; %d without a fitting definition.", len(spans), len(unresolved)
     )
-    for inst_id, symbol, first, last, _ in unresolved[:50]:
-        logger.warning(
-            "No definition fits %s %s (%s..%s); expiration set to NULL",
-            inst_id,
-            symbol,
-            first,
-            last,
+    held = unresolved_spans_holding_values(rows, spans)
+    if held:
+        conn.rollback()
+        for inst_id, symbol, first, last in held[:50]:
+            logger.error(
+                "No definition fits %s %s (%s..%s), which holds a date",
+                inst_id,
+                symbol,
+                first,
+                last,
+            )
+        raise RuntimeError(
+            f"refusing: {len(held)} span(s) with no fitting definition already hold an expiration; "
+            "nothing written (add the archives that define them)"
         )
 
     cur.execute(
