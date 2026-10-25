@@ -117,3 +117,19 @@ def test_get_cme_expiration_fallback_general():
     exp = get_cme_expiration_fallback("CL", "Z", 2020)
     assert exp.year == 2020
     assert exp.month in (11, 12)
+
+
+def test_one_id_carrying_two_live_contracts_is_split_by_symbol():
+    # Her defect's shape: id 42003082 carried RTYU5 (expiring 2025-09-19) and MYMZ6
+    # (2026-12-18) at overlapping times. Keyed on the id alone, a MYMZ6 bar of 2025-06-02
+    # takes RTYU5's 2025-09-19 (the date fit and the nearest month cannot tell them apart).
+    index = extract_definitions_from_df(
+        _defs(
+            [
+                (42003082, "RTYU5", "F", "2025-09-19 13:30", "2025-03-03"),
+                (42003082, "MYMZ6", "F", "2026-12-18 14:30", "2025-03-03"),
+            ]
+        )
+    )
+    assert lookup_expiration(index, "42003082", "MYMZ6", date(2025, 6, 2)) == date(2026, 12, 18)
+    assert lookup_expiration(index, "42003082", "RTYU5", date(2025, 6, 2)) == date(2025, 9, 19)

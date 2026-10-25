@@ -39,3 +39,23 @@ def test_loader_writes_no_calendar_guess_without_a_definition():
     loader = _loader()
     assert loader.resolve_expiration("999", "ZNZ6", date(2026, 6, 1), _index()) is None
     assert loader.resolve_expiration("999", "ZNZ6", date(2026, 6, 1), None) is None
+
+
+def test_loader_splits_one_id_carrying_two_live_contracts():
+    df = pd.DataFrame(
+        {
+            "instrument_id": [42003082, 42003082],
+            "raw_symbol": ["RTYU5", "MYMZ6"],
+            "instrument_class": ["F", "F"],
+            "expiration": pd.to_datetime(["2025-09-19 13:30", "2026-12-18 14:30"], utc=True),
+            "ts_recv": pd.to_datetime(["2025-03-03", "2025-03-03"], utc=True),
+        }
+    )
+    index = extract_definitions_from_df(df)
+    loader = _loader()
+    assert loader.resolve_expiration("42003082", "MYMZ6", date(2025, 6, 2), index) == date(
+        2026, 12, 18
+    )
+    assert loader.resolve_expiration("42003082", "RTYU5", date(2025, 6, 2), index) == date(
+        2025, 9, 19
+    )
