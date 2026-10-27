@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
 from data_ngin.application.pipeline_tasks import write_contract_futures_readiness
@@ -210,8 +210,9 @@ def test_daily_pull_leaves_expiration_empty_without_a_definition(monkeypatch):
 
 
 def test_failed_contract_row_counts_the_roots_from_the_table():
-    # The failure callback passes no counts. The row must still say 40 expected and how
-    # many roots are in the table, not 'failed, expected 0' (production's 2026-10-12 row).
+    # The failure callback passes no counts. The row must still say 42 expected (the 40, and
+    # MGC and SIL) and how many roots are in the table, not 'failed, expected 0' (production's
+    # 2026-10-12 row).
     from data_ngin.application.close_pipeline import CONTRACT_ROOTS
 
     mock_readiness_repo = MagicMock()
@@ -230,8 +231,8 @@ def test_failed_contract_row_counts_the_roots_from_the_table():
         row = write_contract_futures_readiness(
             "new_config.yaml", date(2026, 10, 12), "scheduled__2026-10-13", failed=True
         )
-    assert row["expected"] == 40
-    assert row["loaded"] == 38
+    assert row["expected"] == 42
+    assert row["loaded"] == 40
     assert row["missing"] == ["ZC", "ZS"]
     assert row["status"] == "failed"
     mock_readiness_repo.upsert_readiness.assert_called_once_with(row)
@@ -262,6 +263,30 @@ def test_expected_roots_follow_the_exchange_calendar():
     ]
     # Wednesday: all of them.
     assert expected_contract_roots(_csv_rows(), date(2026, 10, 21), roots) == sorted(roots)
+
+
+def test_the_gold_and_silver_micros_are_pulled_on_their_full_size_rows_calendar():
+    # Micro gold and micro silver (AlgoGators trades them in place of GC and SI) are per-contract
+    # roots with no contract-CSV row of their own: they trade COMEX's hours, on GC's and SI's rows.
+    from data_ngin.application.close_pipeline import CONTRACT_ROOTS, expected_contract_roots
+
+    assert {"MGC", "SIL", "GC", "SI"} <= set(CONTRACT_ROOTS)
+    rows = _csv_rows() + [
+        {"dataSymbol": "GC", "exchange": "COMEX", "underlying": "Metals"},
+        {"dataSymbol": "SI", "exchange": "COMEX", "underlying": "Metals"},
+    ]
+    roots = ["GC", "MGC", "SI", "SIL", "ZC"]
+    # Saturday: none of them; Sunday: the metals open on Sunday evening, grains do not.
+    assert expected_contract_roots(rows, date(2026, 10, 24), roots) == []
+    assert expected_contract_roots(rows, date(2026, 10, 25), roots) == ["GC", "MGC", "SI", "SIL"]
+    assert expected_contract_roots(rows, date(2026, 10, 21), roots) == sorted(roots)
+    # Every day of 2026 (holidays included): the micro is expected exactly when its twin is.
+    day = date(2026, 1, 1)
+    while day.year == 2026:
+        got = expected_contract_roots(rows, day, ["GC", "MGC", "SI", "SIL"])
+        assert ("MGC" in got) == ("GC" in got), day
+        assert ("SIL" in got) == ("SI" in got), day
+        day += timedelta(days=1)
 
 
 def test_a_contract_run_that_loads_nothing_fails_the_dag():
