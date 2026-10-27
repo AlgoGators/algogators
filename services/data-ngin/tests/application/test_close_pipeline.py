@@ -315,7 +315,8 @@ class TestLoadContracts(unittest.TestCase):
 
     def test_full_contract_list(self) -> None:
         with patch.dict(os.environ, {"DATA_NGIN_CONTRACTS_DIR": ""}):
-            self.assertEqual(len(load_contracts(CONFIG)), 36)
+            # the 36, and micro gold and micro silver (MGC, SIL), traded in place of GC and SI
+            self.assertEqual(len(load_contracts(CONFIG)), 38)
 
 
 if __name__ == "__main__":
