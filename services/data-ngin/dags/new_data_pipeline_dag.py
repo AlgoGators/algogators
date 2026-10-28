@@ -98,6 +98,19 @@ def write_contract_readiness(result: dict) -> None:
     )
 
 
+@task
+def fill_continuous_holes(contract_result: dict) -> dict:
+    """
+    After both pulls: insert the .v.0 rows the vendor did not deliver over the last days, from
+    the per-contract table (data_ngin.application.continuous_fill; trade-ngin grids every
+    per-contract series on the .v.0 dates). Insert only; each row is logged.
+    """
+    context = get_current_context()
+    return pipeline_tasks.run_continuous_fill(
+        CONFIG_NAME, pipeline_tasks.bar_date_from_context(context)
+    )
+
+
 @dag(
     dag_id="new_data_pipeline_dag",
     default_args=default_args,
@@ -124,6 +137,9 @@ def new_data_pipeline_dag():
     contract_result = run_contract_pipeline()
     pipeline_result >> contract_result
     write_contract_readiness(contract_result)
+
+    # Missing continuous rows, filled from the per-contract table once both pulls are in
+    fill_continuous_holes(contract_result)
 
 
 new_data_pipeline_dag()
