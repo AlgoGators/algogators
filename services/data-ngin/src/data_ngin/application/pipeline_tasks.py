@@ -163,3 +163,14 @@ def contract_run_failed(result: dict[str, Any]) -> bool:
     from data_ngin.application.close_pipeline import contract_run_failed as failed
 
     return failed(result)
+
+
+def run_continuous_fill(config_name: str, bar_date: date) -> dict[str, Any]:
+    """Insert the continuous rows the vendor did not deliver over the last days to `bar_date`,
+    from the per-contract table (see continuous_fill)."""
+    from data_ngin.application.continuous_fill import run_continuous_fill as fill
+    from data_ngin.utils.dynamic_loader import load_config
+
+    path = config_path(config_name)
+    logging.info(f"Filling missing continuous rows {config_name} to {bar_date}, config={path}")
+    return fill(load_config(path), bar_date)
