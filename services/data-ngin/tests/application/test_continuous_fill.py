@@ -28,7 +28,7 @@ def by_day(*bars):
     return out
 
 
-THU, FRI, SAT, SUN, MON = (date(2026, 5, d) for d in (14, 15, 16, 17, 18))
+THU, FRI, SAT, SUN, MON, TUE, WED = (date(2026, 5, d) for d in (14, 15, 16, 17, 18, 19, 20))
 
 
 class TestBusiest:
@@ -124,9 +124,26 @@ class TestFindFills:
         assert (fills[0].rtype, fills[0].publisher_id) == ("35", "1")
 
     def test_only_inside_the_window(self):
-        bars = [bar("SI", d, "a", 10) for d in (THU, FRI, MON)]
-        rows = {"SI.v.0": [vrow(THU, "a")]}
+        bars = [bar("SI", d, "a", 10) for d in (THU, FRI, MON, TUE)]
+        rows = {"SI.v.0": [vrow(THU, "a"), vrow(TUE, "a")]}
         assert [f.day for f in cf.find_fills(rows, bars, MON, MON)] == [MON]
+
+    def test_never_the_newest_day(self):
+        # audit A S-6 (b): with no later real row the pulls' D-5..D re-fetch owns the day; a fill
+        # there could carry a one-day vendor stray of D-1 into a confirmed switch on a live book
+        bars = [bar("SI", d, "a", 10) for d in (THU, FRI, MON)]
+        rows = {"SI.v.0": [vrow(THU, "a"), vrow(FRI, "a")]}
+        skipped = []
+        assert cf.find_fills(rows, bars, THU, MON, skipped=skipped) == []
+        assert skipped == [("SI.v.0", MON, "no later real row yet: left to the pulls")]
+
+    def test_a_partial_contract_load_is_skipped(self):
+        # audit A S-6 (a): never pick from a root whose contract load for the date is incomplete
+        bars = [bar("CL", d, "z6", 10) for d in (THU, MON)] + [bar("CL", FRI, "f7", 3)]
+        rows = {"CL.v.0": [vrow(THU, "z6"), vrow(MON, "z6")]}
+        skipped = []
+        fills = cf.find_fills(rows, bars, THU, MON, lambda root, day: day != FRI, skipped)
+        assert fills == [] and skipped == [("CL.v.0", FRI, "the contract load of CL is not complete")]
 
     def test_no_fill_before_the_first_row_or_without_a_contract_bar(self):
         bars = [bar("SI", d, "a", 10) for d in (THU, FRI)]
@@ -136,22 +153,26 @@ class TestFindFills:
     def test_the_source_root_follows_the_nearest_earlier_row(self):
         # MES.v.0 carried ES bars before its own contracts (trade-ngin's grid convention)
         bars = [bar("ES", THU, "es", 10), bar("ES", FRI, "es", 10), bar("MES", FRI, "mes", 5),
-                bar("ES", MON, "es", 10), bar("MES", MON, "mes", 5), bar("MES", date(2026, 5, 19), "mes", 5)]
-        rows = {"MES.v.0": [vrow(THU, "es"), vrow(MON, "mes")]}
-        fills = cf.find_fills(rows, bars, THU, date(2026, 5, 19))
-        assert [(f.day, f.bar.root) for f in fills] == [(FRI, "ES"), (date(2026, 5, 19), "MES")]
+                bar("ES", MON, "es", 10), bar("MES", MON, "mes", 5), bar("MES", TUE, "mes", 5),
+                bar("MES", WED, "mes", 5)]
+        rows = {"MES.v.0": [vrow(THU, "es"), vrow(MON, "mes"), vrow(WED, "mes")]}
+        fills = cf.find_fills(rows, bars, THU, WED)
+        assert [(f.day, f.bar.root) for f in fills] == [(FRI, "ES"), (TUE, "MES")]
 
     def test_an_instrument_id_is_matched_on_its_date(self):
         # the same id names another root's contract in another year: not this symbol's root
         bars = [bar("6A", THU, "77", 10), bar("MES", date(2024, 1, 2), "77", 10),
-                bar("6A", FRI, "77", 10)]
-        rows = {"6A.v.0": [vrow(THU, "77")]}
+                bar("6A", FRI, "77", 10), bar("6A", MON, "77", 10)]
+        rows = {"6A.v.0": [vrow(THU, "77"), vrow(MON, "77")]}
         assert [f.bar.root for f in cf.find_fills(rows, bars, FRI, FRI)] == ["6A"]
 
 
 class FakeCursor:
-    def __init__(self, vendor, bars, rowcount=1):
+    def __init__(self, vendor, bars, rowcount=1, readiness=None):
         self.vendor, self.bars, self.rowcount_value = vendor, bars, rowcount
+        # every date's contract load complete unless a test says otherwise
+        days = [THU, FRI, SAT, SUN, MON, TUE, WED]
+        self.readiness = [(d, "complete", []) for d in days] if readiness is None else readiness
         self.statements = []
         self._result = []
         self.rowcount = 0
@@ -168,6 +189,8 @@ class FakeCursor:
             self._result = self.vendor
         elif sql is cf.READ_CONTRACT_BARS:
             self._result = self.bars
+        elif sql is getattr(cf, "READ_CONTRACT_READINESS", None):
+            self._result = self.readiness
         self.rowcount = self.rowcount_value if sql in (cf.INSERT_CONTINUOUS, cf.INSERT_RAW) else 0
 
     def fetchall(self):
@@ -214,6 +237,15 @@ class TestFillContinuousHoles:
         assert [(f.day, f.bar.instrument_id, f.branch) for f in filled] == [(FRI, "1", cf.FALLBACK)]
         raw = [p for s, p in cur.statements if s.startswith("INSERT INTO futures_data.ohlcv_1d_raw")]
         assert raw[0]["instrument_id"] is None and raw[0]["close"] == 1.0
+
+    def test_a_root_missing_from_the_contract_readiness_is_not_filled(self):
+        for readiness in ([(FRI, "partial", ["SI"])], [(FRI, "failed", [])], []):
+            cur = FakeCursor(self.VENDOR, self.BARS, readiness=readiness)
+            conn = MagicMock()
+            conn.cursor.return_value = cur
+            assert cf.fill_continuous_holes(conn, THU, MON) == [], readiness
+            assert not any(s.startswith("INSERT") for s, _ in cur.statements)
+            assert cur.statements[-1][0] == "COMMIT"
 
     def test_nothing_missing_inserts_nothing(self):
         vendor = [("SI.v.0", d, "1", "35", "1") for d in (THU, FRI, MON)]
@@ -284,4 +316,8 @@ def test_dag_fill_task_calls_the_pipeline_task():
     ):
         assert dag.fill_continuous_holes({"status": "complete"}) == {"filled": []}
     fill.assert_called_once_with("new_config.yaml", MON)
-    assert "fill_continuous_holes(contract_result)" in DAG.read_text()
+    text = DAG.read_text()
+    assert "fill_result = fill_continuous_holes(contract_result)" in text
+    # audit A S-7: readiness is published only after the fill has committed
+    assert "fill_result >> [write_readiness(pipeline_result), write_contract_readiness(contract_result)]" in text
+    assert text.count("write_readiness(pipeline_result)") == 1

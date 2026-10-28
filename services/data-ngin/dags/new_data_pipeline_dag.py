@@ -129,17 +129,18 @@ def fill_continuous_holes(contract_result: dict) -> dict:
     max_active_runs=1,
 )
 def new_data_pipeline_dag():
-    # Continuous pull and readiness
+    # Continuous pull, then the per-contract pull
     pipeline_result = run_pipeline()
-    write_readiness(pipeline_result)
-
-    # Per-contract daily pull runs after continuous close
     contract_result = run_contract_pipeline()
     pipeline_result >> contract_result
-    write_contract_readiness(contract_result)
 
     # Missing continuous rows, filled from the per-contract table once both pulls are in
-    fill_continuous_holes(contract_result)
+    fill_result = fill_continuous_holes(contract_result)
+
+    # Readiness only after the fill has committed (a consumer waiting on D never reads it
+    # before the fill). A failed fill or contract pull still writes the rows through the
+    # failure callback (data_ngin.ops.readiness_failure).
+    fill_result >> [write_readiness(pipeline_result), write_contract_readiness(contract_result)]
 
 
 new_data_pipeline_dag()

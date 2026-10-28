@@ -5,7 +5,14 @@ and its optimiser builds one covariance on the dates every symbol shares, so a .
 vendor never delivered removes that day's real contract bars from every run. After each day's
 pulls, this finds, for every continuous symbol over a short lookback, the UTC dates on which
 its source root has bars in futures_data.contract_ohlcv_1d while neither futures_data.ohlcv_1d
-nor futures_data.ohlcv_1d_raw holds the symbol, and inserts one contract's bar into both:
+nor futures_data.ohlcv_1d_raw holds the symbol, and inserts one contract's bar into both.
+
+It fills only a date that has a later real .v.0 row of the symbol, so never the newest day (the
+pulls re-fetch D-5 .. D, and a vendor bar still to come must not be pre-empted), and only a date
+whose per-contract load is complete for that root (its ops.data_ready row for
+futures_contract_ohlcv_1d exists, is not 'failed' and does not list the root as missing), so
+the volume rule never picks from a partial load. Skipped holes are logged
+(CONTINUOUS_FILL_SKIPPED). The contract:
 
 - The source root is the root of the contract named by the symbol's nearest earlier .v.0 row
   (ohlcv_1d_raw.instrument_id, matched on the instrument id AND the date: ids are reused
@@ -35,6 +42,7 @@ Databento's own .v.0 contract on every hole date HD checked (42 of 42).
 import logging
 from bisect import bisect_left
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
@@ -158,11 +166,16 @@ def find_fills(
     bars: list[ContractBar],
     start: date,
     end: date,
+    load_complete: Callable[[str, date], bool] | None = None,
+    skipped: list[tuple[str, date, str]] | None = None,
 ) -> list[FilledRow]:
     """
     The rows to insert for the dates `start` .. `end`. `vendor_rows` holds every date each
     continuous symbol has in either table (sorted, with the context before and after the
-    window), `bars` the contract rows of the same span.
+    window), `bars` the contract rows of the same span. A hole is filled only when a later
+    real row of the symbol exists and, when `load_complete` is given, when it says the
+    source root's contract load for that date is complete; other holes go to `skipped`
+    as (symbol, date, reason).
     """
     by_root: dict[str, dict[date, dict[str, ContractBar]]] = defaultdict(dict)
     by_key: dict[tuple[str, date], ContractBar] = {}
@@ -201,6 +214,14 @@ def find_fills(
                 continue
             before = rows[i - 1] if i > 0 else None
             after = rows[i] if i < len(rows) else None
+            if after is None:
+                if skipped is not None:
+                    skipped.append((symbol, day, "no later real row yet: left to the pulls"))
+                continue
+            if load_complete is not None and not load_complete(source, day):
+                if skipped is not None:
+                    skipped.append((symbol, day, f"the contract load of {source} is not complete"))
+                continue
             bar, branch = pick_contract(
                 by_root[source],
                 day,
@@ -236,6 +257,11 @@ SELECT symbol, d, max(instrument_id), max(rtype), max(publisher_id) FROM (
   FROM futures_data.ohlcv_1d o
   WHERE o.symbol LIKE '%%.v.0' AND o.time >= %(lo)s AND o.time < %(hi)s
 ) t GROUP BY symbol, d ORDER BY symbol, d
+"""
+
+READ_CONTRACT_READINESS = """
+SELECT bar_date, status, missing FROM ops.data_ready
+WHERE dataset = 'futures_contract_ohlcv_1d' AND bar_date BETWEEN %(lo)s AND %(hi)s
 """
 
 READ_CONTRACT_BARS = """
@@ -285,7 +311,15 @@ def fill_continuous_holes(
                 ContractBar(r[0], r[1], str(r[2]), r[3], r[4], *map(float, r[5:9]), int(r[9]))
                 for r in cur.fetchall()
             ]
-            fills = find_fills(vendor_rows, bars, start, end)
+            cur.execute(READ_CONTRACT_READINESS, {"lo": start, "hi": end})
+            readiness = {d: (status, set(missing or [])) for d, status, missing in cur.fetchall()}
+
+            def load_complete(root: str, day: date) -> bool:
+                row = readiness.get(day)
+                return row is not None and row[0] != "failed" and root not in row[1]
+
+            skipped: list[tuple[str, date, str]] = []
+            fills = find_fills(vendor_rows, bars, start, end, load_complete, skipped)
             inserted = []
             for f in fills:
                 b = f.bar
@@ -315,6 +349,8 @@ def fill_continuous_holes(
         except Exception:
             cur.execute("ROLLBACK")
             raise
+    for symbol, day, reason in skipped:
+        logger.warning("CONTINUOUS_FILL_SKIPPED %s %s: %s", symbol, day.isoformat(), reason)
     for f in inserted:
         logger.warning(
             "CONTINUOUS_FILL %s %s from %s (instrument_id %s, %s, volume %d)",
