@@ -9,6 +9,7 @@ from data_ngin.infrastructure.repository.readiness_repository import ReadinessRe
 from data_ngin.ops.readiness_failure import (
     CONTINUOUS_ONLY_TASKS,
     CONTRACT_ONLY_TASKS,
+    NO_READINESS_TASKS,
     make_readiness_failure_callback,
 )
 
@@ -131,7 +132,25 @@ class TestReadinessFailureCallback(unittest.TestCase):
             if isinstance(node, ast.FunctionDef)
             and any(getattr(d, "id", None) == "task" for d in node.decorator_list)
         }
-        self.assertEqual(tasks, {"run_pipeline"} | CONTINUOUS_ONLY_TASKS | CONTRACT_ONLY_TASKS)
+        self.assertEqual(
+            tasks,
+            {"run_pipeline"} | CONTINUOUS_ONLY_TASKS | CONTRACT_ONLY_TASKS | NO_READINESS_TASKS,
+        )
+
+    @patch("data_ngin.application.pipeline_tasks.write_contract_futures_readiness")
+    @patch("data_ngin.application.pipeline_tasks.write_futures_readiness")
+    def test_a_failed_continuous_fill_rewrites_no_row(
+        self, mock_continuous: MagicMock, mock_contract: MagicMock
+    ) -> None:
+        # Both pulls wrote their rows before the fill ran; its failure must not mark them failed.
+        context = {"task_instance": MagicMock(task_id="fill_continuous_holes")}
+        with patch(
+            "data_ngin.application.pipeline_tasks.bar_date_from_context",
+            return_value=date(2026, 10, 21),
+        ):
+            make_readiness_failure_callback("new_config.yaml")(context)
+        mock_continuous.assert_not_called()
+        mock_contract.assert_not_called()
 
     @patch("data_ngin.application.pipeline_tasks.write_futures_readiness")
     def test_never_raises(self, mock_write: MagicMock) -> None:

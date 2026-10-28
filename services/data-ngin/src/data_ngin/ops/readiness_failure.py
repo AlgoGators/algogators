@@ -11,6 +11,9 @@ not rewrite the continuous row: a continuous pull that loaded all but one symbol
 missing. The continuous pull failing writes both rows, since the per-contract
 pull runs after it and so never runs.
 
+The continuous fill runs after both pulls have written their rows; its failure
+rewrites neither row (the failure notifier still opens the issue).
+
 Like dag_failure_notifier it never raises: a second exception would mask the
 task's real failure.
 """
@@ -24,6 +27,8 @@ logger = logging.getLogger(__name__)
 # The DAG's tasks whose failure leaves only one dataset's row unwritten.
 CONTINUOUS_ONLY_TASKS = frozenset({"write_readiness"})
 CONTRACT_ONLY_TASKS = frozenset({"run_contract_pipeline", "write_contract_readiness"})
+# The DAG's tasks that run after both pulls: their failure leaves no readiness row unwritten.
+NO_READINESS_TASKS = frozenset({"fill_continuous_holes"})
 
 
 def make_readiness_failure_callback(config_name: str) -> Callable[[Any], None]:
@@ -34,6 +39,8 @@ def make_readiness_failure_callback(config_name: str) -> Callable[[Any], None]:
             bar_date = pipeline_tasks.bar_date_from_context(context)
             run_id = pipeline_tasks.run_id_from_context(context)
             task_id = getattr(context.get("task_instance"), "task_id", None)
+            if task_id in NO_READINESS_TASKS:
+                return
             if task_id not in CONTRACT_ONLY_TASKS:
                 pipeline_tasks.write_futures_readiness(config_name, bar_date, run_id, failed=True)
             if task_id not in CONTINUOUS_ONLY_TASKS:
