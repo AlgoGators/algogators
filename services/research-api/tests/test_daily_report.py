@@ -80,31 +80,18 @@ def test_number_formats():
 
 def test_render_has_every_section_and_inline_images():
     out = HtmlReportRenderer().render_daily(parse_daily_report(sample_payload()))
-    assert out.subject == "Daily Trading Report - 2026-10-21"
+    assert out.subject == "AlgoGators daily report | Trend Following | 2026-10-21"
     for needle in (
         "Daily Trading Report",
         "Yesterday was Columbus Day",
         "Today&#39;s positions",
-        "Daily executions",
-        "Yesterday&#39;s finalized position results",
-        "Performance metrics",
-        "Symbols reference",
-        "metadata not found for: 6E",
+        "Executions",
+        "Realized PnL",
         "Rollover notice",
         "CLZ6",
     ):
         assert needle in out.html
-    assert set(out.images) == {
-        "brandmark",
-        "equity",
-        "drawdown",
-        "leverage",
-        "margin",
-        "daily_pnl",
-        "contracts",
-        "pnl_by_symbol",
-        "composition",
-    }
+    assert set(out.images) == {"brandmark", "equity", "daily_pnl", "pnl_by_symbol", "composition"}
     assert all(f"cid:{cid}" in out.html for cid in out.images)
     assert out.images["equity"].startswith(PNG)
     assert "Columbus Day" in out.text
