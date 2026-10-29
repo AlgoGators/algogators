@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import date
 
 SCHEMA_VERSION = 1
-NOTICE_KINDS = ("info", "holiday", "weekend", "warning", "alert")
+NOTICE_KINDS = ("info", "holiday", "weekend", "warning")
 
 
 class ReportPayloadError(ValueError):
@@ -64,18 +64,6 @@ class Rollover:
 class Metric:
     label: str
     value: str
-    group: int = 0  # metrics of one group sit together; a rule separates the groups
-    tone: str = ""  # "up" / "down" colours a PnL or return; "" is plain
-
-
-@dataclass(frozen=True)
-class SymbolRef:
-    """One row of the symbols reference: a contract the book holds."""
-
-    db_symbol: str
-    ib_symbol: str
-    name: str
-    months: str
 
 
 @dataclass(frozen=True)
@@ -93,18 +81,8 @@ class DailyReport:
     daily_pnl: tuple = ()  # ((date label, value), ...)
     pnl_by_symbol: tuple = ()  # ((symbol, value), ...)
     composition: tuple = ()  # ((label, value), ...)
-    drawdown: tuple = ()  # ((date label, percent below the peak), ...)
-    leverage: tuple = ()  # ((date label, gross leverage), ...)
-    net_leverage: tuple = ()  # ((date label, net leverage), ...)
-    margin_history: tuple = ()  # ((date label, margin posted), ...)
-    contracts_per_day: tuple = ()  # ((date label, contracts traded), ...)
     rollovers: tuple = ()
     footnotes: tuple = ()
-    margin_posted: float | None = None
-    previous_day_label: str = ""
-    previous_day: tuple = ()  # Metrics for the settled day's box
-    symbols: tuple = ()  # SymbolRefs
-    symbols_missing: tuple = ()  # held contracts with no metadata row
 
     @property
     def total_notional(self):
@@ -228,38 +206,10 @@ def parse_daily_report(payload):
             )
         )
 
-    def _metric(r, i, key):
-        where = f"{key}[{i}]"
-        group = r.get("group", 0)
-        if isinstance(group, bool) or not isinstance(group, int):
-            raise ReportPayloadError(f"{where}.group must be an integer")
-        return Metric(
-            _text(r, "label", where),
-            _text(r, "value", where),
-            group,
-            _text(r, "tone", where, default=""),
-        )
-
-    metrics = tuple(_metric(r, i, "metrics") for i, r in enumerate(_rows(payload, "metrics")))
-    previous_block = _object(payload, "previous_day")
-    previous_day = tuple(
-        _metric(r, i, "previous_day.metrics")
-        for i, r in enumerate(_rows(previous_block, "metrics"))
+    metrics = tuple(
+        Metric(_text(r, "label", f"metrics[{i}]"), _text(r, "value", f"metrics[{i}]"))
+        for i, r in enumerate(_rows(payload, "metrics"))
     )
-    symbols_block = _object(payload, "symbols")
-    symbols = tuple(
-        SymbolRef(
-            _text(r, "db", f"symbols.rows[{i}]"),
-            _text(r, "ib", f"symbols.rows[{i}]", default=""),
-            _text(r, "name", f"symbols.rows[{i}]", default=""),
-            _text(r, "months", f"symbols.rows[{i}]", default=""),
-        )
-        for i, r in enumerate(_rows(symbols_block, "rows"))
-    )
-    missing = symbols_block.get("missing", [])
-    if not isinstance(missing, list) or not all(isinstance(x, str) for x in missing):
-        raise ReportPayloadError("symbols.missing must be a list of strings")
-    margin = _object(payload, "summary").get("margin_posted")
     rollovers = tuple(
         Rollover(
             _text(r, "symbol", f"rollovers[{i}]"),
@@ -287,18 +237,8 @@ def parse_daily_report(payload):
         daily_pnl=_series(series, "daily_pnl", "date"),
         pnl_by_symbol=_series(series, "pnl_by_symbol", "symbol"),
         composition=_series(series, "composition", "label"),
-        drawdown=_series(series, "drawdown", "date"),
-        leverage=_series(series, "leverage", "date"),
-        net_leverage=_series(series, "net_leverage", "date"),
-        margin_history=_series(series, "margin_posted", "date"),
-        contracts_per_day=_series(series, "contracts_per_day", "date"),
         rollovers=rollovers,
         footnotes=tuple(footnotes),
-        margin_posted=float(margin) if isinstance(margin, (int, float)) else None,
-        previous_day_label=str(previous_block.get("label", "")),
-        previous_day=previous_day,
-        symbols=symbols,
-        symbols_missing=tuple(missing),
     )
 
 
@@ -342,6 +282,4 @@ def percent(value, places=1):
 
 
 def subject(report):
-    """ "Daily Trading Report - 2026-10-23"; a QT desk book is tagged so the desk can filter it."""
-    prefix = f"[QT {report.portfolio_id}] " if report.portfolio_id.upper().startswith("QT_") else ""
-    return f"{prefix}Daily Trading Report - {report.report_date.isoformat()}"
+    return f"AlgoGators daily report | {report.portfolio_name} | {report.report_date.isoformat()}"

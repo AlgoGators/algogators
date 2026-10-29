@@ -4,7 +4,7 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 
 from research_api.application.reports.enqueue import EnqueueDailyReports
-from research_api.infrastructure.reports.worker import enabled, record_sent, run_once
+from research_api.infrastructure.reports.worker import enabled, run_once
 
 NY = ZoneInfo("America/New_York")
 CFG = {
@@ -54,11 +54,11 @@ def _detail(cfg, rows):
     return t._detail()
 
 
-def _run(now, published, queue=None, ids=("QT_CONSERVATIVE",), held=None):
+def _run(now, published, queue=None, ids=("QT_CONSERVATIVE",)):
     queue = queue or Queue()
     reader = Reader()
     use = EnqueueDailyReports(
-        Registry(), reader, Published(published), queue, ids, _detail, now=lambda: now, held=held
+        Registry(), reader, Published(published), queue, ids, _detail, now=lambda: now
     )
     return use(), queue, reader
 
@@ -102,51 +102,3 @@ def test_the_worker_does_nothing_unless_enabled():
     assert not enabled({}) and not enabled({"REPORT_SEND_ENABLED": "true"})
     assert enabled({"REPORT_SEND_ENABLED": "1"})
     assert run_once({}) == 0  # idle: no database or SMTP is touched
-
-
-def test_a_day_approved_without_its_email_waits_for_the_desks_send():
-    now, day = dt.datetime(2026, 10, 22, 10, 5, tzinfo=NY), dt.date(2026, 10, 22)
-    summary, queue, reader = _run(now, day, held=lambda pid, d: True)
-    assert summary.queued == 0 and queue.rows == [] and reader.calls == 0
-    summary, queue, _ = _run(now, day, held=lambda pid, d: False)
-    assert summary.queued == 1
-
-
-def test_sent_at_is_recorded_only_when_asked():
-    assert not record_sent({}) and not record_sent({"REPORT_RECORD_SENT": "true"})
-    assert record_sent({"REPORT_RECORD_SENT": "1"})
-
-
-def test_history_series_ride_in_the_payload_and_a_failed_read_costs_only_the_charts():
-    day = dt.date(2026, 10, 22)
-    now = dt.datetime(2026, 10, 22, 9, 31, tzinfo=NY)
-    series = {"leverage": [{"date": "2026-10-21", "value": 1.5}]}
-    seen = []
-
-    def history(pid, strategy_type):
-        seen.append((pid, strategy_type))
-        return series
-
-    def run(history):
-        queue = Queue()
-        use = EnqueueDailyReports(
-            Registry(),
-            Reader(),
-            Published(day),
-            queue,
-            ("QT_CONSERVATIVE",),
-            _detail,
-            now=lambda: now,
-            history=history,
-        )
-        use()
-        return queue.rows[0][3]
-
-    assert run(history)["series"]["leverage"] == series["leverage"]
-    assert seen == [("QT_CONSERVATIVE", "S")]
-
-    def broken(pid, strategy_type):
-        raise RuntimeError("column does not exist")
-
-    payload = run(broken)  # still queued, just without the history charts
-    assert "leverage" not in payload["series"] and payload["series"]["equity"]
