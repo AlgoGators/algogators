@@ -13,6 +13,7 @@ its column in the same PR or straight after. A blank cell means "not recorded", 
 | 004 | `004_desk_settings_locks.sql` | `trading.desk_settings_locks` (the settings the QT desk sees greyed out, D-14; seeded with Dom's 2026-10-14 list) and its append-only log | `004_desk_settings_locks_rollback.sql` (drops the log) | |
 | 005 | `005_investor_portfolio_links.sql` | `investor.portfolio_links`: the portfolio and book (QT or model) each investor follows (D-25, decision 13), with an append-only log | `005_investor_portfolio_links_rollback.sql` (every investor back to the QT book) | |
 | 006 | `006_report_queue.sql` | `reports.report_queue`: the queue of the retired AlgoLens report worker (the book e-mail is the engine's); nothing reads it, the rollback drops it | `006_report_queue_rollback.sql` (destructive: unsent reports are lost) | |
+| 007 | `007_book_sent_grant.sql` | Lets `svc_algolens` set `trading.live_run_metadata.sent_at` (the retired report worker). Take it back on every database it was applied to | `007_book_sent_grant_rollback.sql` (revokes the grant; the engine alone writes `sent_at`) | |
 
 The QT tables AlgoLens reads and writes (`trading.position_overrides`, `trading.strategy_config`,
 the `portfolio_group` and `desk_editable` registry columns) are trade-ngin's migrations 021 to 029.
