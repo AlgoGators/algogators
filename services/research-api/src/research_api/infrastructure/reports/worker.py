@@ -24,6 +24,7 @@ import time
 from research_api.application.portfolio.use_cases import build_strategy_detail
 from research_api.application.reports.enqueue import EnqueueDailyReports
 from research_api.application.reports.use_cases import SendQueuedReports
+from research_api.domain.reports.recipients import parse_address_list
 from research_api.infrastructure.investor.repositories import PostgresInvestorRepository
 from research_api.infrastructure.portfolio.repositories import PostgresPortfolioRepository
 from research_api.infrastructure.portfolio.strategy_registry import PostgresStrategyRegistry
@@ -49,13 +50,6 @@ def record_sent(env) -> bool:
     return (env.get("REPORT_RECORD_SENT") or "").strip() == "1"
 
 
-def portfolio_ids(env) -> tuple:
-    """REPORT_PORTFOLIOS as given. Portfolio ids are upper-case in the registry, so they must not
-    go through the address parser, which lower-cases."""
-    raw = (env.get("REPORT_PORTFOLIOS") or "").replace(";", ",")
-    return tuple(p.strip() for p in raw.split(",") if p.strip())
-
-
 def run_once(env=None) -> int:
     """One pass; the number of reports that failed."""
     env = os.environ if env is None else env
@@ -69,7 +63,7 @@ def run_once(env=None) -> int:
         PostgresPortfolioRepository(),
         PostgresInvestorRepository(),
         queue,
-        portfolio_ids(env),
+        parse_address_list(env.get("REPORT_PORTFOLIOS")),
         build_strategy_detail,
         held=PostgresHeldDays(),
         symbols=PostgresContractSymbols(),
