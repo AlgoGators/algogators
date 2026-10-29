@@ -188,6 +188,11 @@
    "key": "futures",
    "name": "Futures strategy",
    "desc": "The futures trend and carry strategy: rolls, carry and how the book is booked on roll days."
+  },
+  {
+   "key": "website",
+   "name": "Website",
+   "desc": "The public website: the redesign and its move out of the mono repo."
   }
  ]
 }
