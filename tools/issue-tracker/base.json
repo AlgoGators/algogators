@@ -1,0 +1,193 @@
+{
+ "issues": [],
+ "prs": [
+  {
+   "repo": "trade-ngin",
+   "n": 132,
+   "disp": "Update",
+   "note": "Database clean-up. Changes requested: restore the methods still in use, remove only methods nothing calls, and get the build green.",
+   "lane": "main"
+  },
+  {
+   "repo": "algogauge",
+   "n": 9,
+   "disp": "Retarget",
+   "note": "Peak memory capture. Its base integration/tier1-all was never merged to main.",
+   "lane": "main"
+  },
+  {
+   "repo": "algogauge",
+   "n": 8,
+   "disp": "Retarget to main",
+   "note": "Benchmark suite PRs. Their base branch was already merged to main (PR #3), so they need retargeting; algogauge #10 step W2 covers landing them.",
+   "lane": "main"
+  },
+  {
+   "repo": "algogauge",
+   "n": 7,
+   "disp": "Retarget to main",
+   "note": "Benchmark suite PRs. Their base branch was already merged to main (PR #3), so they need retargeting; algogauge #10 step W2 covers landing them.",
+   "lane": "main"
+  },
+  {
+   "repo": "algogauge",
+   "n": 6,
+   "disp": "Retarget to main",
+   "note": "Benchmark suite PRs. Their base branch was already merged to main (PR #3), so they need retargeting; algogauge #10 step W2 covers landing them.",
+   "lane": "main"
+  },
+  {
+   "repo": "algogauge",
+   "n": 5,
+   "disp": "Retarget to main",
+   "note": "Benchmark suite PRs. Their base branch was already merged to main (PR #3), so they need retargeting; algogauge #10 step W2 covers landing them.",
+   "lane": "main"
+  },
+  {
+   "repo": "algogauge",
+   "n": 4,
+   "disp": "Retarget to main",
+   "note": "Benchmark suite PRs. Their base branch was already merged to main (PR #3), so they need retargeting; algogauge #10 step W2 covers landing them.",
+   "lane": "main"
+  },
+  {
+   "repo": "algogators",
+   "n": 9,
+   "disp": "Review",
+   "note": "Database footprint audit and budget report. 2,592 lines, 19 files.",
+   "lane": "main"
+  }
+ ],
+ "rotation": [
+  {
+   "week": "1",
+   "person": "Fabio",
+   "phase": "0: tooling, baseline and the guide",
+   "deliver": "Fix make coverage, add a one-command coverage script, update the guide, post the baseline.",
+   "note": "Goes first: every later phase uses this tooling."
+  },
+  {
+   "week": "2",
+   "person": "Oliver",
+   "phase": "1: open FIXMEs and the database validators",
+   "deliver": "Three pinned bugs handled under the bug rule, then tests for ten database validators.",
+   "note": "Uses the comparison run that Oliver's tooling (#148) provides."
+  },
+  {
+   "week": "3",
+   "person": "Sivan",
+   "phase": "3: backtest pieces and storage",
+   "deliver": "Tests for cost analysis, constraints, the results managers and the audit log.",
+   "note": ""
+  },
+  {
+   "week": "4",
+   "person": "Gaby",
+   "phase": "7: database-backed tests",
+   "deliver": "Tests for the database layer and loaders against a throwaway database, each seeding its own data.",
+   "note": "Needs a throwaway database."
+  },
+  {
+   "week": "5",
+   "person": "Pranav",
+   "phase": "8: tests that check values",
+   "deliver": "For past fixes proven only by a compile break, an assertion that fails on the wrong value, starting with corporate-action paths.",
+   "note": "Starts from a list of commits supplied by a lead."
+  },
+  {
+   "week": "6",
+   "person": "Gannon",
+   "phase": "6: the portfolio manager and the risk manager",
+   "deliver": "Tests for the optimise-then-risk loop, multi-strategy aggregation and the risk manager.",
+   "note": "Placed last of the six so the stage-3 changes to this code can land first."
+  },
+  {
+   "week": "7",
+   "person": "Buffer",
+   "phase": "none",
+   "deliver": "Catch up anything left partly done.",
+   "note": ""
+  },
+  {
+   "week": "8",
+   "person": "New analysts, concurrently",
+   "phase": "2: small pure-logic files; 4: the trend-following strategies; 5: email, charts and the CSV exporter",
+   "deliver": "Three self-contained phases, then the open-ended tail: pick the file with the most uncovered lines.",
+   "note": "None of the three needs a database or a comparison run."
+  }
+ ],
+ "people": [],
+ "queues": {},
+ "projects": [
+  {
+   "key": "equities",
+   "name": "Equities",
+   "desc": "The equity book: leftovers after the merge, the multi-strategy book, margin, the hybrid book and corporate-action deal terms."
+  },
+  {
+   "key": "regime",
+   "name": "Regime detection",
+   "desc": "Fixing and measuring today's regime pipelines, building detection to the target design, and letting the engine act on it."
+  },
+  {
+   "key": "data",
+   "name": "Data",
+   "desc": "What the engines need from the data pipeline and the database: futures and equities bars, corporate actions, macro, options, calendars."
+  },
+  {
+   "key": "qt",
+   "name": "QT platform",
+   "desc": "Under thorough review by Dom; versions will start being released soon."
+  },
+  {
+   "key": "monitoring",
+   "name": "Run monitoring and alerts",
+   "desc": "Every run's warnings and errors recorded and seen: engine run events, pipeline health, the run-status view, and Grafana for logs, dashboards and alerts."
+  },
+  {
+   "key": "ml",
+   "name": "ML models",
+   "desc": "In-house models: foundations, the regime-linked models and the new models."
+  },
+  {
+   "key": "spreads",
+   "name": "Spreads and relative value",
+   "desc": "The spread strategy fixes, the relative-value layer, and its analysis views in AlgoLens."
+  },
+  {
+   "key": "stats",
+   "name": "Statistics and validation",
+   "desc": "algosystem as the statistics library: its audit and fixes, run comparisons, and backtest validation."
+  },
+  {
+   "key": "audiences",
+   "name": "AlgoLens audiences and investor books",
+   "desc": "Roles, the investor portal, the public page, and one engine portfolio per investor."
+  },
+  {
+   "key": "reporting",
+   "name": "Reporting and attribution",
+   "desc": "Signal logging, per-strategy attribution and the daily email."
+  },
+  {
+   "key": "testing",
+   "name": "Unit testing",
+   "desc": "The weekly rotation that raises test coverage without moving a number."
+  },
+  {
+   "key": "refactor",
+   "name": "Engine refactor and benchmarking",
+   "desc": "The engine refactor, the comparison tooling it relies on, the backtest window, and the timing baseline."
+  },
+  {
+   "key": "hygiene",
+   "name": "CI and engine hygiene",
+   "desc": "CI checks, compiler warnings and dead code."
+  },
+  {
+   "key": "futures",
+   "name": "Futures strategy",
+   "desc": "The futures trend and carry strategy: rolls, carry and how the book is booked on roll days."
+  }
+ ]
+}
