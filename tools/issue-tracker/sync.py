@@ -11,7 +11,7 @@ REPOS=['trade-ngin','algogators','AlgoLens','algosystem','algogauge']
 # each body starting '> Migrated from .../data-ngin/issues/N'. Old numbers are mapped to the new ones.
 OLD='data-ngin'; NEW='algogators'
 NAMES={'Faybioo':'Fabio','ChronoInferna':'Oliver','SivanRP':'Sivan','gabbypolito':'Gaby','pranavb05':'Pranav','jrile018':'John Riley','dominickdupuy':'Dom','Gannon-Stoner':'Gannon','pranavrevuri':'Pranav R.','raohemdutt':'HD','hdgit8':'HD','dependabot':'Dependabot'}
-PL={'equities':'equities','regime':'regime detection','data':'data','qt':'QT platform','monitoring':'run monitoring','ml':'ML models','spreads':'spreads','stats':'statistics and validation','audiences':'audiences and investor books','reporting':'reporting','testing':'unit testing','refactor':'refactor and benchmarking','hygiene':'CI and hygiene','futures':'futures strategy'}
+PL={'equities':'equities','regime':'regime detection','data':'data','qt':'QT platform','monitoring':'run monitoring','ml':'ML models','spreads':'spreads','stats':'statistics and validation','audiences':'audiences and investor books','reporting':'reporting','testing':'unit testing','refactor':'refactor and benchmarking','hygiene':'CI and hygiene','futures':'futures strategy','website':'website'}
 LP={v:k for k,v in PL.items()}
 STATUSES=['In progress','PR open','Draft PR open','Fix written, no PR','Ready to start','Under review','Blocked','Parked','Reference','Done']
 def gql(q):
