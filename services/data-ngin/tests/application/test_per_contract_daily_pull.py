@@ -271,7 +271,8 @@ def test_the_gold_and_silver_micros_are_pulled_on_their_full_size_rows_calendar(
     from data_ngin.application.close_pipeline import CONTRACT_ROOTS, expected_contract_roots
 
     assert {"MGC", "SIL", "GC", "SI"} <= set(CONTRACT_ROOTS)
-    rows = _csv_rows() + [
+    rows = [
+        *_csv_rows(),
         {"dataSymbol": "GC", "exchange": "COMEX", "underlying": "Metals"},
         {"dataSymbol": "SI", "exchange": "COMEX", "underlying": "Metals"},
     ]
