@@ -112,7 +112,7 @@ def get_strategy(strategy_id):
     except StrategyNotFoundError:
         return jsonify({"error": "Strategy not found"}), 404
     except BookNotWrittenError as exc:
-        return jsonify({"error": str(exc), "missingBook": exc.book}), 404
+        return jsonify({"error": "Book not written", "missingBook": exc.book}), 404
     except StrategyDataNotFoundError:
         return jsonify({"error": "No data found for strategy"}), 404
     except Exception as exc:
