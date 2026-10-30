@@ -16,6 +16,7 @@ dependencies = [
     "uvicorn>=0.34.0",
     "strawberry-graphql[fastapi]>=0.253.0",
     "pyarrow>=18.1.0",
+    "scipy>=1.11",
     "pydantic>=2.10.4,<3",
     "tzdata>=2024.2",
     "prometheus-fastapi-instrumentator>=7.0.0",
