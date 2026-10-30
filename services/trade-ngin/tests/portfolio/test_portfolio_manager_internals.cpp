@@ -5,9 +5,14 @@
 // in isolation.
 
 #include <gtest/gtest.h>
+#include "../risk/risk_module_test_helpers.hpp"
 #include <chrono>
 #include <cmath>
+#include <cstring>
+#include <map>
 #include <memory>
+#include <set>
+#include <sstream>
 #include <thread>
 #include "../core/test_base.hpp"
 #include "../data/test_db_utils.hpp"
@@ -24,8 +29,8 @@ using namespace trade_ngin::testing;
 
 namespace {
 
-PortfolioConfig default_config(bool optimization = false, bool risk = false) {
-    PortfolioConfig c{1'000'000.0, 100'000.0, 0.6, 0.05, optimization, risk};
+PortfolioConfig default_config(bool optimization = false, bool with_carver = false) {
+    PortfolioConfig c{1'000'000.0, 0.6, 0.05, optimization};
     c.opt_config.tau = 1.0;
     c.opt_config.capital = 1'000'000.0;
     c.opt_config.cost_penalty_scalar = 10.0;
@@ -39,6 +44,9 @@ PortfolioConfig default_config(bool optimization = false, bool risk = false) {
     c.risk_config.capital = 1'000'000.0;
     c.risk_config.confidence_level = 0.99;
     c.risk_config.lookback_period = 252;
+    // The module list replaces the old use_risk_management bool: the carver module carries
+    // the same seven values the test just set, so a gating test gates on the same numbers.
+    c.risk_modules = {with_carver ? test_carver_module(c.risk_config) : test_none_module()};
     return c;
 }
 
@@ -178,15 +186,194 @@ TEST_F(PortfolioManagerInternalsTest, CovarianceWithSufficientDataProducesPositi
     EXPECT_DOUBLE_EQ(cov[0][1], cov[1][0]);  // symmetric
 }
 
-// NOTE: calculate_covariance_matrix segfaults when called with one or more
-// symbols whose returns series is empty (mixed empty + non-empty input). The
-// production code's "if (returns.empty()) continue" guard at line ~792 only
-// skips that symbol in min_periods accumulation but leaves it in
-// ordered_symbols; the aligned-returns build at line ~826 then accesses
-// returns[start_idx + j] on the empty vector and crashes. Reported as a
-// FIXME in the end-of-phase rollup; no test is added because the task
-// forbids DISABLED_ prefixes and EXPECT_DEATH on a segfault is too brittle
-// for unit-test scope.
+// ===== calculate_covariance_matrix with an empty series =====
+//
+// min_periods is the length of the SHORTEST NON-EMPTY series, so the only series that can
+// be shorter than min_periods is an empty one (a series of 1..min_periods-1 returns would
+// itself set min_periods). The scan skips an empty symbol but leaves it in the ordered
+// symbol list; without the guard, `returns.size() - min_periods` wraps and the copy reads
+// far outside the vector. With the guard its column stays zero, its variance is restored
+// to the 0.01 default, and every other entry is bit-identical to the matrix built from the
+// same inputs without that symbol (a covariance entry depends only on its two columns).
+//
+// Two shapes of "empty": a vector that never held data (no buffer), and one that was
+// cleared (a live buffer, the shape a cleared historical_returns_ entry has).
+namespace {
+
+std::vector<double> covguard_series(size_t n, double amp, double phase, double drift) {
+    std::vector<double> v(n);
+    for (size_t t = 0; t < n; ++t) {
+        v[t] = amp * std::sin(phase * static_cast<double>(t)) + drift * static_cast<double>(t);
+    }
+    return v;
+}
+
+void expect_guarded_and_bit_identical(const std::vector<std::vector<double>>& cov,
+                                      const std::vector<std::vector<double>>& ref) {
+    // cov is over {A, M, Z} (sorted), M guarded; ref is over {A, Z}
+    ASSERT_EQ(ref.size(), 2u);
+    ASSERT_EQ(cov.size(), 3u);
+    for (const auto& row : cov) ASSERT_EQ(row.size(), 3u);
+    EXPECT_EQ(cov[1][1], 0.01) << "the guarded symbol's variance must be the 0.01 default";
+    for (size_t k : {size_t{0}, size_t{2}}) {
+        EXPECT_EQ(cov[1][k], 0.0) << "guarded row, column " << k;
+        EXPECT_EQ(cov[k][1], 0.0) << "guarded column, row " << k;
+    }
+    const size_t at[2] = {0, 2};
+    for (size_t i = 0; i < 2; ++i) {
+        for (size_t j = 0; j < 2; ++j) {
+            EXPECT_EQ(std::memcmp(&cov[at[i]][at[j]], &ref[i][j], sizeof(double)), 0)
+                << "entry (" << i << "," << j << ") moved: " << cov[at[i]][at[j]] << " vs "
+                << ref[i][j];
+        }
+    }
+}
+
+}  // namespace
+
+TEST_F(PortfolioManagerInternalsTest, CovarianceGuardsANeverFilledEmptySeries) {
+    const auto a = covguard_series(30, 0.01, 0.7, 0.0002);
+    const auto z = covguard_series(25, -0.015, 0.3, 0.0001);
+    std::unordered_map<std::string, std::vector<double>> with_empty{
+        {"A", a}, {"M", std::vector<double>{}}, {"Z", z}};
+    std::unordered_map<std::string, std::vector<double>> without{{"A", a}, {"Z", z}};
+    ASSERT_EQ(with_empty.at("M").data(), nullptr) << "this case needs a vector with no buffer";
+
+    const auto ref = manager_->calculate_covariance_matrix(without);  // min_periods 25
+    const auto cov = manager_->calculate_covariance_matrix(with_empty);
+    expect_guarded_and_bit_identical(cov, ref);
+}
+
+TEST_F(PortfolioManagerInternalsTest, CovarianceGuardsAClearedEmptySeries) {
+    const auto a = covguard_series(30, 0.01, 0.7, 0.0002);
+    const auto z = covguard_series(25, -0.015, 0.3, 0.0001);
+    std::unordered_map<std::string, std::vector<double>> with_empty{{"A", a}, {"Z", z}};
+    auto& m = with_empty["M"];
+    m.assign(64, 0.02);  // give it a buffer, then empty it: size 0, buffer kept
+    m.clear();
+    ASSERT_NE(m.data(), nullptr) << "this case needs a cleared vector that kept its buffer";
+    std::unordered_map<std::string, std::vector<double>> without{{"A", a}, {"Z", z}};
+
+    const auto ref = manager_->calculate_covariance_matrix(without);
+    const auto cov = manager_->calculate_covariance_matrix(with_empty);
+    expect_guarded_and_bit_identical(cov, ref);
+}
+
+// ===== date_aligned_returns (private) =====
+//
+// The optimizer's covariance input, aligned by DATE: the returns of every symbol are taken between
+// consecutive dates of the INTERSECTION of the symbols' dates, so a date one symbol lacks is
+// dropped for all and the next return spans it for every symbol. The RED/GREEN pair for the
+// optimizer path is tests/portfolio/test_covariance_date_alignment.cpp; these pin the helper.
+namespace {
+
+using DatedCloses = std::unordered_map<std::string, std::map<int64_t, double>>;
+
+double ret(double prev, double curr) { return (curr - prev) / prev; }
+
+std::map<int64_t, double> dated_series(int64_t first_day, size_t n, double amp, double phase,
+                                       const std::set<int64_t>& skip = {}) {
+    std::map<int64_t, double> m;
+    for (size_t t = 0; t < n; ++t) {
+        const int64_t d = first_day + static_cast<int64_t>(t);
+        if (skip.count(d)) continue;
+        m[d] = 100.0 * (1.0 + amp * std::sin(phase * static_cast<double>(t))) + 0.03 * t;
+    }
+    return m;
+}
+
+}  // namespace
+
+// Worked by hand. A prints on days 1, 2, 3 (a Sunday) and 4; B on 1, 2 and 4. The intersection is
+// {1, 2, 4}: day 3 is dropped, and A's return on day 4 runs from day 2 (121 / 110), the same
+// interval as B's (60.5 / 55). Not from A's own previous date (121 / 120).
+TEST_F(PortfolioManagerInternalsTest, DateAlignedReturnsPairByDateAndSpanTheDroppedDay) {
+    const DatedCloses closes{{"A", {{1, 100.0}, {2, 110.0}, {3, 120.0}, {4, 121.0}}},
+                             {"B", {{1, 50.0}, {2, 55.0}, {4, 60.5}}}};
+    const auto r = manager_->date_aligned_returns(closes);
+    ASSERT_EQ(r.size(), 2u);
+    EXPECT_EQ(r.at("A"), (std::vector<double>{ret(100.0, 110.0), ret(110.0, 121.0)}));
+    EXPECT_EQ(r.at("B"), (std::vector<double>{ret(50.0, 55.0), ret(55.0, 60.5)}));
+}
+
+// A close that is not finite or not above zero is not a usable date for its symbol, so that date
+// is dropped for all (the count rule skipped only the return out of a non-positive close).
+TEST_F(PortfolioManagerInternalsTest, DateAlignedReturnsDropADateWithANonPositiveClose) {
+    const DatedCloses closes{{"A", {{1, 100.0}, {2, 0.0}, {3, 102.0}, {4, 104.0}}},
+                             {"B", {{1, 50.0}, {2, 51.0}, {3, 52.0}, {4, 53.0}}}};
+    const auto r = manager_->date_aligned_returns(closes);
+    EXPECT_EQ(r.at("A"), (std::vector<double>{ret(100.0, 102.0), ret(102.0, 104.0)}));
+    EXPECT_EQ(r.at("B"), (std::vector<double>{ret(50.0, 52.0), ret(52.0, 53.0)}));
+}
+
+// The empty-series guards hold: a symbol with a single close gets an EMPTY series
+// and does not shrink the intersection, so the others' series are exactly what they are without
+// it, and the covariance built from them guards its column (0.01 variance, zero covariances) and
+// leaves every other entry bit-identical.
+TEST_F(PortfolioManagerInternalsTest, DateAlignedReturnsGiveAOneCloseSymbolAnEmptySeries) {
+    const auto a = dated_series(1000, 40, 0.02, 0.7, {1010, 1011});
+    const auto z = dated_series(1000, 40, -0.015, 0.3, {1025});
+    const DatedCloses with_one{{"A", a}, {"M", {{1020, 7.0}}}, {"Z", z}};
+    const DatedCloses without_m{{"A", a}, {"Z", z}};
+
+    const auto r_with = manager_->date_aligned_returns(with_one);
+    const auto r_without = manager_->date_aligned_returns(without_m);
+    ASSERT_EQ(r_with.count("M"), 1u);
+    EXPECT_TRUE(r_with.at("M").empty());
+    EXPECT_EQ(r_with.at("A"), r_without.at("A"));
+    EXPECT_EQ(r_with.at("Z"), r_without.at("Z"));
+    EXPECT_EQ(r_without.at("A").size(), 36u) << "40 dates less the 3 one side lacks, minus one";
+
+    const auto ref = manager_->calculate_covariance_matrix(r_without);
+    const auto cov = manager_->calculate_covariance_matrix(r_with);
+    expect_guarded_and_bit_identical(cov, ref);
+}
+
+// With one date set for every symbol the aligned series ARE the per-symbol series the count rule
+// used, bit for bit: date alignment changes nothing where nothing is misaligned.
+TEST_F(PortfolioManagerInternalsTest, DateAlignedReturnsEqualTheCountSeriesWhenTheDatesAgree) {
+    auto t0 = std::chrono::system_clock::time_point(std::chrono::hours(24 * 20000));
+    std::vector<Bar> all;
+    for (const auto& [symbol, amp] : std::vector<std::pair<std::string, double>>{
+             {"AAA", 2.0}, {"BBB", -3.0}, {"CCC", 5.0}}) {
+        auto b = bars(symbol, 60, t0, amp);
+        all.insert(all.end(), b.begin(), b.end());
+    }
+    manager_->update_historical_returns(all);
+    const auto aligned = manager_->date_aligned_returns(manager_->closes_by_date_);
+    ASSERT_EQ(aligned.size(), 3u);
+    for (const auto& symbol : {"AAA", "BBB", "CCC"}) {
+        EXPECT_EQ(aligned.at(symbol), manager_->historical_returns_.at(symbol)) << symbol;
+    }
+}
+
+// The cap stays at the configured number of PRICES per symbol, applied when the closes are
+// recorded; the aligned series then run over the intersection of what is kept, and min_periods
+// is the intersection's length less one. AAA prints seven days a week, BBB on weekdays only: at a
+// cap of 25 prices AAA's history reaches back 25 calendar days, BBB's 25 weekdays, so the
+// intersection is BBB's weekdays inside AAA's last 25 days.
+TEST_F(PortfolioManagerInternalsTest, DateAlignedReturnsRunOverTheIntersectionOfTheCappedHistories) {
+    manager_->config_.covariance_history_prices = 25;
+    const auto t0 = std::chrono::system_clock::time_point(std::chrono::hours(24 * 20003));  // a Monday
+    std::vector<Bar> all = bars("AAA", 60, t0);
+    for (const auto& b : bars("BBB", 60, t0)) {
+        const auto day = std::chrono::floor<std::chrono::days>(b.timestamp);
+        const unsigned wd = std::chrono::weekday{day}.c_encoding();  // 0 Sunday .. 6 Saturday
+        if (wd != 0 && wd != 6) all.push_back(b);
+    }
+    manager_->update_historical_returns(all);
+    const auto& a = manager_->closes_by_date_.at("AAA");
+    const auto& b = manager_->closes_by_date_.at("BBB");
+    ASSERT_EQ(a.size(), 25u);
+    ASSERT_EQ(b.size(), 25u);
+    size_t shared = 0;
+    for (const auto& [day, close] : b) shared += a.count(day);
+    ASSERT_GE(shared, 2u);
+
+    const auto aligned = manager_->date_aligned_returns(manager_->closes_by_date_);
+    EXPECT_EQ(aligned.at("AAA").size(), shared - 1);
+    EXPECT_EQ(aligned.at("BBB").size(), shared - 1);
+}
 
 // ===== update_historical_returns (private) =====
 
@@ -196,11 +383,9 @@ TEST_F(PortfolioManagerInternalsTest, UpdateHistoricalReturnsHandlesEmptyDataNoO
 }
 
 TEST_F(PortfolioManagerInternalsTest, UpdateHistoricalReturnsRunsThroughProcessWithoutError) {
-    // MockStrategy does not override get_price_history (it relies on
-    // BaseStrategy's default empty map), so update_historical_returns has
-    // no per-symbol price data to seed `historical_returns_`. We exercise the
-    // pathway end-to-end and assert it doesn't error; covariance tests above
-    // hit the calculation logic with synthetic returns directly.
+    // The PM keeps its own history from the bars it is fed, so a strategy
+    // that reports no history (MockStrategy relies on BaseStrategy's empty map) still leaves
+    // the PM with returns for every symbol it was fed.
     auto a = make_strategy("UH", {"AAPL"});
     ASSERT_TRUE(manager_->add_strategy(a.strat, 0.3).is_ok());
     auto t0 = std::chrono::system_clock::now() - std::chrono::hours(24 * 300);
@@ -209,28 +394,15 @@ TEST_F(PortfolioManagerInternalsTest, UpdateHistoricalReturnsRunsThroughProcessW
 }
 
 TEST_F(PortfolioManagerInternalsTest, UpdateHistoricalReturnsTrimsToMaxHistoryLength) {
-    // Direct injection: seed price_history_ to bypass MockStrategy's empty
-    // get_price_history() and verify trimming kicks in.
+    // 200 dates fed straight to update_historical_returns; the 2,520-return cap, lowered to
+    // 50 here, keeps the newest 50 returns.
     auto a = make_strategy("UH2", {"AAPL"});
     ASSERT_TRUE(manager_->add_strategy(a.strat, 0.3).is_ok());
     manager_->max_history_length_ = 50;
-    std::vector<double> prices;
-    for (int i = 0; i < 200; ++i) prices.push_back(100.0 + i * 0.1);
-    manager_->price_history_["AAPL"] = prices;
-    // Update historical returns from the synthetic price history.
-    auto t0 = std::chrono::system_clock::now();
-    Bar b;
-    b.symbol = "AAPL";
-    b.timestamp = t0;
-    b.close = Decimal(120.0);
-    b.open = Decimal(120.0);
-    b.high = Decimal(120.0);
-    b.low = Decimal(120.0);
-    b.volume = 1000.0;
-    manager_->update_historical_returns({b});
-    if (manager_->historical_returns_.count("AAPL")) {
-        EXPECT_LE(manager_->historical_returns_.at("AAPL").size(), 50u);
-    }
+    auto t0 = std::chrono::system_clock::now() - std::chrono::hours(24 * 200);
+    manager_->update_historical_returns(bars("AAPL", 200, t0));
+    ASSERT_EQ(manager_->historical_returns_.count("AAPL"), 1u);
+    EXPECT_EQ(manager_->historical_returns_.at("AAPL").size(), 50u);
 }
 
 // ===== get_positions_internal (private) =====
@@ -273,12 +445,12 @@ TEST_F(PortfolioManagerInternalsTest, MultiCycleProcessGeneratesExecutionsBetwee
 }
 
 TEST_F(PortfolioManagerInternalsTest, ProcessWithOptimizationRunsIterativeLoop) {
-    auto cfg = default_config(/*optimization=*/true, /*risk=*/false);
+    auto cfg = default_config(/*optimization=*/true, /*with_carver=*/false);
     auto pm = std::make_unique<PortfolioManager>(cfg, manager_id_ + "_OPTLOOP");
     auto a = make_strategy("OL_A", {"AAPL"});
     auto b = make_strategy("OL_B", {"MSFT"});
-    ASSERT_TRUE(pm->add_strategy(a.strat, 0.3, /*opt=*/true, /*risk=*/false).is_ok());
-    ASSERT_TRUE(pm->add_strategy(b.strat, 0.3, /*opt=*/true, /*risk=*/false).is_ok());
+    ASSERT_TRUE(pm->add_strategy(a.strat, 0.3, /*opt=*/true).is_ok());
+    ASSERT_TRUE(pm->add_strategy(b.strat, 0.3, /*opt=*/true).is_ok());
     auto t0 = std::chrono::system_clock::now() - std::chrono::hours(24 * 400);
     std::vector<Bar> combined;
     auto a_bars = bars("AAPL", 300, t0);
@@ -294,12 +466,12 @@ TEST_F(PortfolioManagerInternalsTest, ProcessWithOptimizationRunsIterativeLoop) 
 }
 
 TEST_F(PortfolioManagerInternalsTest, ProcessWithRiskManagementDoesNotCrashOnLargePositions) {
-    auto cfg = default_config(/*opt=*/false, /*risk=*/true);
+    auto cfg = default_config(/*opt=*/false, /*with_carver=*/true);
     cfg.risk_config.max_gross_leverage = 0.5;  // very restrictive
     cfg.risk_config.max_net_leverage = 0.5;
     auto pm = std::make_unique<PortfolioManager>(cfg, manager_id_ + "_RISKLOOP");
     auto a = make_strategy("RL", {"AAPL"});
-    ASSERT_TRUE(pm->add_strategy(a.strat, 0.3, /*opt=*/false, /*risk=*/true).is_ok());
+    ASSERT_TRUE(pm->add_strategy(a.strat, 0.3, /*opt=*/false).is_ok());
     auto t0 = std::chrono::system_clock::now() - std::chrono::hours(24 * 400);
     EXPECT_TRUE(pm->process_market_data(bars("AAPL", 300, t0, 5.0)).is_ok());
 }
@@ -361,11 +533,147 @@ TEST_F(PortfolioManagerInternalsTest, GetRequiredChangesReturnsDeltaAfterProcess
 
 // ===== process_market_data WHEN strategy is_running=false =====
 
-TEST_F(PortfolioManagerInternalsTest, ProcessOnStoppedStrategyContinuesWithoutCrash) {
+// A failed on_data is not swallowed: after it the manager would go on to read
+// get_target_positions(), and an empty or stale target map against a held book is
+// a full-book liquidation.
+//
+// But a STOPPED strategy is not an ingest failure, and treating it as one would
+// let a deliberately paused sleeve abort the whole portfolio. So the manager
+// distinguishes the two: a strategy that is not RUNNING is SKIPPED -- it takes
+// no part in the cycle and its targets are not read -- while a RUNNING strategy
+// whose on_data fails stops the cycle (covered by
+// PriceHistoryOrderingTest.AFailedOnDataStopsTheCycleBeforeTargetsAreRead).
+//
+// The assertion that carries this test is the second one: the cycle succeeds AND
+// the stopped strategy contributed nothing.
+TEST_F(PortfolioManagerInternalsTest, ProcessSkipsAStoppedStrategyWithoutFailingTheCycle) {
     auto a = make_strategy("STOPPED", {"AAPL"});
     ASSERT_TRUE(manager_->add_strategy(a.strat, 0.3).is_ok());
-    a.strat->stop();  // stopped strategy
     auto t0 = std::chrono::system_clock::now() - std::chrono::hours(24 * 300);
-    auto r = manager_->process_market_data(bars("AAPL", 300, t0));
-    EXPECT_TRUE(r.is_ok());  // production swallows per-strategy errors and continues
+
+    // One running cycle so the sleeve holds a real target map.
+    ASSERT_TRUE(manager_->process_market_data(bars("AAPL", 300, t0)).is_ok());
+
+    // Stop it, then plant a target that only a read of the stopped map could
+    // surface. On main the failed on_data was swallowed and the stale map was
+    // read anyway; the skip must not read it at all.
+    a.strat->stop();
+    Position planted;
+    planted.symbol = "AAPL";
+    planted.quantity = Decimal(999.0);
+    planted.average_price = Decimal(100.0);
+    ASSERT_TRUE(a.strat->update_position("AAPL", planted).is_ok());
+
+    auto r = manager_->process_market_data(bars("AAPL", 5, t0 + std::chrono::hours(24 * 300)));
+    EXPECT_TRUE(r.is_ok())
+        << "a stopped sleeve aborted the whole portfolio cycle; being stopped is a "
+           "lifecycle state, not a data failure";
+
+    const auto by_strategy = manager_->get_strategy_positions();
+    const auto it = by_strategy.find(a.id);
+    if (it != by_strategy.end()) {
+        const auto pit = it->second.find("AAPL");
+        if (pit != it->second.end()) {
+            EXPECT_NE(static_cast<double>(pit->second.quantity), 999.0)
+                << "the stopped strategy's target map was read this cycle: the planted "
+                   "quantity reached the portfolio";
+        }
+    }
+}
+
+// The stopped sleeve's target map, the clearing half. The skip above
+// stops the stopped sleeve's targets from being READ, but the map the manager keeps for it
+// (info.target_positions) still holds what the previous rebalance left there, and everything
+// after the skip in the same call (the optimizer, the risk steps, the rounding, the book copy and
+// execution generation) reads that map. A sleeve stopped between two rebalances must contribute
+// an EMPTY target map on the second. Two sleeves on different symbols, so the running sleeve's
+// map shows the clear is confined to the stopped one.
+TEST_F(PortfolioManagerInternalsTest, AStoppedSleeveContributesAnEmptyTargetMap) {
+    auto a = make_strategy("RUNNING_SLEEVE", {"AAPL"});
+    auto b = make_strategy("STOPPED_SLEEVE", {"MSFT"});
+    ASSERT_TRUE(manager_->add_strategy(a.strat, 0.5).is_ok());
+    ASSERT_TRUE(manager_->add_strategy(b.strat, 0.5).is_ok());
+    const auto t0 = std::chrono::system_clock::now() - std::chrono::hours(24 * 300);
+    auto both = [&](int n, std::chrono::system_clock::time_point from) {
+        auto v = bars("AAPL", n, from);
+        auto m = bars("MSFT", n, from);
+        v.insert(v.end(), m.begin(), m.end());
+        return v;
+    };
+
+    // Rebalance 1: both sleeves RUNNING, so both hold a target map.
+    ASSERT_TRUE(manager_->process_market_data(both(300, t0)).is_ok());
+    ASSERT_FALSE(manager_->strategies_.at(a.id).target_positions.empty());
+    ASSERT_FALSE(manager_->strategies_.at(b.id).target_positions.empty())
+        << "precondition: the second sleeve must hold a target map before it is stopped";
+    ASSERT_TRUE(manager_->strategies_.at(b.id).target_positions.count("MSFT"));
+
+    // Stopped between the two rebalances.
+    ASSERT_TRUE(b.strat->stop().is_ok());
+    ASSERT_NE(b.strat->get_state(), StrategyState::RUNNING);
+
+    // Rebalance 2. Flat bars at each symbol's last close: the mock's base on_data books any
+    // unrealised loss against a max_drawdown of 0 and refuses, which would stop the cycle before
+    // the stopped sleeve's map is reached. Flat bars keep the running sleeve's P&L at 0.
+    const auto first = both(300, t0);
+    std::vector<Bar> flat;
+    for (const std::string sym : {"AAPL", "MSFT"}) {
+        Bar last{};
+        for (const auto& bar : first)
+            if (bar.symbol == sym) last = bar;
+        for (int i = 1; i <= 5; ++i) {
+            Bar b = last;
+            b.timestamp = last.timestamp + std::chrono::hours(24 * i);
+            flat.push_back(b);
+        }
+    }
+    ASSERT_TRUE(manager_->process_market_data(flat).is_ok());
+
+    const auto& stopped = manager_->strategies_.at(b.id).target_positions;
+    EXPECT_TRUE(stopped.empty())
+        << "the stopped sleeve contributed the stale target map of the previous rebalance ("
+        << stopped.size() << " symbol(s), MSFT present: " << stopped.count("MSFT") << ")";
+    const auto by_strategy = manager_->get_strategy_positions();
+    const auto bit = by_strategy.find(b.id);
+    if (bit != by_strategy.end()) {
+        EXPECT_EQ(bit->second.count("MSFT"), 0u)
+            << "the stale target reached the stopped sleeve's book through the rebalance";
+    }
+    // The running sleeve is untouched by the clear.
+    EXPECT_TRUE(manager_->strategies_.at(a.id).target_positions.count("AAPL"));
+}
+
+// The WARN line of the same skip. Saying only that the stopped sleeve's target positions "are not
+// read" is half of what happens: the targets the manager holds for the sleeve are emptied
+// (the test above). The line an operator reads must say that. Executes the skip and reads the
+// line it logs.
+TEST_F(PortfolioManagerInternalsTest, TheStoppedSleeveWarningSaysItsTargetsAreCleared) {
+    auto a = make_strategy("STOPPED_WARN", {"AAPL"});
+    ASSERT_TRUE(manager_->add_strategy(a.strat, 0.3).is_ok());
+    const auto t0 = std::chrono::system_clock::now() - std::chrono::hours(24 * 300);
+    ASSERT_TRUE(manager_->process_market_data(bars("AAPL", 300, t0)).is_ok());
+    ASSERT_TRUE(a.strat->stop().is_ok());
+
+    LoggerConfig lc;
+    lc.destination = LogDestination::CONSOLE;
+    lc.min_level = LogLevel::WARNING;
+    lc.include_timestamp = false;
+    Logger::instance().initialize(lc);
+    ::testing::internal::CaptureStdout();
+    const bool ok =
+        manager_->process_market_data(bars("AAPL", 5, t0 + std::chrono::hours(24 * 300))).is_ok();
+    const std::string out = ::testing::internal::GetCapturedStdout();
+    ASSERT_TRUE(ok) << out;
+
+    std::string line;
+    std::istringstream lines(out);
+    for (std::string l; std::getline(lines, l);) {
+        if (l.find("Strategy " + a.id + " is not RUNNING") != std::string::npos) line = l;
+    }
+    ASSERT_FALSE(line.empty()) << "the skip logged no line naming the stopped sleeve:\n" << out;
+    EXPECT_NE(line.find("[WARN"), std::string::npos) << line;
+    EXPECT_EQ(line.find("not read"), std::string::npos)
+        << "the line still claims the targets are only not read: " << line;
+    EXPECT_NE(line.find("cleared"), std::string::npos)
+        << "the line does not say the sleeve's targets are cleared: " << line;
 }

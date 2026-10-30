@@ -37,11 +37,10 @@ double VolumeSlippageModel::calculate_slippage(double price, double quantity, Si
     // Calculate base impact using square-root formula
     double base_impact = config_.price_impact_coefficient * std::sqrt(volume_ratio) * vol_adjust;
 
-    // Add extra impact if above max volume ratio
-    if (volume_ratio > config_.max_volume_ratio) {
-        double excess_ratio = volume_ratio - config_.max_volume_ratio;
-        base_impact *= (1.0 + excess_ratio);
-    }
+    // No extra impact applies above max_volume_ratio: the clamp above bounds
+    // volume_ratio to it, so the model caps participation and a 10x-ADV order is
+    // priced identically to one at the cap. Super-linear impact above the cap would
+    // change the cost of every large backtest fill; the clamp is the thing to revisit.
 
     // Apply impact based on side
     return side == Side::BUY ? price * (1.0 + base_impact) : price * (1.0 - base_impact);

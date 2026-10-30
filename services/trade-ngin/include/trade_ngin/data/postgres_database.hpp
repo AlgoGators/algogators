@@ -1,4 +1,21 @@
 // include/trade_ngin/data/postgres_database.hpp
+//
+// Timezone contract:
+//   All `Timestamp` parameters and all `YYYY-MM-DD` keys produced by this
+//   module are UTC. Provider date columns are interpreted as calendar dates
+//   with no timezone shift -- their semantics are determined by the ingest
+//   pipeline, not by this DB layer. If a strategy needs market-local
+//   semantics, convert at the strategy boundary, not here.
+//
+//   Date-string keys MUST be produced via `trade_ngin::core::format_utc_date`
+//   (a wrapper around `safe_gmtime + strftime`); direct `std::gmtime` use
+//   is forbidden in this file (non-thread-safe and locale-dependent).
+//
+// SQL contract:
+//   Value interpolation MUST go through `pqxx::params` / `exec_params`.
+//   Identifier interpolation (table/column names) MUST go through
+//   `validate_identifier` (private helper in postgres_database.cpp) before
+//   string concatenation -- never inject untrusted input as a SQL identifier.
 
 #pragma once
 
@@ -9,13 +26,81 @@
 #include <optional>
 #include <pqxx/pqxx>
 #include <string>
+#include <unordered_set>
 #include <vector>
 #include "trade_ngin/core/error.hpp"
 #include "trade_ngin/core/logger.hpp"
 #include "trade_ngin/core/types.hpp"
 #include "trade_ngin/data/database_interface.hpp"
+#include "trade_ngin/data/backtest_curve_cells.hpp"
+#include "trade_ngin/data/live_results_cell.hpp"
+#include "trade_ngin/data/market_data_utils.hpp"
+#include "trade_ngin/data/per_contract_source.hpp"
+#include "trade_ngin/data/report_roll_view.hpp"
+#include "trade_ngin/data/strategy_config_row.hpp"
 
 namespace trade_ngin {
+
+class PostgresDatabase;
+
+/**
+ * @brief RAII scope for composing several writes into one atomic unit.
+ *
+ * Every write method on PostgresDatabase historically opened and committed its
+ * own transaction, so no caller -- equity or futures -- could make two writes
+ * land together. That is not a style problem: the live equity path writes
+ * corp-action-adjusted positions and then the dedup record that stops those
+ * events being applied again. Split across two transactions, a failure between
+ * them leaves positions adjusted with no dedup row, and the next run re-applies
+ * the events: splits re-multiply quantity, dividends re-rescale cost basis.
+ *
+ * Hold one of these across the writes that must not be separated, then commit.
+ * Destruction without commit rolls back, so an early return or a thrown
+ * exception cannot leave a half-applied unit behind.
+ *
+ * pqxx is deliberately not exposed: callers pass this object back to the
+ * PostgresDatabase overloads, which reach the underlying transaction as a
+ * friend.
+ */
+class DbTransaction {
+public:
+    ~DbTransaction();
+
+    DbTransaction(const DbTransaction&) = delete;
+    DbTransaction& operator=(const DbTransaction&) = delete;
+    DbTransaction(DbTransaction&&) noexcept;
+    DbTransaction& operator=(DbTransaction&&) noexcept;
+
+    /**
+     * @brief Commit every write made in this scope. Idempotent-safe: a second
+     *        call is an error rather than a double commit.
+     */
+    Result<void> commit();
+
+    /// True once commit() has succeeded. False means the destructor will roll back.
+    bool committed() const { return committed_; }
+
+    /// True when the scope holds a live transaction (false after a move).
+    bool valid() const { return txn_ != nullptr; }
+
+private:
+    friend class PostgresDatabase;
+
+    // `owner` is the PostgresDatabase whose connection this transaction holds.
+    // The scope marks that database as busy for as long as it
+    // lives, so a self-opening method called in between refuses instead of
+    // throwing pqxx::usage_error. May be null in tests that build a scope
+    // straight from a connection.
+    DbTransaction(pqxx::connection& conn, PostgresDatabase* owner);
+
+    pqxx::work& work() { return *txn_; }
+
+    void release_owner();
+
+    std::unique_ptr<pqxx::work> txn_;
+    bool committed_{false};
+    PostgresDatabase* owner_{nullptr};
+};
 
 /**
  * @brief Database interface for PostgreSQL
@@ -41,9 +126,18 @@ public:
 
     /**
      * @brief Connect to the database
+     *
+     * The session's time zone is pinned to UTC before the connection is handed
+     * out (session_time_zone_statement), so the text of a timestamptz read on
+     * it does not follow the server's default, the role's or the client's PGTZ.
      * @return Result indicating success or failure
      */
     Result<void> connect() override;
+
+    /**
+     * @brief The statement connect() issues on every new session.
+     */
+    static const char* session_time_zone_statement() { return "SET TimeZone = 'UTC'"; }
 
     /**
      * @brief Disconnect from the database
@@ -72,6 +166,19 @@ public:
         DataFrequency freq = DataFrequency::DAILY, const std::string& data_type = "ohlcv") override;
 
     /**
+     * @brief The vendor instrument id of each futures bar the loader keeps
+     *
+     * For the session classifier's instrument-id continuity limb. The window and the symbol
+     * filter are get_market_data's (FUTURES, daily); a bar whose futures_data.ohlcv_1d_raw row
+     * is not the same print as the kept copy gets no row
+     * (market_data_utils::build_futures_instrument_id_query). Read only.
+     * @return one row per kept bar with an id, ORDER BY symbol, date
+     */
+    virtual Result<std::vector<market_data_utils::FuturesInstrumentId>> get_futures_instrument_ids(
+        const std::vector<std::string>& symbols, const Timestamp& start_date,
+        const Timestamp& end_date);
+
+    /**
      * @brief Get latest market prices for symbols
      * @param symbols Vector of symbols to get prices for
      * @param asset_class Asset class of the symbols
@@ -97,7 +204,8 @@ public:
     Result<std::unordered_map<std::string, Position>> load_positions_by_date(
         const std::string& strategy_id, const std::string& strategy_name,
         const std::string& portfolio_id, const Timestamp& date,
-        const std::string& table_name = "trading.positions") override;
+        const std::string& table_name = "trading.positions",
+        const std::string& book = kDefaultBook) override;
 
     /**
      * @brief Store execution reports in the database
@@ -111,7 +219,8 @@ public:
     Result<void> store_executions(const std::vector<ExecutionReport>& executions,
                                   const std::string& strategy_id, const std::string& strategy_name,
                                   const std::string& portfolio_id,
-                                  const std::string& table_name) override;
+                                  const std::string& table_name = "trading.executions",
+                                  const std::string& book = kDefaultBook) override;
 
     /**
      * @brief Store positions in the database
@@ -125,7 +234,27 @@ public:
     Result<void> store_positions(const std::vector<Position>& positions,
                                  const std::string& strategy_id, const std::string& strategy_name,
                                  const std::string& portfolio_id,
-                                 const std::string& table_name) override;
+                                 const std::string& table_name = "trading.positions",
+                                 const std::string& book = kDefaultBook) override;
+
+    /**
+     * @brief Open a scope in which several writes commit or roll back together.
+     *
+     * Pass the returned scope to the overloads that accept a DbTransaction, then
+     * call commit(). Errors if the connection is unavailable.
+     */
+    Result<std::unique_ptr<DbTransaction>> begin_unit_of_work();
+
+    /**
+     * @brief Store positions inside a caller-owned unit of work.
+     *
+     * Same statements as the single-write overload; the caller commits. Use when
+     * the positions must land together with another write.
+     */
+    Result<void> store_positions(DbTransaction& txn, const std::vector<Position>& positions,
+                                 const std::string& strategy_id, const std::string& strategy_name,
+                                 const std::string& portfolio_id, const std::string& table_name,
+                                 const std::string& book = kDefaultBook);
 
     /**
      * @brief Store signals in the database
@@ -163,63 +292,22 @@ public:
     /**
      * @brief Execute a direct SQL query without Arrow table conversion
      * @param query SQL query to execute
-     * @return Result indicating success or failure
+     * @return The number of rows the statement affected (pqxx::result::affected_rows(): an
+     *         UPDATE or DELETE that matched nothing returns 0, which is NOT an error), or an
+     *         error. The count tells a Day T-1 UPDATE that matched no row from one that
+     *         finalized the row.
      */
-    Result<void> execute_direct_query(const std::string& query);
+    Result<size_t> execute_direct_query(const std::string& query);
 
     // ============================================================================
     // BACKTEST DATA STORAGE METHODS
     // ============================================================================
 
-    /**
-     * @brief Store backtest execution data
-     * @param executions Vector of execution reports
-     * @param run_id Backtest run identifier
-     * @param table_name Name of the table to insert into
-     * @return Result indicating success or failure
-     */
-    Result<void> store_backtest_executions(
-        const std::vector<ExecutionReport>& executions, const std::string& run_id,
-        const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "backtest.executions") override;
-
-    // Multi-strategy version: store executions with strategy_id
+    // Store a strategy's backtest executions (backtest.executions carries strategy_id)
     virtual Result<void> store_backtest_executions_with_strategy(
         const std::vector<ExecutionReport>& executions, const std::string& run_id,
         const std::string& strategy_id, const std::string& portfolio_id = "BASE_PORTFOLIO",
         const std::string& table_name = "backtest.executions");
-
-    /**
-     * @brief Store backtest signals
-     * @param signals Map of symbol to signal value
-     * @param strategy_id ID of the strategy generating signals
-     * @param run_id Backtest run identifier
-     * @param timestamp Timestamp of signals
-     * @param table_name Name of the table to insert into
-     * @return Result indicating success or failure
-     */
-    Result<void> store_backtest_signals(
-        const std::unordered_map<std::string, double>& signals, const std::string& strategy_id,
-        const std::string& run_id, const Timestamp& timestamp,
-        const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "backtest.signals") override;
-
-    /**
-     * @brief Store backtest run metadata
-     * @param run_id Backtest run identifier
-     * @param name Run name
-     * @param description Run description
-     * @param start_date Start date
-     * @param end_date End date
-     * @param hyperparameters JSON configuration
-     * @param table_name Name of the table to insert into
-     * @return Result indicating success or failure
-     */
-    Result<void> store_backtest_metadata(
-        const std::string& run_id, const std::string& name, const std::string& description,
-        const Timestamp& start_date, const Timestamp& end_date,
-        const nlohmann::json& hyperparameters, const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "backtest.run_metadata") override;
 
     // Multi-strategy version: store metadata with portfolio_run_id, strategy_allocation,
     // portfolio_config
@@ -270,42 +358,11 @@ public:
         double cvar_95, double beta, double correlation, double downside_volatility,
         const nlohmann::json& config, const std::string& table_name = "trading.results") override;
 
-    /**
-     * @brief Store live trading results with new schema
-     * @param strategy_id Strategy identifier
-     * @param date Trading date
-     * @param total_return Total return for the day
-     * @param volatility Portfolio volatility
-     * @param total_pnl Total P&L
-     * @param unrealized_pnl Unrealized P&L
-     * @param realized_pnl Realized P&L
-     * @param current_portfolio_value Current portfolio value
-     * @param portfolio_var Portfolio VaR
-     * @param net_leverage Net leverage
-     * @param gross_leverage Gross leverage
-     * @param max_correlation Max correlation risk
-     * @param jump_risk Jump risk (99th percentile)
-     * @param risk_scale Risk scale factor
-     * @param total_notional Total notional exposure
-     * @param active_positions Number of active positions
-     * @param config Strategy configuration JSON
-     * @param table_name Name of the table to insert into
-     * @return Result indicating success or failure
-     */
-    Result<void> store_live_results(
-        const std::string& strategy_id, const Timestamp& date, double total_return,
-        double volatility, double total_pnl, double unrealized_pnl, double realized_pnl,
-        double current_portfolio_value, double daily_realized_pnl, double daily_unrealized_pnl,
-        double portfolio_var, double net_leverage, double gross_leverage,
-        double margin_leverage, double margin_cushion, double max_correlation, double jump_risk,
-        double risk_scale, double gross_notional, double net_notional, int active_positions,
-        double total_transaction_costs, double margin_posted, double cash_available,
-        const nlohmann::json& config,
-        const std::string& table_name = "trading.live_results") override;
 
     Result<std::tuple<double, double, double>> get_previous_live_aggregates(
         const std::string& strategy_id, const std::string& portfolio_id, const Timestamp& date,
-        const std::string& table_name = "trading.live_results") override;
+        const std::string& table_name = "trading.live_results",
+        const std::string& book = kDefaultBook) override;
 
     /**
      * @brief Store live trading equity curve point
@@ -319,7 +376,8 @@ public:
     Result<void> store_trading_equity_curve(
         const std::string& strategy_id, const Timestamp& timestamp, double equity,
         const std::string& portfolio_id,
-        const std::string& table_name = "trading.equity_curve") override;
+        const std::string& table_name = "trading.equity_curve",
+        const std::string& portfolio_type = kDefaultEquityCurveStream) override;
 
     /**
      * @brief Store multiple live trading equity curve points
@@ -333,10 +391,11 @@ public:
         const std::string& strategy_id,
         const std::vector<std::pair<Timestamp, double>>& equity_points,
         const std::string& portfolio_id,
-        const std::string& table_name = "trading.equity_curve") override;
+        const std::string& table_name = "trading.equity_curve",
+        const std::string& portfolio_type = kDefaultEquityCurveStream) override;
 
     // ============================================================================
-    // NEW METHODS TO REPLACE RAW SQL (Phase 0 Refactoring)
+    // TYPED QUERY METHODS
     // ============================================================================
 
     /**
@@ -346,10 +405,112 @@ public:
      * @param table_name Name of the executions table
      * @return Result indicating success or failure
      */
+    /**
+     * @brief Delete this book's executions for a date so a re-run can re-insert them.
+     *
+     * portfolio_id is REQUIRED and deliberately has no default.
+     *
+     * trading.executions is keyed (portfolio_id, strategy_id, strategy_name, date, exec_id).
+     * order_id is portfolio-independent -- ExecutionManager builds it as
+     * "DAILY_<symbol>_<date>" -- and TREND_FOLLOWING is enabled-live in BOTH the base and
+     * conservative books. Without the portfolio in the predicate a conservative run would
+     * delete BASE_PORTFOLIO's rows for the same symbol and date, and vice versa, and the
+     * delete leaves no trace of what it took. A default would let a caller drop the portfolio
+     * from the predicate silently, by omission.
+     */
     virtual Result<void> delete_stale_executions(const std::vector<std::string>& order_ids,
                                                   const Timestamp& date,
                                                   const std::string& strategy_name,
-                                                  const std::string& table_name = "trading.executions");
+                                                  const std::string& portfolio_id,
+                                                  const std::string& table_name = "trading.executions",
+                                                  const std::string& book = kDefaultBook);
+
+    /**
+     * @brief The re-run sweep of a day's ROLL legs by type.
+     *        Deletes every execution_type = 'ROLL' row of the sleeve and portfolio dated `date`
+     *        (the row's UTC run date), so a re-run that no longer rolls leaves no orphan leg.
+     */
+    virtual Result<void> delete_roll_executions(const Timestamp& date, const std::string& strategy_name,
+                                                const std::string& portfolio_id,
+                                                const std::string& table_name = "trading.executions",
+                                                const std::string& book = kDefaultBook);
+
+    /**
+     * @brief The executions of a day replaced in ONE transaction: per sleeve, the sweep of its
+     *        rows dated `date` of every type, the delete of the rows carrying this run's order ids
+     *        (delete_stale_executions' predicate) and the insert (store_executions' columns); the
+     *        steps and their order are data/day_execution_replace.hpp. The live runners call it
+     *        once for every sleeve that books ROLL legs, BEFORE they re-write the Day T-1
+     *        positions rows (a re-run reads the contract its stored legs rolled out of), and once
+     *        for each other sleeve, also when the run makes no order for it. Committed whole or
+     *        not at all: a failure leaves the rows of these sleeves as they were stored before
+     *        the call. `sleeves`: (sleeve name, its rows).
+     */
+    virtual Result<void> replace_roll_day_executions(
+        const std::vector<std::pair<std::string, std::vector<ExecutionReport>>>& sleeves,
+        const std::string& strategy_id, const std::string& portfolio_id, const Timestamp& date,
+        const std::string& table_name, const std::string& book = kDefaultBook);
+
+    /**
+     * @brief The daily report's roll view (contract_rolls::report_roll_view), on
+     *        its own read transaction, with the per-contract source's calendar. An empty view (the
+     *        switch off: nothing new printed) when the source is off or the database cannot be read.
+     */
+    ReportRolls report_roll_view(const contract_rolls::ReportRollQuery& query,
+                                 const std::function<double(const std::string&)>& tick_of);
+
+    /**
+     * @brief For a late roll's settlement: the stored positions
+     *        rows of the book dated strictly after `after_date` and strictly before `before_date`
+     *        (YYYY-MM-DD), every sleeve: symbol, sleeve, date, quantity, daily realised P&L, ordered
+     *        by date, symbol, sleeve. One parameterised SELECT; the table name is validated.
+     *        live_roll_legs.hpp (late_booked_points) reads what earlier runs booked from them.
+     */
+    virtual Result<std::vector<StoredRealisedRow>> get_stored_realised_rows(
+        const std::string& strategy_id, const std::string& portfolio_id,
+        const std::string& after_date, const std::string& before_date,
+        const std::string& table_name, const std::string& book = kDefaultBook);
+
+    /**
+     * @brief The cumulative ROLL cost of the book before `date` (migration 017): the latest
+     *        total_roll_costs stored before `date` (the same row get_previous_live_aggregates reads; 0
+     *        when no row exists) PLUS the cost of every ROLL execution stored after that row's date
+     *        and before `date`. A run stores its executions before its live_results row, so a day
+     *        whose results write failed left its legs and no row: the total continues across it
+     *        instead of dropping that day's part. With a row on every day
+     *        the second term is 0.
+     */
+    virtual Result<double> get_previous_total_roll_costs(
+        const std::string& strategy_id, const std::string& portfolio_id, const Timestamp& date,
+        const std::string& table_name = "trading.live_results",
+        const std::string& executions_table = "trading.executions",
+        const std::string& book = kDefaultBook);
+
+    /**
+     * @brief Legs by STATE: per symbol, the contract the
+     *        ROLL closing legs already stored for `date` rolled out of (the instrument_id of the
+     *        symbol's earliest EXEC_<symbol>_<confirm date>_RC row of that date); empty when the
+     *        date has no ROLL row. A re-run of a date reads it: the first run re-wrote the T-1
+     *        positions row with the contract held after the T-1 bar, so the contract the book held
+     *        BEFORE that run's legs is on those legs.
+     */
+    virtual Result<std::unordered_map<std::string, std::string>> get_stored_roll_contracts(
+        const std::string& strategy_id, const std::string& portfolio_id, const Timestamp& date,
+        const std::string& table_name = "trading.executions",
+        const std::string& book = kDefaultBook);
+
+    /**
+     * @brief Per symbol, the rolls stored for the dates from `from` (inclusive) to
+     *        `date` (exclusive), oldest first (by date, then by the confirming date the exec id
+     *        carries): the contract each roll's EXEC_<symbol>_<date>_RC closing leg rolled out of
+     *        and the one its _RO opening leg of the same date rolled into ("" when that leg is
+     *        not stored). One roll stored for several sleeves is one entry. A re-run reads it to
+     *        tell whether its own legs are stale (contract_held_coming_into).
+     */
+    virtual Result<std::unordered_map<std::string, std::vector<StoredRoll>>> get_previous_rolls(
+        const std::string& strategy_id, const std::string& portfolio_id, const Timestamp& from,
+        const Timestamp& date, const std::string& table_name = "trading.executions",
+        const std::string& book = kDefaultBook);
 
     /**
      * @brief Store backtest summary results (replaces raw SQL INSERT)
@@ -358,25 +519,35 @@ public:
      * @param end_date End date of backtest
      * @param metrics Map of metric name to value
      * @param table_name Name of the results table
+     * @param cells The typed cells of the row (migration 037: a date, a text, a jsonb object,
+     *        an integer or a number that may have no value). A cell is named only when it has a
+     *        value, so one without stays NULL; a number is stored at the precision of its text,
+     *        not through std::to_string's six decimals.
      * @return Result indicating success or failure
      */
     virtual Result<void> store_backtest_summary(
         const std::string& run_id, const Timestamp& start_date, const Timestamp& end_date,
         const std::unordered_map<std::string, double>& metrics,
         const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "backtest.results");
+        const std::string& table_name = "backtest.results",
+        const std::vector<LiveResultsCell>& cells = {});
 
     /**
      * @brief Store backtest equity curve batch (replaces raw SQL INSERT)
      * @param run_id Backtest run identifier
      * @param equity_points Vector of timestamp-equity pairs
      * @param table_name Name of the equity curve table
+     * @param risk_detail Per point, the row's risk_detail object as text (empty: NULL), or none
+     * @param cells Per point, the row's typed cells (migration 037: the six overlay columns),
+     *        or none at all; a cell with no value is written NULL (backtest_curve_cells.hpp)
      * @return Result indicating success or failure
      */
     virtual Result<void> store_backtest_equity_curve_batch(
         const std::string& run_id, const std::vector<std::pair<Timestamp, double>>& equity_points,
         const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "backtest.equity_curve");
+        const std::string& table_name = "backtest.equity_curve",
+        const std::vector<std::string>& risk_detail = {},
+        const BacktestCurveCells& cells = {});
 
     /**
      * @brief Store backtest final positions (replaces raw SQL INSERT)
@@ -385,16 +556,22 @@ public:
      * @param table_name Name of the positions table
      * @return Result indicating success or failure
      */
+    /**
+     * @param keep_closed_rows Default false: every zero-quantity row is dropped.
+     *        Cash books (MIXED / UNREALIZED_ONLY) pass true so a position closed to zero
+     *        keeps the row carrying that bar's realized flow -- the live is_dead_row rule.
+     *        Futures backtests leave it false.
+     * @param no_bar_symbols Migration 038. The symbols of `positions` that printed no bar on
+     *        the rows' date (a futures book's; the coordinator names them): their stored rows
+     *        carry row_mark = 'NO_BAR', every other row NULL. The statement names the column
+     *        on every call, so the table needs migration 038.
+     */
     virtual Result<void> store_backtest_positions(
         const std::vector<Position>& positions, const std::string& run_id,
         const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "backtest.final_positions");
-
-    // Multi-strategy version: store positions with strategy_id
-    virtual Result<void> store_backtest_positions_with_strategy(
-        const std::vector<Position>& positions, const std::string& run_id,
-        const std::string& strategy_id, const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "backtest.final_positions");
+        const std::string& table_name = "backtest.final_positions",
+        bool keep_closed_rows = false,
+        const std::unordered_set<std::string>& no_bar_symbols = {});
 
     /**
      * @brief Update live results for previous day finalization (replaces raw SQL UPDATE)
@@ -403,13 +580,18 @@ public:
      * @param updates Map of column name to new value
      * @param portfolio_id Portfolio identifier
      * @param table_name Name of the live results table
+     * @param rows_affected When given, receives the number of rows the UPDATE changed
+     * @param cells Typed cells assigned by the same UPDATE; a cell with no value is set NULL
      * @return Result indicating success or failure
      */
     virtual Result<void> update_live_results(
         const std::string& strategy_id, const Timestamp& date,
         const std::unordered_map<std::string, double>& updates,
         const std::string& portfolio_id,
-        const std::string& table_name = "trading.live_results");
+        const std::string& table_name = "trading.live_results",
+        size_t* rows_affected = nullptr,
+        const std::vector<LiveResultsCell>& cells = {},
+        const std::string& book = kDefaultBook);
 
     /**
      * @brief Update live equity curve (replaces raw SQL UPDATE)
@@ -423,7 +605,8 @@ public:
     virtual Result<void> update_live_equity_curve(
         const std::string& strategy_id, const Timestamp& date, double equity,
         const std::string& portfolio_id,
-        const std::string& table_name = "trading.equity_curve");
+        const std::string& table_name = "trading.equity_curve",
+        const std::string& book = kDefaultBook);
 
     /**
      * @brief Delete existing live results for a date (replaces raw SQL DELETE)
@@ -436,7 +619,8 @@ public:
     virtual Result<void> delete_live_results(
         const std::string& strategy_id, const Timestamp& date,
         const std::string& portfolio_id,
-        const std::string& table_name = "trading.live_results");
+        const std::string& table_name = "trading.live_results",
+        const std::string& book = kDefaultBook);
 
     /**
      * @brief Delete existing equity curve entry for a date (replaces raw SQL DELETE)
@@ -449,7 +633,8 @@ public:
     virtual Result<void> delete_live_equity_curve(
         const std::string& strategy_id, const Timestamp& date,
         const std::string& portfolio_id,
-        const std::string& table_name = "trading.equity_curve");
+        const std::string& table_name = "trading.equity_curve",
+        const std::string& book = kDefaultBook);
 
     /**
      * @brief Store complete live results row with all metrics (replaces raw SQL INSERT)
@@ -457,6 +642,7 @@ public:
      * @param date Trading date
      * @param metrics Complete set of metrics as key-value pairs
      * @param table_name Name of the live results table
+     * @param cells Typed cells of the row; a cell with no value is left out and stays NULL
      * @return Result indicating success or failure
      */
     virtual Result<void> store_live_results_complete(
@@ -464,7 +650,10 @@ public:
         const std::unordered_map<std::string, double>& metrics,
         const std::unordered_map<std::string, int>& int_metrics, const nlohmann::json& config,
         const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "trading.live_results");
+        const std::string& table_name = "trading.live_results",
+        const nlohmann::json& risk_detail = nlohmann::json(),
+        const std::vector<LiveResultsCell>& cells = {},
+        const std::string& book = kDefaultBook);
 
     /**
      * @brief Store live trading run metadata
@@ -484,10 +673,364 @@ public:
         const std::string& table_name = "trading.live_run_metadata");
 
     /**
+     * @brief The portfolio's active trading.strategy_config row (migration 022, QT plan E2).
+     * @return the row, std::nullopt when the portfolio has no active row (the run uses its
+     *         files unchanged), or an error when the lookup fails. A caller must refuse on the
+     *         error (ruling 24): it never stands for "no row".
+     *         Implemented in postgres_strategy_config.cpp.
+     */
+    Result<std::optional<StrategyConfigRow>> get_active_strategy_config(
+        const std::string& portfolio_id);
+
+    /**
+     * @brief Write the run's settings used into the day's trading.live_run_metadata row
+     *        (written first by store_live_run_metadata). Refuses an object carrying a key that
+     *        looks like a credential (ConfigLoader::find_secret_key), and errors unless exactly
+     *        one row is updated. Implemented in postgres_strategy_config.cpp.
+     */
+    Result<void> store_settings_used(const Timestamp& date, const std::string& strategy_id,
+                                     const std::string& portfolio_id,
+                                     const nlohmann::json& settings_used);
+
+    /**
      * @brief Get contract metadata for trading instruments
      * @return Result containing Arrow table with contract metadata
      */
     virtual Result<std::shared_ptr<arrow::Table>> get_contract_metadata() const;
+
+    /**
+     * @brief Corporate action row from equities_data.corporate_action.
+     *
+     * The `value` field is parsed from the source table's text column:
+     *   - SPLIT / ADR_SPLIT: split factor (e.g. 4.0 for a 4-for-1)
+     *   - DIVIDEND: cash amount per share in trading currency
+     */
+    struct CorpActionRow {
+        std::string ticker;
+        std::string date_str;  // YYYY-MM-DD
+        std::string action;    // vendor label, e.g. "split" | "dividend" | "mergerto"
+        double value;
+        // Deal terms, populated only for TERMINATION-class rows that carry
+        // them (contraticker/contraname are NULL for splits and dividends).
+        std::string contra_ticker;
+        std::string contra_name;
+        std::string name;
+    };
+
+    /**
+     * @brief Read corporate actions for a ticker list between two dates.
+     *
+     * Reads from equities_data.corporate_action (existing schema; no DDL).
+     * That feed stopped receiving events on 2025-08-29, so this returns
+     * nothing for recent windows. It remains the only source of TERMINATION
+     * deal terms; PRICE_RESTATING events come from the live per-bar
+     * columns via get_per_bar_corporate_actions().
+     *
+     * @param actions      Vendor labels to filter on. Defaults to the
+     *                     price-restating set for backward compatibility;
+     *                     pass vendor_labels_for_class(TERMINATION) for the
+     *                     deal-terms path.
+     *
+     * @param tickers      Symbols to query (typically the live portfolio's
+     *                     equity universe).
+     * @param start_date   Inclusive YYYY-MM-DD.
+     * @param end_date     Inclusive YYYY-MM-DD.
+     * @return Sorted by (date, ticker, action); empty result is not an error.
+     */
+    Result<std::vector<CorpActionRow>> get_corporate_actions(
+        const std::vector<std::string>& tickers,
+        const std::string& start_date,
+        const std::string& end_date,
+        const std::vector<std::string>& actions = {"split", "dividend", "adrratiosplit"});
+
+    /**
+     * @brief Last date present in equities_data.corporate_action.
+     *
+     * The deal-terms feed's stop date, quoted in every termination WARN, is
+     * measured rather than compiled in: a constant cannot notice a revived
+     * subscription (after a backfill the message would keep naming the old date
+     * until someone rebuilds, and the operator would get no signal that the
+     * dormant rollover path went live). Measuring it makes the log line true by
+     * construction.
+     *
+     * Future-dated placeholder rows are excluded: the table carries tickerchange
+     * rows dated 2027-07-18, and a bare max() would report a feed running two
+     * years ahead of the run.
+     *
+     * @param as_of_date Inclusive upper bound, YYYY-MM-DD. Empty means no bound.
+     * @return YYYY-MM-DD, or "" when the table holds no row at or before the
+     *         bound. An unreachable database is an error, never "".
+     */
+    Result<std::string> get_corp_action_feed_last_date(const std::string& as_of_date = "");
+
+    /// Whether schema.table has the column (information_schema), for a column a migration adds
+    /// that a binary writes only once the database has it.
+    Result<bool> has_column(const std::string& schema, const std::string& table,
+                            const std::string& column);
+
+    /**
+     * @brief PRICE_RESTATING events sourced from the live per-bar columns.
+     *
+     * equities_data.ohlcv_1d carries div_cash and split_factor on the bar the
+     * event goes ex. Unlike equities_data.corporate_action these are current,
+     * so this is the production source for class-1 events. Splits (including
+     * ADR-ratio changes and spin-offs, which the vendor also encodes in
+     * split_factor) surface as action "split"; cash dividends as "dividend".
+     *
+     * @param tickers    Symbols to query; empty returns an empty result.
+     * @param start_date Inclusive YYYY-MM-DD.
+     * @param end_date   Inclusive YYYY-MM-DD.
+     * @return Sorted by (date, ticker, action); empty result is not an error.
+     */
+    virtual Result<std::vector<CorpActionRow>> get_per_bar_corporate_actions(
+        const std::vector<std::string>& tickers,
+        const std::string& start_date,
+        const std::string& end_date);
+
+    /** @brief One equities_data.ticker_aliases row (SERIES_CONTINUITY source). */
+    struct TickerAliasRow {
+        std::string historical_ticker;
+        std::string current_symbol;
+        std::string effective_until;  // YYYY-MM-DD; empty when NULL
+        std::string note;
+    };
+
+    /**
+     * @brief Read the curated historical-ticker -> current-symbol map.
+     *
+     * A curated subset, not the full rename history: symbols absent from it
+     * are simply left unmapped by the caller.
+     */
+    virtual Result<std::vector<TickerAliasRow>> get_ticker_aliases();
+
+    /**
+     * @brief Delisting dates for the given symbols (TERMINATION timing).
+     *
+     * From equities_data.ohlcv_1d.delisting_date, which is maintained
+     * independently of the frozen corporate_action feed.
+     *
+     * @param tickers   Symbols to look up.
+     * @param from_date Inclusive YYYY-MM-DD floor; a delisting older than this
+     *        is not returned. Empty means no floor.
+     *
+     * delisting_date is keyed on the TICKER, and this reads
+     * `max(delisting_date)` over the symbol's whole history, so a reused ticker
+     * inherits the dead company's row -- HPC carries 2008-11-24, MER 2008-12-31.
+     * Acting on one exits a live position at a stale price. The runner has a
+     * bars-contradict guard, but that guard needs a bar: `delisting_is_stale`
+     * returns false when `last_bar_date` is EMPTY, so a held symbol with no bar
+     * in the load window is still terminated on a decade-old row. A floor closes
+     * that at the source -- a 2008 delisting has no business reaching a 2026 run.
+     *
+     * @return symbol -> YYYY-MM-DD for symbols carrying a delisting date at or
+     *         after `from_date`.
+     */
+    virtual Result<std::unordered_map<std::string, std::string>> get_delisting_dates(
+        const std::vector<std::string>& tickers, const std::string& from_date = "");
+
+    /**
+     * @brief Earliest date each symbol was held (non-zero) by this strategy.
+     *
+     * The corp-action window must reach back to when a position was
+     * ESTABLISHED, not to when its row was last written. `last_update` cannot
+     * serve that purpose: load_positions_by_date() selects
+     * `WHERE DATE(last_update) = DATE($n)`, so every row it returns carries the
+     * requested date by construction, and the table has zero rows where
+     * last_update differs from date. Deriving a lookback from it always
+     * collapses to "yesterday". This queries the position history instead.
+     *
+     * Erring wide is safe: re-fetched events are rejected by
+     * trading.corp_action_applied, so the only cost of an over-wide window is
+     * query time.
+     *
+     * @return symbol -> YYYY-MM-DD of the earliest non-zero holding. Symbols
+     *         with no history are absent.
+     */
+    virtual Result<std::unordered_map<std::string, std::string>> get_position_inception_dates(
+        const std::string& strategy_id,
+        const std::string& strategy_name,
+        const std::string& portfolio_id,
+        const std::vector<std::string>& symbols,
+        const std::string& table_name = "trading.positions");
+
+    /**
+     * @brief Date the CURRENT holding of each symbol began -- the class-2 era input.
+     *
+     * `get_position_inception_dates` is `min(date)` over all history and fails WIDE on
+     * purpose, which is right for the class-1 price window and wrong for the rename era
+     * test. Tickers get reused. A strategy that held META (Facebook) in 2021, closed it,
+     * and re-bought META (Meta Platforms) in 2026 has a lifetime inception of 2021, which
+     * satisfies `inception <= effective_until` for our own META -> METV backfill
+     * (effective_until 2022-01-31) and re-keys a live 100-share position onto a symbol
+     * with no bars at all. Class 2 must ask a narrower question: when did the holding we
+     * hold RIGHT NOW start?
+     *
+     * A holding starts after the most recent flat row. A closed position keeps exactly one
+     * row -- quantity 0 on the day it closed (`LiveDailyCycle::is_dead_row`) -- so
+     * that row is the break. Absent such a row the position was never closed and this
+     * equals the lifetime inception.
+     *
+     * Direction of error: too LATE is safe (the rename is skipped and retried next run);
+     * too EARLY re-keys a live holding, which is silent and permanent. This errs late.
+     *
+     * `on_or_before` bounds BOTH halves of the question to rows the run can
+     * legitimately see -- normally the run's own `previous_date`. `trading.positions` is not
+     * append-only in practice: an interrupted windowed reset, or a replay abandoned partway,
+     * leaves rows dated AFTER the date being replayed. Unbounded, such a row moves the answer
+     * twice over -- a future non-zero row can become the `min(date)` of "the current
+     * holding", and a future FLAT row raises the break date past every real row and makes the
+     * symbol vanish from the map entirely, silently skipping its rename. Neither failure is
+     * visible in the run's output. Empty (the default) means unbounded.
+     *
+     * @param on_or_before inclusive YYYY-MM-DD ceiling on the rows considered; empty = none.
+     * @return symbol -> YYYY-MM-DD the current holding began. Symbols with no non-zero
+     *         row after the last flat row are ABSENT, and class 2 skips them.
+     */
+    virtual Result<std::unordered_map<std::string, std::string>> get_current_holding_start_dates(
+        const std::string& strategy_id,
+        const std::string& strategy_name,
+        const std::string& portfolio_id,
+        const std::vector<std::string>& symbols,
+        const std::string& on_or_before = {},
+        const std::string& table_name = "trading.positions");
+
+    /**
+     * @brief Latest date this strategy BOUGHT each symbol, on or after `on_or_after`.
+     *
+     * Basis provenance. A class-1 corporate action may only restate a cost basis that
+     * was formed BEFORE the ex-date. A fill on run D is priced at close(D-1), so a BUY dated
+     * strictly AFTER the ex-date was struck at a price the market had already adjusted and is
+     * positive evidence that the basis is contaminated.
+     *
+     * A BUY is the only fill that re-forms a long book's cost basis
+     * (base_strategy.cpp on_execution), and this book is long-only -- shorts are refused by the
+     * equity runner -- so BUY side alone is sufficient.
+     *
+     * Symbols with no such BUY are ABSENT from the map. Absence means "no evidence", NEVER
+     * "clean": the caller must resolve it to APPLY, not to skip.
+     *
+     * `on_or_before` is MANDATORY and must be the date of the book being examined (T-1), not
+     * today and never unbounded. On a replay the executions table also holds rows for dates
+     * AFTER the run being processed, so an unbounded query reads the future: replaying June,
+     * it would take `BUY 2026-07-30` as evidence against a 2026-06-08 ex-date and skip a
+     * dividend that has to apply.
+     *
+     * @return symbol -> YYYY-MM-DD of the most recent qualifying BUY.
+     */
+    virtual Result<std::unordered_map<std::string, std::string>> get_last_buy_dates(
+        const std::string& strategy_id,
+        const std::string& strategy_name,
+        const std::string& portfolio_id,
+        const std::vector<std::string>& symbols,
+        const std::string& on_or_after,
+        const std::string& on_or_before,
+        const std::string& table_name = "trading.executions");
+
+    /**
+     * @brief Raw closes for specific symbols over a date range.
+     *
+     * Targeted top-up for the corp-action path when a position predates the
+     * bulk price load. The dividend denominator needs a close AT each ex-date,
+     * not a contiguous series, so this is a plain indexed range read (~45 ms
+     * for one symbol over ten years) rather than a re-run of the ~25 s
+     * adjusted-series window function.
+     *
+     * Returns RAW closes, matching close_by_symbol_date's frame -- the
+     * denominator is raw-dollar over the ex-date close.
+     *
+     * @return symbol -> (YYYY-MM-DD -> close).
+     */
+    virtual Result<std::unordered_map<std::string, std::map<std::string, double>>>
+    get_historical_closes(const std::vector<std::string>& symbols,
+                          const std::string& start_date,
+                          const std::string& end_date);
+
+    /**
+     * @brief One corporate action already applied to a live position.
+     *
+     * Mirrors trading.corp_action_applied. Dividend fields are populated only
+     * for DIVIDEND rows and are INFORMATIONAL -- the price series is
+     * total-return adjusted, so total_cash must never be added to P&L.
+     */
+    struct AppliedCorpActionRow {
+        std::string symbol;
+        std::string action_type;
+        std::string ex_date;  ///< YYYY-MM-DD
+        double qty_held{0.0};
+        double dividend_per_share{0.0};
+        double total_cash{0.0};
+        /**
+         * Run date of the pass that wrote the row (migration 005).
+         * YYYY-MM-DD, or "" for a legacy row written before the column existed.
+         *
+         * NOT part of the natural key. It exists so a run can tell whether the
+         * dedup rows it is about to trust came from an EARLIER pass or a LATER
+         * one -- the ex-date cannot, because a re-run over an un-reset dedup
+         * table (BKNG: ex-date 2026-04-06, re-run of 04-07) has an ex-date
+         * safely in the past, and `applied_at` cannot, because an earlier
+         * chain always carries an earlier wall clock.
+         */
+        std::string run_date;
+        /**
+         * The factor this event divided the cost basis by (migration 006):
+         * F for a SPLIT/ADR_SPLIT, 1 + d/c for a DIVIDEND, i.e.
+         * PositionAdjustment.ratio_change. Multiplying
+         * trading.positions.average_price by the product of these over a holding
+         * recovers the BROKER-frame basis, which a dividend never moves.
+         *
+         * `basis_ratio_known` false means the stored value was NULL -- a row
+         * written before 006, or a TERMINATION, which restates nothing. NULL is
+         * UNKNOWN and NOT 1.0: treating it as 1.0 reports an adjusted basis as
+         * broker-equivalent. Reconciliation only; not part of the natural key.
+         */
+        double basis_ratio{1.0};
+        bool basis_ratio_known{false};
+    };
+
+    /**
+     * @brief Load every corp action already applied for one portfolio+strategy+name.
+     *
+     * Durable replacement for the applied_corp_actions.json state file, which
+     * lived under a container path with no volume and so was lost on redeploy.
+     * Loading everything is deliberate: the record is the strategy's lifetime
+     * dedup set and is small (order thousands of rows even at full universe
+     * scale), and cumulative dividend income is summed from it.
+     *
+     * strategy_name is part of the key, not decoration: one strategy_id can
+     * carry several names (the live runners build a combined id, so
+     * LIVE_TREND_FOLLOWING_TREND_FOLLOWING_FAST holds both TREND_FOLLOWING and
+     * TREND_FOLLOWING_FAST rows). Reading without it hands one strategy's
+     * applied events to another, which then skips its own adjustment and
+     * carries a permanently wrong cost basis, and sums dividend income across
+     * every name under the id.
+     */
+    virtual Result<std::vector<AppliedCorpActionRow>> load_applied_corp_actions(
+        const std::string& portfolio_id, const std::string& strategy_id,
+        const std::string& strategy_name);
+
+    /**
+     * @brief Record corp actions as applied. Idempotent per natural key.
+     *
+     * ON CONFLICT DO NOTHING against
+     * (portfolio_id, strategy_id, strategy_name, symbol, action_type, ex_date):
+     * re-recording an event is a no-op rather than an error, so a partially
+     * completed run is safe to repeat.
+     */
+    virtual Result<void> store_applied_corp_actions(
+        const std::string& portfolio_id, const std::string& strategy_id,
+        const std::string& strategy_name,
+        const std::vector<AppliedCorpActionRow>& rows);
+
+    /**
+     * @brief Record applied corp actions inside a caller-owned unit of work.
+     *
+     * Composed with store_positions(DbTransaction&, ...) so an adjusted position
+     * and the dedup row that protects it cannot be separated by a failure.
+     */
+    virtual Result<void> store_applied_corp_actions(
+        DbTransaction& txn, const std::string& portfolio_id, const std::string& strategy_id,
+        const std::string& strategy_name,
+        const std::vector<AppliedCorpActionRow>& rows);
 
     /**
      * @brief Convert asset class to string for database queries
@@ -519,11 +1062,52 @@ public:
      */
     Result<void> validate_table_name(const std::string& table_name) const;
 
+    /**
+     * @brief Validate strategy ID for SQL injection prevention.
+     *        Allowlist: alphanumeric + `_-`, 1-50 chars. Public for
+     *        testability (the SQL-injection chokepoint deserves a
+     *        regression test).
+     */
+    Result<void> validate_strategy_id(const std::string& strategy_id) const;
+
+    /**
+     * @brief Refuse a book outside system / qt_proposal / qt (migration 021's CHECK) before any
+     *        statement runs, so a bad book never reaches a DELETE.
+     */
+    Result<void> validate_book(const std::string& book) const;
+
+    /**
+     * @brief Validate a generic SQL identifier (table name fragment, column
+     *        name) against a strict allowlist: `[A-Za-z_][A-Za-z0-9_.]*`.
+     *        Use this when an identifier MUST be string-
+     *        concatenated into a query (Postgres does not allow $-binding
+     *        identifiers). For values, prefer `pqxx::params` / `exec_params`.
+     */
+    Result<void> validate_identifier(const std::string& identifier) const;
+    /// Every cell's column is an identifier and its type one of the known cell types.
+    Result<void> validate_live_results_cells(const std::vector<LiveResultsCell>& cells) const;
+
 private:
     std::string connection_string_;
     std::unique_ptr<pqxx::connection> connection_;
     std::mutex mutex_;
     std::string component_id_;
+
+    /**
+     * @brief Is a DbTransaction currently open on this connection?
+     *
+     * pqxx allows ONE transaction per connection. Every self-opening method here
+     * constructs its own `pqxx::work` on `connection_`, so calling any of them
+     * while a DbTransaction is alive throws `pqxx::usage_error` out of a
+     * constructor -- through call sites that expect a `Result`, not an
+     * exception. The flag makes that a refusal with a sentence instead.
+     *
+     * Set by DbTransaction's constructor and cleared by its destructor, both of
+     * which are the friend's business, so no caller can desynchronise it.
+     */
+    bool in_unit_of_work_{false};
+    // DbTransaction sets and clears in_unit_of_work_ across its own lifetime.
+    friend class DbTransaction;
 
     /**
      * @brief Validate the database connection
@@ -537,6 +1121,36 @@ private:
      * @return Formatted string
      */
     std::string format_timestamp(const Timestamp& ts) const;
+
+    /**
+     * @brief Position-write statements, executed in a transaction that is NOT
+     *        committed here. The single-write overload wraps this in its own
+     *        transaction; the composing overload runs it in the caller's.
+     */
+    /// The INSERT of store_executions, on the caller's transaction (store_executions and
+    /// replace_roll_day_executions share it).
+    Result<void> insert_executions_in(pqxx::work& txn, const std::vector<ExecutionReport>& executions,
+                                      const std::string& strategy_id, const std::string& strategy_name,
+                                      const std::string& portfolio_id, const std::string& table_name,
+                                      const std::string& book);
+    /// Whether `table_name` has migration 041's columns (mark_price, settle_from_price,
+    /// settle_to_price, settle_mark); asked once per table and process.
+    static bool positions_have_report_columns(pqxx::work& txn, const std::string& table_name);
+    Result<void> store_positions_in(pqxx::work& txn, const std::vector<Position>& positions,
+                                    const std::string& strategy_id,
+                                    const std::string& strategy_name,
+                                    const std::string& portfolio_id,
+                                    const std::string& table_name,
+                                    const std::string& book);
+
+    /**
+     * @brief Dedup-write statements, executed in a transaction that is NOT
+     *        committed here. Same wrapper/composition split as above.
+     */
+    Result<void> store_applied_corp_actions_in(pqxx::work& txn, const std::string& portfolio_id,
+                                               const std::string& strategy_id,
+                                               const std::string& strategy_name,
+                                               const std::vector<AppliedCorpActionRow>& rows);
 
     /**
      * @brief Convert a Side enum to a string
@@ -564,6 +1178,17 @@ private:
                                                    pqxx::work& txn) const;
 
     /**
+     * @brief Log what the futures bar query's one-bar-per-(symbol, time) rule dropped
+     * @param bars_returned Rows the bar query returned
+     * @param copies The companion query's rows (market_data_utils::
+     *        build_futures_duplicate_copies_query), kept copy first in each group
+     *
+     * One INFO "FUTURES_BAR_DEDUP ..." line per load, one WARN
+     * "FUTURES_BAR_DEDUP_CONFLICT ..." line per (symbol, date) whose copies disagree.
+     */
+    void log_futures_bar_duplicates(size_t bars_returned, const pqxx::result& copies) const;
+
+    /**
      * @brief Validate table name components to prevent injection
      * @param asset_class Asset class
      * @param data_type Data type
@@ -588,19 +1213,17 @@ private:
      */
     Result<void> validate_symbols(const std::vector<std::string>& symbols) const;
 
+public:
     /**
-     * @brief Validate strategy ID for SQL injection prevention
-     * @param strategy_id Strategy ID to validate
-     * @return Result indicating success or failure
-     */
-    Result<void> validate_strategy_id(const std::string& strategy_id) const;
-
-    /**
-     * @brief Validate execution report data
+     * @brief Validate execution report data. Every execution writer calls it on every row before
+     *        it stores anything. It reads the row only (no connection is needed), and is public so
+     *        that it can be tested without a database.
      * @param exec Execution report to validate
      * @return Result indicating success or failure
      */
     Result<void> validate_execution_report(const ExecutionReport& exec) const;
+
+private:
 
     /**
      * @brief Validate position data
@@ -623,6 +1246,16 @@ private:
      * @return Result containing the Arrow table
      */
     Result<std::shared_ptr<arrow::Table>> convert_to_arrow_table(const pqxx::result& result) const;
+
+    /**
+     * @brief The futures bars with portfolio.json's per_contract_rolls on
+     *        (contract_rolls/per_contract_source.hpp): the held contract's own bar on each grid
+     *        date, a roll bar carrying the old contract's close; every root, the micros
+     *        included. Sorted as the futures query sorts (time, then symbol).
+     */
+    Result<std::vector<contract_rolls::SourceBar>> per_contract_source_bars(
+        pqxx::transaction_base& txn, const std::vector<std::string>& symbols,
+        const std::string& start_ts, const std::string& end_ts) const;
 
     /**
      * @brief Convert contract metadata result to Arrow table

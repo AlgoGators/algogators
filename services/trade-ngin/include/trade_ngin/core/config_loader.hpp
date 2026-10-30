@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <map>
 #include <filesystem>
 #include <nlohmann/json.hpp>
 #include <string>
@@ -10,6 +11,8 @@
 #include "trade_ngin/core/types.hpp"
 #include "trade_ngin/optimization/dynamic_optimizer.hpp"
 #include "trade_ngin/risk/risk_manager.hpp"
+#include "trade_ngin/risk/risk_module_config.hpp"
+#include "trade_ngin/data/listing_dates.hpp"
 
 namespace trade_ngin {
 
@@ -24,7 +27,6 @@ struct EmailConfig {
     std::string from_email;
     bool use_tls{true};
     std::vector<std::string> to_emails;
-    std::vector<std::string> to_emails_production;
 
     nlohmann::json to_json() const {
         nlohmann::json j;
@@ -35,7 +37,6 @@ struct EmailConfig {
         j["from_email"] = from_email;
         j["use_tls"] = use_tls;
         j["to_emails"] = to_emails;
-        j["to_emails_production"] = to_emails_production;
         return j;
     }
 
@@ -54,8 +55,6 @@ struct EmailConfig {
             use_tls = j.at("use_tls").get<bool>();
         if (j.contains("to_emails"))
             to_emails = j.at("to_emails").get<std::vector<std::string>>();
-        if (j.contains("to_emails_production"))
-            to_emails_production = j.at("to_emails_production").get<std::vector<std::string>>();
     }
 };
 
@@ -103,8 +102,13 @@ struct DatabaseConfig {
 
 /**
  * @brief Execution configuration
+ *
+ * Named ExecutionSettingsConfig, not ExecutionConfig: the execution engine owns
+ * trade_ngin::ExecutionConfig (execution_engine.hpp). Two classes with one mangled
+ * name is an ODR violation — the linker folds their ctors/dtors and corrupts
+ * whichever object loses the coin toss.
  */
-struct ExecutionConfig {
+struct ExecutionSettingsConfig {
     double commission_rate{0.0005};
     double slippage_bps{1.0};
     double position_limit_backtest{1000.0};
@@ -138,10 +142,45 @@ struct BacktestSpecificConfig {
     int lookback_years{2};
     bool store_trade_details{true};
 
+    // TEST-ONLY. Freezes the backtest window's right-hand edge at this
+    // date instead of wall-clock now(), so two runs of the same binary hours
+    // apart cover the same days.
+    //
+    // Why it has to exist. Every bt runner sets end_date = now() and
+    // start_date = now() - lookback_years. That window slides with the clock,
+    // so a line-by-line A/B of two backtests is only tight for about six hours
+    // after the baseline is taken; past that the two runs are reading different
+    // days and every downstream number legitimately differs.
+    //
+    // How it stays out of production. The key is absent from
+    // config_template/defaults.json and from the deployed config/defaults.json.
+    // Absent means empty, and empty means the runner takes the now() path,
+    // instruction for instruction. A run only freezes its window
+    // when a config that explicitly carries the key is pointed at, which is the
+    // "read it only when explicitly passed" requirement: there is no CLI flag,
+    // no environment variable and no default that can turn this on by accident.
+    // Every runner that honours it says so on a WARN line, so a frozen run can
+    // never be mistaken for a production one in a log.
+    //
+    // Format: "YYYY-MM-DD", interpreted at 00:00:00 LOCAL time, which is the
+    // same frame std::mktime gives the now() path.
+    std::string frozen_end_date{};
+    // Test-only, like frozen_end_date and absent from every shipped config: "YYYY-MM-DD", the
+    // first bar date a backtest may trade on. The warm-up runs on until that date (never shorter
+    // than the strategies' own warm-up), so the book starts empty on it. Absent: the warm-up is
+    // the strategies' own. Read by bt_portfolio_conservative.
+    std::string first_traded_date{};
+
     nlohmann::json to_json() const {
         nlohmann::json j;
         j["lookback_years"] = lookback_years;
         j["store_trade_details"] = store_trade_details;
+        // Only serialised when set, so a round-trip of a production config does
+        // not introduce the key.
+        if (!frozen_end_date.empty())
+            j["frozen_end_date"] = frozen_end_date;
+        if (!first_traded_date.empty())
+            j["first_traded_date"] = first_traded_date;
         return j;
     }
 
@@ -150,6 +189,10 @@ struct BacktestSpecificConfig {
             lookback_years = j.at("lookback_years").get<int>();
         if (j.contains("store_trade_details"))
             store_trade_details = j.at("store_trade_details").get<bool>();
+        if (j.contains("frozen_end_date"))
+            frozen_end_date = j.at("frozen_end_date").get<std::string>();
+        if (j.contains("first_traded_date"))
+            first_traded_date = j.at("first_traded_date").get<std::string>();
     }
 };
 
@@ -158,16 +201,72 @@ struct BacktestSpecificConfig {
  */
 struct LiveSpecificConfig {
     int historical_days{300};
+    // Max age (calendar days) of the latest OHLCV bar before a live run is treated
+    // as running on stale data. WARNs in historical-replay mode, ERRORs in true-live
+    // mode (review T2.9). Default absorbs a weekend plus a holiday.
+    int data_staleness_tolerance_days{4};
+    // How old (calendar days) a substituted close may be when a symbol has no T-1
+    // print and is about to trade. Five covers every ordinary session gap -- a
+    // three-day weekend plus a further holiday reaches Wednesday -- so anything
+    // beyond it means the symbol is halted or missing from the feed, not merely
+    // between sessions. Symbols exceeding the bound are not traded.
+    int execution_price_max_staleness_days{5};
+    // What to do with a company a spinoff hands you that you never chose to own:
+    // "liquidate_at_first_close" (default) books the child and sells it at its first close;
+    // "hold" keeps it, which is only safe when the child is itself in the configured
+    // universe -- otherwise no bars are loaded for it and the next run reports "Missing T-1
+    // price for symbol with a non-zero position" and rolls the target back forever.
+    // Unrecognised text takes the default; the runner logs which policy is in force.
+    std::string spinoff_child_policy{"liquidate_at_first_close"};
 
     nlohmann::json to_json() const {
         nlohmann::json j;
         j["historical_days"] = historical_days;
+        j["data_staleness_tolerance_days"] = data_staleness_tolerance_days;
+        j["execution_price_max_staleness_days"] = execution_price_max_staleness_days;
+        j["spinoff_child_policy"] = spinoff_child_policy;
         return j;
     }
 
     void from_json(const nlohmann::json& j) {
         if (j.contains("historical_days"))
             historical_days = j.at("historical_days").get<int>();
+        if (j.contains("data_staleness_tolerance_days"))
+            data_staleness_tolerance_days = j.at("data_staleness_tolerance_days").get<int>();
+        if (j.contains("execution_price_max_staleness_days"))
+            execution_price_max_staleness_days =
+                j.at("execution_price_max_staleness_days").get<int>();
+        if (j.contains("spinoff_child_policy"))
+            spinoff_child_policy = j.at("spinoff_child_policy").get<std::string>();
+    }
+};
+
+/**
+ * @brief The statistics convention (defaults.json `statistics`): the sessions a year K each
+ * stored statistic is annualised with, per series.
+ *
+ * K is the row frequency of the grid the statistic is taken on, frozen per series, not measured
+ * per run. Futures: 311.0574 = 3,111 grid dates / (3,653 days / 365.25) over 2016-01-01 to
+ * 2025-12-31, a grid date being a Sunday-to-Friday UTC date on which at least 9 distinct symbols
+ * of the 36 printed a bar. Equities: 252 NYSE sessions. Re-measure only when the universe
+ * changes.
+ */
+struct StatisticsConfig {
+    double futures_sessions_per_year{311.0574};
+    double equity_sessions_per_year{252.0};
+
+    nlohmann::json to_json() const {
+        nlohmann::json j;
+        j["sessions_per_year"] = {{"futures", futures_sessions_per_year},
+                                  {"equities", equity_sessions_per_year}};
+        return j;
+    }
+
+    void from_json(const nlohmann::json& j) {
+        if (!j.contains("sessions_per_year")) return;
+        const auto& k = j.at("sessions_per_year");
+        if (k.contains("futures")) futures_sessions_per_year = k.at("futures").get<double>();
+        if (k.contains("equities")) equity_sessions_per_year = k.at("equities").get<double>();
     }
 };
 
@@ -176,13 +275,12 @@ struct LiveSpecificConfig {
  */
 struct StrategyDefaultsConfig {
     std::vector<std::pair<int, double>> fdm{{1, 1.0},  {2, 1.03}, {3, 1.08},
-                                             {4, 1.13}, {5, 1.19}, {6, 1.26}};
+                                            {4, 1.13}, {5, 1.19}, {6, 1.26}};
     double max_strategy_allocation{1.0};
     double min_strategy_allocation{0.1};
-    bool use_optimization{true};
-    bool use_risk_management{true};
-    double carver_buffer_floor{0.5};
-    double carver_buffer_position_factor{0.2};
+    // use_optimization lives at portfolio.json's top level (AppConfig::use_optimization), and
+    // use_risk_management is not a key: both are load errors in this block, so a leftover key
+    // is never read from a block that does not own it.
 
     nlohmann::json to_json() const {
         nlohmann::json j;
@@ -193,10 +291,6 @@ struct StrategyDefaultsConfig {
         j["fdm"] = fdm_array;
         j["max_strategy_allocation"] = max_strategy_allocation;
         j["min_strategy_allocation"] = min_strategy_allocation;
-        j["use_optimization"] = use_optimization;
-        j["use_risk_management"] = use_risk_management;
-        j["carver_buffer_floor"] = carver_buffer_floor;
-        j["carver_buffer_position_factor"] = carver_buffer_position_factor;
         return j;
     }
 
@@ -211,15 +305,6 @@ struct StrategyDefaultsConfig {
             max_strategy_allocation = j.at("max_strategy_allocation").get<double>();
         if (j.contains("min_strategy_allocation"))
             min_strategy_allocation = j.at("min_strategy_allocation").get<double>();
-        if (j.contains("use_optimization"))
-            use_optimization = j.at("use_optimization").get<bool>();
-        if (j.contains("use_risk_management"))
-            use_risk_management = j.at("use_risk_management").get<bool>();
-        if (j.contains("carver_buffer_floor"))
-            carver_buffer_floor = j.at("carver_buffer_floor").get<double>();
-        if (j.contains("carver_buffer_position_factor"))
-            carver_buffer_position_factor =
-                j.at("carver_buffer_position_factor").get<double>();
     }
 };
 
@@ -232,35 +317,156 @@ struct StrategyDefaultsConfig {
  * - config/portfolios/{name}/risk.json
  * - config/portfolios/{name}/email.json
  */
+/**
+ * @brief portfolio.json's top-level equity_slow_rule: for
+ * these symbols a negative combined forecast of the book's FIRST sleeve stands only when the scaled
+ * forecast of every pair named is negative, and is 0 otherwise.
+ *
+ *   "equity_slow_rule": {"symbols": ["M2K", "MES", "MNQ", "MYM"], "pairs": [[32, 128], [64, 256]]}
+ *
+ * A futures book requires the key (ConfigLoader::require_loop_keys); when present, both lists are
+ * non-empty, a symbol is a non-empty string and a pair is two positive whole numbers.
+ */
+struct EquitySlowRule {
+    bool present{false};
+    std::vector<std::string> symbols;
+    std::vector<std::pair<int, int>> pairs;
+};
+
+/**
+ * @brief portfolio.json's optional top-level carry block (trade-ngin #185; Carver, strategy eleven):
+ *        the carry rules of the book's first sleeve, blended with its trend rules into one forecast.
+ *
+ *   "carry": {"weight": 0.4, "spans": [5, 20, 60, 120], "scalar": 30}
+ *
+ * `weight` is the carry style's share of the forecast weights (table 51: 0.4, trend 0.6), in [0, 1];
+ * `spans` the smoothing spans in business days, fastest first; `scalar` the forecast scalar. Absent,
+ * or with weight 0, carry is off and the strategy is today's to the last stored digit. With weight
+ * above 0 the book must be one enabled TrendFollowingStrategy sleeve and per_contract_rolls on.
+ */
+struct CarryConfig {
+    bool present{false};
+    double weight{0.0};
+    std::vector<int> spans{5, 20, 60, 120};
+    double scalar{30.0};
+    bool enabled() const { return present && weight > 0.0; }
+};
+
 struct AppConfig {
     // Portfolio identification
     std::string portfolio_id;
 
     // Capital settings
     double initial_capital{500000.0};
-    double reserve_capital_pct{0.10};
 
     // Database configuration
     DatabaseConfig database;
 
     // Execution configuration
-    ExecutionConfig execution;
+    ExecutionSettingsConfig execution;
 
     // Optimization configuration
     DynamicOptConfig opt_config;
 
-    // Risk configuration
+    // Risk configuration. Back-filled from risk.json's `risk_reporting` block, which is
+    // the reporting RiskManager the live runners snapshot the book with and the value the
+    // equity start-up leverage guard reads. It is NOT the gate: the gate's numbers live
+    // on the module list below, and rule C1 keeps the two equal while a carver module is
+    // assigned.
     RiskConfig risk_config;
+
+    // The book's risk module assignment, portfolio scope and sleeve scope.
+    RiskSchema risk_schema;
 
     // Additional risk limits from portfolio
     double max_drawdown{0.4};
     double max_leverage{4.0};
+
+    // portfolio.json's top-level use_optimization (schema 2; required, no default).
+    // Initialised false so that no path on which load() fails can leave an optimizer
+    // switched on by a value nobody wrote.
+    bool use_optimization{false};
+
+    // portfolio.json's top-level covariance_history_prices: how many daily closes per symbol
+    // the PortfolioManager keeps for the optimiser's covariance (PortfolioConfig::
+    // covariance_history_prices). Absent means 756; a value that is not a whole number of at
+    // least 2 is a load error.
+    size_t covariance_history_prices{756};
+
+    // portfolio.json's top-level covariance_stale_dates: how many dates of the union of the
+    // covariance participants' dates a participant's last close may trail the newest before the
+    // optimiser leaves it out of the date intersection (PortfolioConfig::covariance_stale_dates).
+    // Absent means 5; a value that is not a whole number of at least 0 is a load error.
+    size_t covariance_stale_dates{5};
+
+    // portfolio.json's optional top-level per_contract_rolls: the futures
+    // bars from the per-contract roll rule (data/contract_rolls.hpp) instead of the vendor's .v.0
+    // series. Absent means false. The four futures runners read it
+    // (contract_rolls::configure_per_contract_source); it is deliberately not in to_json(), so the
+    // stored run metadata does not change while it is off.
+    bool per_contract_rolls{false};
+
+    // portfolio.json's optional top-level per_contract_switch_bar: the bar the per-contract
+    // source hands out on an unconfirmed vendor switch bar,
+    // "held" (the held contract's own bar, the default) or "vendor" (the bar of the contract the
+    // vendor switched to, a one-bar stray included). Absent means "held"; read only with
+    // per_contract_rolls on; not in to_json().
+    std::string per_contract_switch_bar{"held"};
+
+    // portfolio.json's top-level equity_slow_rule; required on a futures book.
+    EquitySlowRule equity_slow_rule;
+
+    // portfolio.json's optional top-level listing_dates (data/listing_dates.hpp):
+    //   "listing_dates": {"contracts": [{"symbol": "MES", "listed": "2019-05-06", "before": "ES", "ratio": 10}]}
+    // Absent means empty, and an empty list changes nothing anywhere.
+    std::vector<ListedContract> listing_dates;
+    // portfolio.json's optional top-level instrument_id_relabels (data/listing_dates.hpp): vendor id
+    // changes that are not rolls. Absent means empty, and an empty list changes nothing.
+    std::vector<InstrumentIdRelabel> instrument_id_relabels;
+    // listing_dates' optional "switch_rule": "open_at_target" (the default), "close_reenter", "convert" or "carry_to_target".
+    ListingSwitchRule listing_switch_rule{ListingSwitchRule::kOpenAtTarget};
+
+    // portfolio.json's optional top-level trading_rule_removals: symbol (base name) to the EMA
+    // pairs that contract does not run, removed by cost (Carver, strategy nine, "Removing
+    // expensive trading rules"; the list is the output of scripts/trading_rule_costs.py and is
+    // never edited by hand):
+    //   "trading_rule_removals": {"ZR": [[2, 8], [4, 16]], "ZC": [[2, 8]]}
+    // Absent means empty, and an empty map changes nothing anywhere. A book of more than one
+    // enabled sleeve, or whose sleeve is not a TrendFollowingStrategy, is refused with the block.
+    std::map<std::string, std::vector<std::pair<int, int>>> trading_rule_removals;
+
+    // portfolio.json's optional top-level carry block (CarryConfig); not in to_json(), so the stored
+    // run metadata does not change while it is off.
+    CarryConfig carry;
+
+    // portfolio.json's top-level sizing_mode and starting_capital; both required on a futures
+    // book. The one mode is "half_compounding": the book is sized
+    // on the starting capital less the drawdown of its cumulative settled net P&L from its running
+    // peak, never above the starting capital. starting_capital is S_0 and equals initial_capital
+    // (one figure, written twice so that neither file can be changed alone). Empty and 0: absent.
+    std::string sizing_mode;
+    double starting_capital{0.0};
+
+    // The one pass's keys in defaults.json's optimization block, each required on a futures
+    // book (require_loop_keys): cost_penalty_scalar (the
+    // search's cost multiplier, read into opt_config), sign_close_band (the deferral band) and
+    // b_sigma_floor (B_sigma's floor as a ratio to tau). `false` / 0: the key is absent.
+    bool has_cost_penalty_scalar{false};
+    double sign_close_band{0.0};
+    double b_sigma_floor{0.0};
+    // Every RETIRED key the files still carry, as "<file>: <key>". Collected at
+    // load, never read for a value; a futures book refuses to run on a non-empty list
+    // (require_loop_keys). The equity book's files are not searched for the futures-only keys.
+    std::vector<std::string> retired_loop_keys;
 
     // Backtest settings
     BacktestSpecificConfig backtest;
 
     // Live settings
     LiveSpecificConfig live;
+
+    // The statistics convention: the sessions a year per series (defaults when absent)
+    StatisticsConfig statistics;
 
     // Strategy defaults
     StrategyDefaultsConfig strategy_defaults;
@@ -271,6 +477,9 @@ struct AppConfig {
     // Raw strategies JSON for strategy factory
     nlohmann::json strategies_config;
 
+    // Asset class
+    AssetClass asset_class;
+
     /**
      * @brief Convert config to JSON for serialization
      */
@@ -278,18 +487,26 @@ struct AppConfig {
         nlohmann::json j;
         j["portfolio_id"] = portfolio_id;
         j["initial_capital"] = initial_capital;
-        j["reserve_capital_pct"] = reserve_capital_pct;
         j["database"] = database.to_json();
         j["execution"] = execution.to_json();
         j["optimization"] = opt_config.to_json();
-        j["risk"] = risk_config.to_json();
-        j["max_drawdown"] = max_drawdown;
-        j["max_leverage"] = max_leverage;
+        // The schema-2 risk object, not the resolved RiskConfig, so that to_json ->
+        // extract_config is lossless. It carries max_drawdown and max_leverage (when the
+        // book has one): that is their one home, the place extract_config reads them. They
+        // are NOT repeated at the top level, where no reader looks (QT plan E2, #60's limit
+        // asymmetry; on an overlay book the struct's 4.0 fallback was written there).
+        j["risk"] = risk_schema.to_json();
+        j["sleeve_risk_modules"] = risk_schema.sleeves_to_json();
+        j["use_optimization"] = use_optimization;
+        j["covariance_history_prices"] = covariance_history_prices;
+        j["covariance_stale_dates"] = covariance_stale_dates;
         j["backtest"] = backtest.to_json();
         j["live"] = live.to_json();
+        j["statistics"] = statistics.to_json();
         j["strategy_defaults"] = strategy_defaults.to_json();
         j["email"] = email.to_json();
         j["strategies"] = strategies_config;
+        // j["asset_class"] = TODO implement this
         return j;
     }
 };
@@ -317,6 +534,38 @@ public:
                                   const std::string& portfolio_name);
 
     /**
+     * @brief Load a LIVE run's configuration: the files, with a desk override merged in
+     *        (QT plan E2; rulings 2, 3 and 24). Backtests never call this (ruling 4).
+     *
+     * @param db_overlay the active trading.strategy_config row's overrides, or nullptr when the
+     *        portfolio has none (the files are used unchanged). It is deep-merged into the
+     *        merged file JSON after email.json and before extract_config; the result then goes
+     *        through extract_config and validate_config like the files alone. It is REFUSED,
+     *        never dropped, when it is not an object; carries a null anywhere; names the
+     *        database or email section, portfolio_id, or a credential-like key
+     *        (find_secret_key); names a key the files do not hold (ruling 3: any knob the files
+     *        hold; a key they do not is a typo); changes an object to a non-object or the reverse,
+     *        or a value's JSON type; or the merged config fails extract or validate.
+     * @param settings_used out: the credential-free effective config (the merged JSON without
+     *        the database and email sections). Producing it refuses when a credential-like key
+     *        remains, or when it does not parse back (extract_config) to the same config.
+     */
+    static Result<AppConfig> load(const std::filesystem::path& config_base_path,
+                                  const std::string& portfolio_name,
+                                  const nlohmann::json* db_overlay,
+                                  nlohmann::json* settings_used = nullptr);
+
+    /**
+     * @brief Finds a key that looks like a credential anywhere below `node` (gen-3's secret
+     *        scan): database, email, anything containing password, secret, token or credential,
+     *        and anything starting with smtp, case-insensitively. Keys only; values are never
+     *        read or reported.
+     * @param found set to the key's path (a.b[2].c) when one is found
+     */
+    static bool find_secret_key(const nlohmann::json& node, const std::string& path,
+                                std::string* found);
+
+    /**
      * @brief Load configuration from legacy single-file format
      * @param config_file_path Path to legacy config file (e.g., "./config.json")
      * @return Result containing AppConfig or error
@@ -326,6 +575,39 @@ public:
      */
     static Result<AppConfig> load_legacy(const std::filesystem::path& config_file_path);
 
+    /**
+     * @brief The keys a futures book requires, checked by the four futures
+     *        runners right after load(): a book without one of them does not run.
+     * @return an error naming the first missing key
+     */
+    static Result<void> require_loop_keys(const AppConfig& config);
+
+    /**
+     * @brief Resolve a backtest's [start_date, end_date] window from config.
+     *
+     * Single place the three bt runners agree on, so the frozen-window escape
+     * hatch cannot be honoured by one runner and ignored by another.
+     *
+     * With `backtest.frozen_end_date` EMPTY -- which is the deployed state, the
+     * key being absent from config_template/defaults.json -- this reproduces
+     * exactly what the runners did inline: end = now(), start = the same local
+     * broken-down time with tm_year reduced by lookback_years, normalised
+     * through std::mktime. Same call, same frame, same result.
+     *
+     * With the key SET (test configs only) the same arithmetic is applied to
+     * 00:00:00 local on that date instead of to now(), so repeated runs cover
+     * identical days and a line-by-line A/B stays tight indefinitely.
+     *
+     * @param backtest    the config's backtest block
+     * @param now         wall clock, passed in so callers and tests share one clock
+     * @param froze       set true when the frozen window was used (caller WARNs)
+     * @return {start_date, end_date}
+     */
+    static std::pair<Timestamp, Timestamp> resolve_backtest_window(
+        const BacktestSpecificConfig& backtest,
+        Timestamp now,
+        bool* froze = nullptr);
+
 private:
     /**
      * @brief Load and parse a JSON file
@@ -333,6 +615,17 @@ private:
      * @return Result containing parsed JSON or error
      */
     static Result<nlohmann::json> load_json_file(const std::filesystem::path& file_path);
+
+    /// defaults.json + portfolio.json, with risk.json under "risk" and email.json under "email".
+    static Result<nlohmann::json> load_file_tree(const std::filesystem::path& config_base_path,
+                                                 const std::string& portfolio_name);
+
+    /// The overlay checks of the db-aware load (everything but extract and validate).
+    static Result<void> check_overlay(const nlohmann::json& overlay, const nlohmann::json& files);
+
+    /// The credential-free settings used, with the parse -> rebuild -> compare guard.
+    static Result<nlohmann::json> settings_snapshot(const nlohmann::json& merged,
+                                                    const AppConfig& config);
 
     /**
      * @brief Recursively merge JSON objects

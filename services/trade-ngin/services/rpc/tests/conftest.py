@@ -1,0 +1,372 @@
+import contextlib
+import dataclasses
+import datetime as dt
+import json
+import threading
+
+import grpc
+import pytest
+
+from algogators_rpc.client import versioned_channel
+from algogators_rpc.registry import Registry
+from algogators_rpc.server import build_server
+
+from algogators_rpc.services.desk.command_store import (BUILT_ON, NOT_APPROVER, NOT_DESK,
+                                                        NOT_RUNNING, RESCINDED, SENT,
+                                                        UNPUBLISHED, BookLine, CommandRow,
+                                                        RescindResult, is_approver)
+from algogators_rpc.services.desk.commands import Dispatcher
+from algogators_rpc.services.desk.config import CommandSettings
+from algogators_rpc.services.desk.jobs import JobManager, RunResult
+from algogators_rpc.services.desk.service import build_service
+from algogators_rpc.services.desk.risk import MarginInputs
+from algogators_rpc.services.desk.store import RunFacts, StoreError
+
+UTC = dt.timezone.utc
+PID = "QT_CONSERVATIVE_PORTFOLIO"
+PDIR = "qt_conservative"
+DAY = dt.date(2026, 10, 7)
+NY = __import__("zoneinfo").ZoneInfo("America/New_York")
+# Contract C7: an approval counts by its row's created_at against 10:00 New York on its date, and
+# the dispatcher's clock decides --send-now (09:30). The fixtures approve at 08:00 and dispatch at
+# 08:30 on DAY, before the send; tests of the cutoff move both.
+PUBLISH_CREATED = dt.datetime(2026, 10, 7, 8, 0, tzinfo=NY)
+DISPATCH_AT = dt.datetime(2026, 10, 7, 8, 30, tzinfo=NY)
+
+
+class FakeStore:
+    """The servicer's only DB dependency, scripted per test."""
+
+    def __init__(self):
+        self.facts = {}
+        self.risk_rows = {}          # (portfolio_id, date) -> DeskRiskRow (GetDeskRisk, C9)
+        self.error = None
+        self.calls = []
+
+    def run_facts(self, portfolio_id, date):
+        self.calls.append((portfolio_id, date))
+        if self.error:
+            raise StoreError(self.error)
+        return self.facts.get((portfolio_id, date), RunFacts())
+
+    def desk_risk_row(self, portfolio_id, date):
+        self.calls.append((portfolio_id, date))
+        if self.error:
+            raise StoreError(self.error)
+        return self.risk_rows.get((portfolio_id, date))
+
+
+def now():
+    return dt.datetime.now(UTC)
+
+
+# An override request's proposal snapshot (contract C1): what the margin cap is checked on.
+PROPOSAL = [{"symbol": "ZN.v.0", "quantity": 10, "strategy_name": "TREND_FOLLOWING"}]
+MARGINS = {"ZN": 2500.0, "ES": 28000.0, "MES": 2900.0}
+EQUITY = 500_000.0
+
+
+def make_row(id, kind, **kw):
+    base = dict(id=id, portfolio_id=PID, date=DAY, kind=kind, status="pending",
+                requested_by="desk@algogators.com", reason="test reason",
+                payload={"proposal": PROPOSAL} if kind == "override_request" else {},
+                created_at=PUBLISH_CREATED)
+    base.update(kw)
+    return CommandRow(**base)
+
+
+class FakeCommandStore:
+    """trading.position_overrides in memory, with the claim semantics of the real UPDATEs and
+    the 025 transitions (pending -> running -> done/refused/failed; running -> pending only by
+    requeue; terminal rows final). `error` makes every call fail like a database that is down;
+    `fail` maps a method name to how many of its next calls fail."""
+
+    TERMINAL = ("done", "refused", "failed")
+
+    def __init__(self, rows=()):
+        self.rows = {r.id: r for r in rows}
+        self.book_data = {"system": {}, "qt_proposal": {}, "qt": {}}
+        self.published = {}          # (portfolio_id, date) -> published_at
+        # (portfolio_id, date) -> {published_by, published_at, publish_source, sent_at}: the
+        # day's live_run_metadata as `rescind` reads it (contract C8).
+        self.metadata = {}
+        self.later_books = {}        # (portfolio_id, date) -> a later day with a book
+        self.lock = threading.Lock()
+        self.claims = []
+        self.requeues = []
+        self.error = None
+        self.fail = {}
+
+    def add(self, row):
+        self.rows[row.id] = row
+        return row
+
+    def _check(self, name=""):
+        if self.error:
+            raise StoreError(self.error)
+        if self.fail.get(name):
+            self.fail[name] -= 1
+            raise StoreError(f"database error (OperationalError) in {name}")
+
+    def _set(self, audit_id, **changes):
+        old = self.rows[audit_id]
+        new_status = changes.get("status", old.status)
+        assert old.status not in self.TERMINAL, f"row {audit_id} is final ({old.status})"
+        assert (old.status, new_status) in (("pending", "running"), ("running", "done"),
+                                            ("running", "refused"), ("running", "failed"),
+                                            ("running", "pending"), ("running", "running"),
+                                            ("pending", "pending")), (old.status, new_status)
+        self.rows[audit_id] = dataclasses.replace(old, **changes)
+        return self.rows[audit_id]
+
+    def get_row(self, audit_id):
+        self._check("get_row")
+        with self.lock:
+            return self.rows.get(audit_id)
+
+    def claim(self, audit_id):
+        self._check("claim")
+        with self.lock:
+            row = self.rows.get(audit_id)
+            if row is None or row.status != "pending":
+                return None
+            self.claims.append(audit_id)
+            return self._set(audit_id, status="running", started_at=now())
+
+    def finish(self, audit_id, status, result, message):
+        self._check("finish")
+        with self.lock:
+            row = self.rows.get(audit_id)
+            if row is None or row.status != "running":
+                return False
+            self._set(audit_id, status=status, result=result, message=message,
+                      finished_at=now())
+            return True
+
+    def record_mail(self, audit_id, token_hash, expires_at, result):
+        self._check("record_mail")
+        with self.lock:
+            row = self.rows.get(audit_id)
+            if row is None or row.status != "running":
+                return None
+            return self._set(audit_id, token_hash=token_hash, result=result,
+                             token_expires_at=expires_at).token_expires_at
+
+    def running_rows(self):
+        self._check("running_rows")
+        with self.lock:
+            t = now()
+            return [(r, None if r.started_at is None else (t - r.started_at).total_seconds())
+                    for _, r in sorted(self.rows.items()) if r.status == "running"]
+
+    def requeue(self, audit_id, message):
+        self._check("requeue")
+        with self.lock:
+            row = self.rows.get(audit_id)
+            if row is None or row.status != "running":
+                return False
+            self.requeues.append(audit_id)
+            self._set(audit_id, status="pending", started_at=None, finished_at=None,
+                      message=message)
+            return True
+
+    def pending_rows(self):
+        self._check("pending_rows")
+        with self.lock:
+            return [r for _, r in sorted(self.rows.items()) if r.status == "pending"]
+
+    def decisions_for(self, parent_id):
+        self._check("decisions_for")
+        with self.lock:
+            return [r for _, r in sorted(self.rows.items())
+                    if r.kind == "override_decision" and r.parent_id == parent_id]
+
+    def sent_at(self, portfolio_id, date):
+        self._check("sent_at")
+        return (self.metadata.get((portfolio_id, date)) or {}).get("sent_at")
+
+    def publishes_after(self, after_id):
+        self._check("publishes_after")
+        with self.lock:
+            return [r for _, r in sorted(self.rows.items())
+                    if r.kind == "publish" and isinstance(r.payload, dict)
+                    and r.payload.get("after") == after_id]
+
+    def published_at(self, portfolio_id, date):
+        self._check("published_at")
+        return self.published.get((portfolio_id, date))
+
+    def newest_pending_publish(self, portfolio_id, date):
+        self._check("newest_pending_publish")
+        with self.lock:
+            rows = [r for r in self.rows.values() if r.kind == "publish" and r.status == "pending"
+                    and r.portfolio_id == portfolio_id and r.date == date]
+            return max(rows, key=lambda r: r.id) if rows else None
+
+    def books(self, portfolio_id, date):
+        self._check("books")
+        return {k: dict(v) for k, v in self.book_data.items()}
+
+    def rescind(self, audit_id, portfolio_id, date, message, requested_by, approvers=()):
+        self._check("rescind")
+        with self.lock:
+            meta = self.metadata.get((portfolio_id, date)) or {}
+            if meta.get("sent_at"):
+                return RescindResult(SENT, sent_at=meta["sent_at"])
+            if not meta.get("published_at"):
+                return RescindResult(UNPUBLISHED)
+            by, at, source = meta["published_by"], meta["published_at"], meta.get("publish_source")
+            if source != "desk":
+                return RescindResult(NOT_DESK, by, at, source)
+            if (portfolio_id, date) in self.later_books:
+                return RescindResult(BUILT_ON, by, at, source,
+                                     later=self.later_books[(portfolio_id, date)])
+            approving = [r for r in self.rows.values()
+                         if (r.portfolio_id, r.date, r.kind, r.status) ==
+                         (portfolio_id, date, "publish", "done")
+                         and isinstance(r.result, dict) and "published_at" in r.result]
+            flow = (max(approving, key=lambda r: r.id).payload or {}).get("flow")                 if approving else None
+            if flow == "override_b" and not is_approver(requested_by, approvers):
+                return RescindResult(NOT_APPROVER, by, at, source, flow=flow)
+            row = self.rows.get(audit_id)
+            if row is None or row.status != "running":
+                return RescindResult(NOT_RUNNING)
+            self.metadata[(portfolio_id, date)] = dict(meta, published_by=None, published_at=None,
+                                                       publish_source=None)
+            self.published.pop((portfolio_id, date), None)
+            self._set(audit_id, status="done", message=message, finished_at=now(),
+                      result={"rescinded": {"published_by": by, "published_at": at.isoformat(),
+                                            "flow": flow}})
+            return RescindResult(RESCINDED, by, at, source, flow=flow)
+
+
+class FakeRunner:
+    """Stands in for the subprocess. `behave(argv)` returns a RunResult and may play the engine
+    by recording the row's outcome on the store."""
+
+    def __init__(self, store, behave=None):
+        self.store = store
+        self.calls = []
+        self.behave = behave or self.engine_records("done")
+        self.lock = threading.Lock()
+
+    def engine_records(self, status, rc=0):
+        def behave(argv):
+            audit_id = int(argv[argv.index("--audit-id") + 1])
+            self.store.finish(audit_id, status, {"by": "engine"}, f"engine said {status}")
+            return RunResult(rc=rc, stdout="ok\n", stderr="")
+        return behave
+
+    def run(self, argv, cwd, timeout, copy_to=None):
+        with self.lock:
+            self.calls.append((list(argv), cwd, timeout))
+        return self.behave(list(argv))
+
+
+def write_portfolio(config_dir, dirname=PDIR, portfolio_id=PID, email=None):
+    d = config_dir / "portfolios" / dirname
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "portfolio.json").write_text(json.dumps({"portfolio_id": portfolio_id}))
+    if email is not None:
+        (d / "email.json").write_text(json.dumps(email))
+    return d
+
+
+@pytest.fixture
+def store():
+    return FakeStore()
+
+
+@pytest.fixture
+def config_dir(tmp_path):
+    root = tmp_path / "config"
+    write_portfolio(root)
+    return root
+
+
+@pytest.fixture
+def settings(config_dir, tmp_path):
+    return CommandSettings(engine_binary="/app/build/bin/Release/live_portfolio_conservative",
+                           engine_cwd="/app", config_dir=str(config_dir),
+                           lock_dir=str(tmp_path / "locks"), job_timeout_s=30,
+                           approvers="vp=vp@algogators.com,president=pres@algogators.com",
+                           email_disabled=True)
+
+
+@pytest.fixture
+def cstore():
+    return FakeCommandStore()
+
+
+@pytest.fixture
+def runner(cstore):
+    return FakeRunner(cstore)
+
+
+class Agent:
+    """A dispatcher wired to fakes, with the mail sender recorded."""
+
+    def __init__(self, cstore, runner, settings):
+        self.store, self.runner, self.settings = cstore, runner, settings
+        self.sent = []
+        self.now = DISPATCH_AT
+        self.jobs = JobManager(cstore, settings, runner)
+        # The portfolio flock a rescind takes: held unless a test says another holder keeps it.
+        self.lock_free = True
+        self.locks = []
+        # The day's qt row the publish gate reads (decision 5); None = no book yet (never blocks).
+        self.book = None
+        # The margin data the override's cap reads (store.margin_inputs).
+        self.margin = MarginInputs(MARGINS, EQUITY)
+        self.dispatcher = Dispatcher(cstore, self.jobs, settings,
+                                     margin_reader=lambda portfolio_id, date: self.margin,
+                                     sender=lambda cfg, to, subject, body:
+                                     self.sent.append((cfg, list(to), subject, body)),
+                                     clock=lambda: self.now,
+                                     lock_factory=self._lock,
+                                     risk_reader=lambda portfolio_id, date: self.book)
+
+    @contextlib.contextmanager
+    def _lock(self, path, wait_s):
+        self.locks.append((path, wait_s))
+        yield self.lock_free
+
+    def wait(self):
+        self.jobs.wait_idle()
+
+
+@pytest.fixture
+def agent(cstore, runner, settings):
+    return Agent(cstore, runner, settings)
+
+
+@pytest.fixture
+def registry(store, agent, settings):
+    registry = Registry()
+    registry.register(build_service(store, agent.dispatcher, config_dir=settings.config_dir))
+    return registry
+
+
+@pytest.fixture
+def server_port(registry):
+    server, _, port = build_server(registry, "127.0.0.1:0", max_workers=2)
+    server.start()
+    yield port
+    server.stop(grace=None)
+
+
+@pytest.fixture
+def channel(server_port):
+    """A client channel that sends the version header, as AlgoLens' does."""
+    with versioned_channel(f"127.0.0.1:{server_port}") as ch:
+        yield ch
+
+
+@pytest.fixture
+def raw_channel(server_port):
+    """A client channel without the version header."""
+    with grpc.insecure_channel(f"127.0.0.1:{server_port}") as ch:
+        yield ch
+
+
+__all__ = ["BookLine"]

@@ -1,3 +1,4 @@
+#include "trade_ngin/data/roll_series.hpp"
 #include "trade_ngin/risk/risk_manager.hpp"
 #include <Eigen/Dense>
 #include <algorithm>
@@ -12,6 +13,63 @@ namespace trade_ngin {
 
 RiskManager::RiskManager(RiskConfig config) : config_(std::move(config)) {
     Logger::register_component("RiskManager");
+}
+
+double RiskManager::contract_multiplier_for(const std::string& symbol) {
+    double contract_multiplier = 1.0;
+    try {
+        auto& registry = InstrumentRegistry::instance();
+        // Normalize variant-suffixed symbols for lookup (e.g., 6B.v.0 -> 6B)
+        std::string lookup_sym = symbol;
+        auto dotpos = lookup_sym.find(".v.");
+        if (dotpos != std::string::npos) {
+            lookup_sym = lookup_sym.substr(0, dotpos);
+        }
+        dotpos = lookup_sym.find(".c.");
+        if (dotpos != std::string::npos) {
+            lookup_sym = lookup_sym.substr(0, dotpos);
+        }
+        auto instrument = registry.get_instrument(lookup_sym);
+        if (instrument) {
+            contract_multiplier = instrument->get_multiplier();
+        }
+    } catch (...) {
+        // Use default multiplier if exception occurs
+    }
+    return contract_multiplier;
+}
+
+RiskManager::LeverageReading RiskManager::leverage_of(
+    const std::unordered_map<std::string, Position>& positions,
+    const MarketData& market_data) const {
+    // process_positions' own valuation (average price x contract multiplier over the holdings
+    // the window maps; no current prices, as the Carver module never passes any), and
+    // calculate_leverage_multiplier's own limits, with nothing logged and no state touched.
+    LeverageReading r;
+    double gross = 0.0;
+    double net = 0.0;
+    for (const auto& [symbol, pos] : positions) {
+        auto it = market_data.symbol_indices.find(symbol);
+        if (it == market_data.symbol_indices.end() || it->second >= market_data.ordered_symbols.size()) {
+            continue;
+        }
+        const double value = static_cast<double>(pos.quantity) *
+                             static_cast<double>(pos.average_price) * contract_multiplier_for(symbol);
+        gross += std::abs(value);
+        net += value;
+    }
+    const double capital = static_cast<double>(config_.capital);
+    if (!(capital > 0.0)) return r;
+    r.gross_leverage = gross / capital;
+    r.net_leverage = net / capital;
+    const double gross_mult = r.gross_leverage > config_.max_gross_leverage
+                                  ? config_.max_gross_leverage / r.gross_leverage
+                                  : 1.0;
+    const double net_abs = std::abs(r.net_leverage);
+    const double net_mult =
+        net_abs > config_.max_net_leverage ? config_.max_net_leverage / net_abs : 1.0;
+    r.multiplier = std::min({1.0, gross_mult, net_mult});
+    return r;
 }
 
 Result<RiskResult> RiskManager::process_positions(
@@ -52,11 +110,37 @@ Result<RiskResult> RiskManager::process_positions(
         std::vector<double> position_values_no_multiplier;
         position_values_no_multiplier.resize(market_data.ordered_symbols.size(), 0.0);
 
+        // The filter below is FAIL-OPEN BY CONSTRUCTION: a holding whose symbol has no bar
+        // anywhere in the gate's window is silently excluded, so the book can be gated on a
+        // STRICT SUBSET of itself with no error, no warning and no stored trace. Only when
+        // EVERY holding is excluded does the check further down return the default with a WARN.
+        // That is the amplifier which turned the dropped-bars bug into a gate measuring ONE name
+        // on 125,107 of 125,107 equity-chain laps, and it stays fail-open once the bars are
+        // fixed: a stale or delisted feed older than the window and younger than the runner's
+        // 730-day pull produces the same silence.
+        //
+        // This guard makes the omission VISIBLE and COUNTABLE. It deliberately does NOT refuse:
+        // refusing would change the shipped book on any day it fires, and that is a second
+        // change set, not this one. missing_symbol_policy carries the decision when it is taken.
+        size_t dropped_holdings = 0;
+        size_t dropped_nonzero = 0;
         for (const auto& [symbol, pos] : positions) {
             // Only include positions with symbols in our market data
             auto it = market_data.symbol_indices.find(symbol);
             if (it != market_data.symbol_indices.end()) {
                 size_t index = it->second;
+                if (index >= position_values.size()) {
+                    // In the window but its index is out of range: the window and the index map
+                    // disagree. Same fail-open shape, so the same guard.
+                    ++dropped_holdings;
+                    if (std::abs(static_cast<double>(pos.quantity)) > 1e-12) {
+                        ++dropped_nonzero;
+                        WARN("POSGUARD_MISS symbol=" + symbol + " qty=" +
+                             std::to_string(static_cast<double>(pos.quantity)) +
+                             " reason=index_out_of_range index=" + std::to_string(index) +
+                             " window_symbols=" + std::to_string(position_values.size()));
+                    }
+                }
                 if (index < position_values.size()) {
                     // Calculate position values for leverage
                     // For backtest: use average price (original logic)
@@ -72,26 +156,7 @@ Result<RiskResult> RiskManager::process_positions(
                     }
 
                     // Get contract multiplier from InstrumentRegistry for proper notional calculation
-                    double contract_multiplier = 1.0;
-                    try {
-                        auto& registry = InstrumentRegistry::instance();
-                        // Normalize variant-suffixed symbols for lookup (e.g., 6B.v.0 -> 6B)
-                        std::string lookup_sym = symbol;
-                        auto dotpos = lookup_sym.find(".v.");
-                        if (dotpos != std::string::npos) {
-                            lookup_sym = lookup_sym.substr(0, dotpos);
-                        }
-                        dotpos = lookup_sym.find(".c.");
-                        if (dotpos != std::string::npos) {
-                            lookup_sym = lookup_sym.substr(0, dotpos);
-                        }
-                        auto instrument = registry.get_instrument(lookup_sym);
-                        if (instrument) {
-                            contract_multiplier = instrument->get_multiplier();
-                        }
-                    } catch (...) {
-                        // Use default multiplier if exception occurs
-                    }
+                    const double contract_multiplier = contract_multiplier_for(symbol);
 
                     double signed_quantity = static_cast<double>(pos.quantity);
                     double position_value = signed_quantity * price_for_leverage * contract_multiplier;
@@ -103,7 +168,28 @@ Result<RiskResult> RiskManager::process_positions(
                     double position_value_no_mult = signed_quantity * price_for_leverage;
                     position_values_no_multiplier[index] = position_value_no_mult;
                 }
+            } else {
+                ++dropped_holdings;
+                if (std::abs(static_cast<double>(pos.quantity)) > 1e-12) {
+                    ++dropped_nonzero;
+                    WARN("POSGUARD_MISS symbol=" + symbol + " qty=" +
+                         std::to_string(static_cast<double>(pos.quantity)) +
+                         " reason=absent_from_window window_symbols=" +
+                         std::to_string(market_data.symbol_indices.size()));
+                }
             }
+        }
+
+        // ONE summary per RUN, not per call, so "no holding was dropped" is a positive statement
+        // in the log without the line becoming a fifth of it. A later call that drops MORE than
+        // the high-water mark prints again, so a regression that starts mid-run is still seen.
+        if (dropped_nonzero > posguard_high_water_ || !posguard_reported_) {
+            posguard_high_water_ = std::max(posguard_high_water_, dropped_nonzero);
+            posguard_reported_ = true;
+            INFO("POSGUARD holdings=" + std::to_string(positions.size()) + " mapped=" +
+                 std::to_string(position_symbols.size()) + " dropped=" +
+                 std::to_string(dropped_holdings) + " dropped_nonzero=" +
+                 std::to_string(dropped_nonzero));
         }
 
         if (position_symbols.empty()) {
@@ -148,8 +234,9 @@ Result<RiskResult> RiskManager::process_positions(
         //            this weighting represents per-contract volatility exposure
         //            rather than dollar-notional exposure.
         //   Formula: σ = √(vol_weights' · Σ · vol_weights), Σ annualized.
-        //   Used by: email_sender HTML report, stdout "Volatility:" line,
-        //            JSON metrics written to disk, chart_generator inputs,
+        //   Used by: the equity runner's stdout line
+        //            "Ex-ante vol (reporter):",
+        //            JSON metrics written to disk,
         //            and the trading.live_results.portfolio_var DB column.
         //   Not used for any sizing/gating decision — those use the gating
         //   form set inside calculate_portfolio_multiplier(); see comment
@@ -170,29 +257,6 @@ Result<RiskResult> RiskManager::process_positions(
                 }
             }
             result.portfolio_var = variance > 0.0 ? std::sqrt(variance) : 0.0;
-        }
-
-        // Surface both forms each cycle so anyone investigating a divergence
-        // between the displayed "Volatility" and the gate's behavior can see
-        // them side-by-side along with the per-instrument weights and σᵢ.
-        INFO("VAR_DEBUG: gate_sigma=" + std::to_string(gate_sigma) +
-             " reported_sigma=" + std::to_string(result.portfolio_var) +
-             " var_limit=" + std::to_string(config_.var_limit) +
-             " portfolio_mult=" + std::to_string(result.portfolio_multiplier));
-        for (size_t i = 0; i < weights.size() && i < vol_weights.size(); ++i) {
-            if (std::abs(weights[i]) > 1e-9 || std::abs(vol_weights[i]) > 1e-9) {
-                double sigma_i = (i < market_data.covariance.size() &&
-                                  market_data.covariance[i][i] > 0.0)
-                                     ? std::sqrt(market_data.covariance[i][i])
-                                     : 0.0;
-                const std::string& sym = i < market_data.ordered_symbols.size()
-                                             ? market_data.ordered_symbols[i]
-                                             : std::string("?");
-                INFO("VAR_DEBUG:   " + sym +
-                     " w_true=" + std::to_string(weights[i]) +
-                     " w_vol=" + std::to_string(vol_weights[i]) +
-                     " sigma_i=" + std::to_string(sigma_i));
-            }
         }
 
         // Overall scale is minimum of all multipliers
@@ -314,25 +378,18 @@ double RiskManager::calculate_portfolio_multiplier(const MarketData& market_data
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════
-// JUMP RISK MULTIPLIER — TWO IMPLEMENTATIONS COEXIST
+// JUMP RISK MULTIPLIER
 // ═══════════════════════════════════════════════════════════════════════════════════
-// VERSION B (PRODUCTION, called from process_positions):
 //   Per-bar 99th-percentile of |w·r| (weighted-sum absolute return) compared against
 //   jump_risk_limit (configured in risk.json). Empirically delivers Carver's intended
 //   risk-control behavior at our retail capital + long-short universe scale.
 //
-// VERSION A (ALTERNATIVE — calculate_jump_multiplier_carver_shock, NOT called):
-//   Carver-correct annualized portfolio σ under shocked (99th-pct rolling) stdevs vs
-//   jump_shock_threshold (Advanced Futures Trading Strategies, p.607-608).
-//   Theoretically more correct, but at our scale long/short cancellation keeps the
-//   shocked portfolio σ well below the threshold, so the multiplier essentially never
-//   fires. Preserved here as a reference implementation, not bit-rotted in git history.
-//
-// To switch back to Version A: change the call in process_positions() from
-// calculate_jump_multiplier(...) to calculate_jump_multiplier_carver_shock(...).
+//   Carver's shock-portfolio form (annualized portfolio σ under shocked 99th-pct rolling
+//   stdevs vs jump_shock_threshold, Advanced Futures Trading Strategies p.607-608) was
+//   kept here uncalled as calculate_jump_multiplier_carver_shock and has been deleted as
+//   dead code; it is in git history.
 // ═══════════════════════════════════════════════════════════════════════════════════
 
-// VERSION B — PRODUCTION
 double RiskManager::calculate_jump_multiplier(const MarketData& market_data,
                                               const std::vector<double>& weights,
                                               RiskResult& result) const {
@@ -355,145 +412,20 @@ double RiskManager::calculate_jump_multiplier(const MarketData& market_data,
     return std::min(1.0, config_.jump_risk_limit / result.jump_risk);
 }
 
-// VERSION A — ALTERNATIVE, NOT called from process_positions
-double RiskManager::calculate_jump_multiplier_carver_shock(const MarketData& market_data,
-                                                           const std::vector<double>& weights,
-                                                           RiskResult& result) const {
-    // Carver's jump risk multiplier (Advanced Futures Trading Strategies, p.607-608):
-    //   1. For each instrument, compute the 99th-percentile of historical rolling-window
-    //      standard deviations (the "shocked" stdev = worst-case vol regime per instrument).
-    //   2. Build covariance matrix Σ_jump using shocked stdevs on diagonal but original
-    //      correlations on off-diagonals.
-    //   3. Compute portfolio std under jump scenario: σ_jump = sqrt(w' × Σ_jump × w)
-    //   4. If σ_jump > jump_shock_threshold (default 0.75 = 3.75 × τ for τ=0.20),
-    //      scale by threshold / σ_jump.
-    if (weights.empty() || market_data.covariance.empty() || market_data.returns.empty()) {
-        result.jump_risk = 0.0;
-        return 1.0;
-    }
-
-    const size_t n = std::min(weights.size(), market_data.covariance.size());
-    if (n < 1) {
-        result.jump_risk = 0.0;
-        return 1.0;
-    }
-
-    try {
-        // Current per-instrument stdevs (annualized) from covariance diagonal
-        std::vector<double> current_stdevs(n);
-        for (size_t i = 0; i < n; ++i) {
-            current_stdevs[i] = std::sqrt(std::max(0.0, market_data.covariance[i][i]));
-        }
-
-        // Compute per-instrument 99th-percentile rolling stdev (the shocked stdev).
-        // Use a 22-day rolling window over historical returns (~1 trading month).
-        constexpr size_t window = 22;
-        constexpr double trading_days_per_year = 252.0;
-        const size_t T = market_data.returns.size();
-
-        std::vector<double> shocked_stdevs(n);
-        if (T < window + 1) {
-            // Not enough history for a meaningful 99th-percentile shock — fall back to
-            // current stdev × Carver's "extremely high" multiplier of 2.5x as a proxy.
-            for (size_t i = 0; i < n; ++i) {
-                shocked_stdevs[i] = current_stdevs[i] * 2.5;
-            }
-        } else {
-            for (size_t i = 0; i < n; ++i) {
-                std::vector<double> rolling_stdevs;
-                rolling_stdevs.reserve(T - window);
-                for (size_t t = window; t <= T; ++t) {
-                    double mean = 0.0;
-                    for (size_t k = t - window; k < t; ++k) {
-                        if (i < market_data.returns[k].size()) mean += market_data.returns[k][i];
-                    }
-                    mean /= static_cast<double>(window);
-                    double var = 0.0;
-                    for (size_t k = t - window; k < t; ++k) {
-                        if (i < market_data.returns[k].size()) {
-                            double d = market_data.returns[k][i] - mean;
-                            var += d * d;
-                        }
-                    }
-                    var /= static_cast<double>(window - 1);
-                    rolling_stdevs.push_back(std::sqrt(std::max(0.0, var)) *
-                                              std::sqrt(trading_days_per_year));
-                }
-                if (rolling_stdevs.empty()) {
-                    shocked_stdevs[i] = current_stdevs[i] * 2.5;
-                    continue;
-                }
-                std::sort(rolling_stdevs.begin(), rolling_stdevs.end());
-                size_t idx = static_cast<size_t>(rolling_stdevs.size() * 0.99);
-                if (idx >= rolling_stdevs.size()) idx = rolling_stdevs.size() - 1;
-                shocked_stdevs[i] = std::max(rolling_stdevs[idx], current_stdevs[i]);
-            }
-        }
-
-        // Build Σ_jump: diagonal = shocked_σ_i^2, off-diagonal = shocked_σ_i × shocked_σ_j × ρ_ij_current
-        // where ρ_ij_current = covariance[i][j] / (current_σ_i × current_σ_j).
-        Eigen::MatrixXd Sigma_jump(n, n);
-        for (size_t i = 0; i < n; ++i) {
-            for (size_t j = 0; j < n; ++j) {
-                if (i == j) {
-                    Sigma_jump(i, j) = shocked_stdevs[i] * shocked_stdevs[i];
-                } else {
-                    double rho = 0.0;
-                    if (current_stdevs[i] > 0 && current_stdevs[j] > 0) {
-                        rho = market_data.covariance[i][j] /
-                              (current_stdevs[i] * current_stdevs[j]);
-                        if (std::isnan(rho) || std::isinf(rho)) rho = 0.0;
-                        rho = std::max(-1.0, std::min(1.0, rho));
-                    }
-                    Sigma_jump(i, j) = shocked_stdevs[i] * shocked_stdevs[j] * rho;
-                }
-            }
-        }
-
-        // Portfolio std under jump scenario
-        Eigen::VectorXd w(n);
-        for (size_t i = 0; i < n; ++i) {
-            w(i) = weights[i];
-        }
-        double variance_jump = w.transpose() * Sigma_jump * w;
-        double risk_jump = std::sqrt(std::max(0.0, variance_jump));
-
-        result.jump_risk = risk_jump;
-        result.max_jump_risk = std::max(result.jump_risk, result.max_jump_risk);
-
-        // Scale down if jump portfolio risk exceeds threshold
-        if (risk_jump > config_.jump_shock_threshold && risk_jump > 0.0) {
-            return config_.jump_shock_threshold / risk_jump;
-        }
-
-        return 1.0;
-    } catch (const std::exception& e) {
-        ERROR("Exception in jump shock calculation: " + std::string(e.what()));
-        return 1.0;  // Safe default
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════════
-// CORRELATION RISK MULTIPLIER — TWO IMPLEMENTATIONS COEXIST
+// CORRELATION RISK MULTIPLIER
 // ═══════════════════════════════════════════════════════════════════════════════════
-// VERSION B (PRODUCTION, called from process_positions):
 //   max(|ρ_ij|) over all pairs vs max_correlation cap (configured in risk.json).
 //   Pre-Carver-compliant pair-wise cap. At our scale, this delivers Carver's intended
 //   risk-control behavior: scales positions down when broad pair-wise correlation
 //   regimes spike, while staying inactive in normal markets.
 //
-// VERSION A (ALTERNATIVE — calculate_correlation_multiplier_carver_shock, NOT called):
-//   Carver-correct portfolio σ under 99th-pct shocked correlations vs corr_shock_threshold
-//   (Advanced Futures Trading Strategies, p.610-614). Theoretically more rigorous, but
-//   at our scale long/short cancellation in the shocked portfolio σ keeps it well below
-//   the threshold — the multiplier essentially never fires. Preserved here as a
-//   reference implementation, not bit-rotted in git history.
-//
-// To switch back to Version A: change the call in process_positions() from
-// calculate_correlation_multiplier(...) to calculate_correlation_multiplier_carver_shock(...).
+//   Carver's shock-portfolio form (portfolio σ under 99th-pct shocked correlations vs
+//   corr_shock_threshold, Advanced Futures Trading Strategies p.610-614) was kept here
+//   uncalled as calculate_correlation_multiplier_carver_shock and has been deleted as
+//   dead code; it is in git history.
 // ═══════════════════════════════════════════════════════════════════════════════════
 
-// VERSION B — PRODUCTION
 double RiskManager::calculate_correlation_multiplier(const MarketData& market_data,
                                                      const std::vector<double>& weights,
                                                      RiskResult& result) const {
@@ -570,96 +502,6 @@ double RiskManager::calculate_correlation_multiplier(const MarketData& market_da
     return 1.0;  // No scaling needed
 }
 
-// VERSION A — ALTERNATIVE, NOT called from process_positions
-double RiskManager::calculate_correlation_multiplier_carver_shock(const MarketData& market_data,
-                                                                  const std::vector<double>& weights,
-                                                                  RiskResult& result) const {
-    // Carver's correlation shock risk multiplier (Advanced Futures Trading Strategies, p.610-614):
-    //   1. Build a "shocked" correlation matrix where every off-diagonal entry equals the
-    //      99th-percentile of observed pair-wise correlations.
-    //   2. Compute portfolio standard deviation under this shocked matrix:
-    //        σ_shock = sqrt(w' × Σ_shock × w)
-    //   3. If σ_shock > corr_shock_threshold (default 0.65 = 3.25 × τ for τ=0.20),
-    //      scale positions by threshold / σ_shock.
-    if (weights.empty() || market_data.covariance.empty()) {
-        result.correlation_risk = 0.0;
-        return 1.0;
-    }
-
-    const size_t n = std::min(weights.size(), market_data.covariance.size());
-    if (n < 2) {
-        result.correlation_risk = 0.0;
-        return 1.0;
-    }
-
-    try {
-        // Per-instrument standard deviations from current covariance diagonal
-        std::vector<double> stdevs(n);
-        for (size_t i = 0; i < n; ++i) {
-            stdevs[i] = std::sqrt(std::max(0.0, market_data.covariance[i][i]));
-        }
-
-        // Collect absolute pair-wise correlations from the current covariance matrix
-        std::vector<double> abs_correlations;
-        abs_correlations.reserve(n * (n - 1) / 2);
-        for (size_t i = 0; i < n; ++i) {
-            if (stdevs[i] <= 0) continue;
-            for (size_t j = i + 1; j < n; ++j) {
-                if (stdevs[j] <= 0) continue;
-                double corr = market_data.covariance[i][j] / (stdevs[i] * stdevs[j]);
-                if (std::isnan(corr) || std::isinf(corr)) continue;
-                corr = std::max(-1.0, std::min(1.0, corr));
-                abs_correlations.push_back(std::abs(corr));
-            }
-        }
-
-        if (abs_correlations.empty()) {
-            result.correlation_risk = 0.0;
-            return 1.0;
-        }
-
-        // 99th percentile of pair-wise correlations = the shocked correlation value
-        std::sort(abs_correlations.begin(), abs_correlations.end());
-        size_t idx = static_cast<size_t>(abs_correlations.size() * 0.99);
-        if (idx >= abs_correlations.size()) idx = abs_correlations.size() - 1;
-        const double shocked_corr = abs_correlations[idx];
-
-        // Build shocked covariance matrix:
-        //   diagonal: σ_i^2 (unchanged)
-        //   off-diagonal: shocked_corr × σ_i × σ_j (worst-case correlation)
-        Eigen::MatrixXd Sigma_shock(n, n);
-        for (size_t i = 0; i < n; ++i) {
-            for (size_t j = 0; j < n; ++j) {
-                if (i == j) {
-                    Sigma_shock(i, j) = stdevs[i] * stdevs[i];
-                } else {
-                    Sigma_shock(i, j) = shocked_corr * stdevs[i] * stdevs[j];
-                }
-            }
-        }
-
-        // Portfolio standard deviation under the shocked correlation matrix
-        Eigen::VectorXd w(n);
-        for (size_t i = 0; i < n; ++i) {
-            w(i) = weights[i];
-        }
-        const double variance_shock = w.transpose() * Sigma_shock * w;
-        const double risk_shock = std::sqrt(std::max(0.0, variance_shock));
-
-        result.correlation_risk = risk_shock;
-
-        // Scale down if shocked portfolio risk exceeds Carver's threshold
-        if (risk_shock > config_.corr_shock_threshold && risk_shock > 0.0) {
-            return config_.corr_shock_threshold / risk_shock;
-        }
-
-        return 1.0;
-    } catch (const std::exception& e) {
-        ERROR("Exception in correlation shock calculation: " + std::string(e.what()));
-        return 1.0;  // Safe default
-    }
-}
-
 double RiskManager::calculate_leverage_multiplier(const MarketData& market_data,
                                                   const std::vector<double>& weights,
                                                   const std::vector<double>& position_values,
@@ -691,8 +533,13 @@ double RiskManager::calculate_leverage_multiplier(const MarketData& market_data,
     double gross_multiplier = result.gross_leverage > config_.max_gross_leverage
                                   ? config_.max_gross_leverage / result.gross_leverage
                                   : 1.0;
-    double net_multiplier = result.net_leverage > config_.max_net_leverage
-                                ? config_.max_net_leverage / result.net_leverage
+    // The net limit bounds |net| in either direction: a net-SHORT book over max_net_leverage is
+    // cut exactly as the mirror long book is. result.net_leverage stays SIGNED (the stored
+    // net_leverage column and the email read it); only the comparison and the ratio take the
+    // magnitude.
+    const double net_abs = std::abs(result.net_leverage);
+    double net_multiplier = net_abs > config_.max_net_leverage
+                                ? config_.max_net_leverage / net_abs
                                 : 1.0;
 
     return std::min({1.0, gross_multiplier, net_multiplier});
@@ -718,7 +565,91 @@ Result<void> RiskManager::update_config(const RiskConfig& config) {
     return Result<void>();
 }
 
-MarketData RiskManager::create_market_data(const std::vector<Bar>& data) {
+RiskManager::AdjustedLevels RiskManager::adjusted_levels_of(const std::vector<Bar>& data) {
+    // Each symbol's bars in time order (one per
+    // timestamp, the last fed copy kept) are its consumed sequence here; a bar whose contract id
+    // differs from the previous one's is a change bar, and the adjusted level is the raw close
+    // plus the later steps, anchored on the symbol's latest bar.
+    std::map<std::string, std::map<Timestamp, const Bar*>> by_symbol;
+    for (const auto& bar : data) by_symbol[bar.symbol][bar.timestamp] = &bar;
+    AdjustedLevels out;
+    for (const auto& [symbol, bars] : by_symbol) {
+        std::vector<double> raw;
+        std::vector<std::string> ids;
+        roll_series::RollFields roll_from;
+        raw.reserve(bars.size());
+        ids.reserve(bars.size());
+        bool any_field = false;
+        for (const auto& [ts, bar] : bars) {
+            raw.push_back(static_cast<double>(bar->close));
+            ids.push_back(bar->instrument_id);
+            any_field = any_field || bar->roll_from.has_value();
+        }
+        // the roll fields, when a bar carries one
+        if (any_field) {
+            for (const auto& [ts, bar] : bars) roll_from.push_back(bar->roll_from);
+        }
+        const std::vector<double> adjusted = roll_series::adjusted_levels(
+            raw, roll_series::classify_instrument_changes(ids, roll_from));
+        auto& levels = out[symbol];
+        size_t i = 0;
+        for (const auto& [ts, bar] : bars) levels[ts] = adjusted[i++];
+    }
+    return out;
+}
+
+RiskManager::AdjustedLevels RiskManager::base_closes_of(const std::vector<Bar>& data) {
+    std::map<std::string, std::map<Timestamp, const Bar*>> by_symbol;
+    for (const auto& bar : data) by_symbol[bar.symbol][bar.timestamp] = &bar;
+    AdjustedLevels out;
+    for (const auto& [symbol, bars] : by_symbol) {
+        std::vector<std::string> ids;
+        roll_series::RollFields roll_from;
+        bool any_field = false;
+        for (const auto& [ts, bar] : bars) {
+            ids.push_back(bar->instrument_id);
+            roll_from.push_back(bar->roll_from);
+            any_field = any_field || bar->roll_from.has_value();
+        }
+        if (!any_field) continue;
+        const auto flags = roll_series::classify_instrument_changes(ids, roll_from);
+        size_t i = 0;
+        for (const auto& [ts, bar] : bars) {
+            if (flags.base_close[i]) out[symbol][ts] = *flags.base_close[i];
+            ++i;
+        }
+    }
+    return out;
+}
+
+namespace {
+
+/// A vendor switch bar the next bar confirms divides as the target's close.
+void apply_bases(std::map<std::string, std::map<Timestamp, double>>& prices_by_symbol,
+                    const RiskManager::AdjustedLevels& resolved) {
+    for (const auto& [symbol, closes] : resolved) {
+        auto prices = prices_by_symbol.find(symbol);
+        if (prices == prices_by_symbol.end()) continue;
+        for (const auto& [ts, close] : closes) {
+            auto p = prices->second.find(ts);
+            if (p != prices->second.end()) p->second = close;
+        }
+    }
+}
+
+}  // namespace
+
+MarketData RiskManager::create_market_data(const std::vector<Bar>& data,
+                                           const AdjustedLevels* adjusted,
+                                           const AdjustedLevels* resolved) {
+    const AdjustedLevels own_levels = adjusted ? AdjustedLevels{} : adjusted_levels_of(data);
+    const AdjustedLevels& levels = adjusted ? *adjusted : own_levels;
+    auto adjusted_level = [&levels](const std::string& symbol, const Timestamp& ts, double raw) {
+        auto s = levels.find(symbol);
+        if (s == levels.end()) return raw;
+        auto t = s->second.find(ts);
+        return t == s->second.end() ? raw : t->second;
+    };
     MarketData market_data;
 
     // Collect Unique Symbols and Order Them
@@ -740,6 +671,7 @@ MarketData RiskManager::create_market_data(const std::vector<Bar>& data) {
     for (const auto& bar : data) {
         prices_by_symbol[bar.symbol][bar.timestamp] = static_cast<double>(bar.close);
     }
+    apply_bases(prices_by_symbol, resolved ? *resolved : base_closes_of(data));
 
     // Calculate Returns
     std::map<Timestamp, std::map<std::string, double>> prices_by_time;
@@ -758,8 +690,12 @@ MarketData RiskManager::create_market_data(const std::vector<Bar>& data) {
             for (size_t i = 0; i < market_data.ordered_symbols.size(); ++i) {
                 const std::string& symbol = market_data.ordered_symbols[i];
                 if (it->second.count(symbol) && prev->second.count(symbol)) {
+                    // The adjusted change over the RAW previous close.
+                    const double prev_raw = prev->second.at(symbol);
                     daily_returns[i] =
-                        (it->second.at(symbol) - prev->second.at(symbol)) / prev->second.at(symbol);
+                        (adjusted_level(symbol, it->first, it->second.at(symbol)) -
+                         adjusted_level(symbol, prev->first, prev_raw)) /
+                        prev_raw;
                 }
             }
             market_data.returns.push_back(daily_returns);
@@ -803,12 +739,14 @@ MarketData RiskManager::create_market_data(const std::vector<Bar>& data) {
 
 std::vector<std::vector<double>> RiskManager::calculate_returns(
     const std::vector<Bar>& data) const {
+    const AdjustedLevels levels = adjusted_levels_of(data);  // returns adjusted
     std::map<std::string, std::map<Timestamp, double>> prices_by_symbol;
 
     // Organize data by symbol and timestamp
     for (const auto& bar : data) {
         prices_by_symbol[bar.symbol][bar.timestamp] = static_cast<double>(bar.close);
     }
+    apply_bases(prices_by_symbol, base_closes_of(data));
 
     // Convert to chronologically ordered timeseries
     std::map<Timestamp, std::map<std::string, double>> prices_by_time;
@@ -831,7 +769,9 @@ std::vector<std::vector<double>> RiskManager::calculate_returns(
             for (const auto& [symbol, price] : it->second) {
                 if (prev->second.count(symbol)) {
                     double prev_price = prev->second.at(symbol);
-                    daily_returns.push_back((price - prev_price) / prev_price);
+                    const auto& symbol_levels = levels.at(symbol);
+                    daily_returns.push_back(
+                        (symbol_levels.at(it->first) - symbol_levels.at(prev->first)) / prev_price);
                 } else {
                     daily_returns.push_back(0.0);
                 }

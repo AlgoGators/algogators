@@ -23,16 +23,30 @@ public:
     /**
      * @brief Get singleton instance of the registry
      */
-    static InstrumentRegistry& instance() {
-        static InstrumentRegistry instance;
-        return instance;
-    }
+    // Defined in the library, not here: the Python module is built with hidden symbol visibility,
+    // and an inline function-local static would give it a registry of its own.
+    static InstrumentRegistry& instance();
 
     /**
      * @brief Initialize the registry with a database connection
      * @param db Postgres database to use for loading instruments
      */
     Result<void> initialize(std::shared_ptr<PostgresDatabase> db);
+
+    /**
+     * @brief Initialize without a database, for a run whose instruments are registered
+     *        directly with register_instrument()
+     * Calling load_instruments() afterwards is an error.
+     */
+    Result<void> initialize_without_database();
+
+    /**
+     * @brief Drop all registered instruments and reset the initialization state
+     *
+     * The registry is a process-wide singleton, so this is called between runs to avoid
+     * silently reusing a previous run's instruments.
+     */
+    void clear();
 
     /**
      * @brief Get instrument by symbol
@@ -69,6 +83,16 @@ public:
     Result<void> load_instruments();
 
     /**
+     * @brief Register equity instruments from a list of symbols
+     * @param symbols Vector of equity ticker symbols to register
+     * @param exchange_lookup_path Optional path to JSON file mapping symbols to exchanges.
+     *        If empty, falls back to "NYSE" for all symbols.
+     * @return Result indicating success or failure
+     */
+    Result<void> load_equity_instruments(const std::vector<std::string>& symbols,
+                                         const std::string& exchange_lookup_path = "");
+
+    /**
      * @brief Get all loaded instruments
      * @return Map of symbols to instruments
      */
@@ -88,6 +112,24 @@ public:
      * @return True if the instrument is loaded
      */
     bool has_instrument(const std::string& symbol) const;
+
+    /**
+     * @brief Register an instrument at runtime (e.g., for equity backtests)
+     * @param symbol Instrument symbol
+     * @param instrument Shared pointer to the instrument
+     */
+    void register_instrument(const std::string& symbol, std::shared_ptr<Instrument> instrument);
+
+    /**
+     * @brief Switch the legacy "ES" / "YM" / "NQ" -> micro lookup rewrite on (the default) or off
+     *
+     * Off, a full-size root resolves to its own metadata row or to nothing. The backtest runner
+     * turns it off only when portfolio.json carries listing_dates (data/listing_dates.hpp).
+     */
+    void set_full_size_remap(bool enabled) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        full_size_remap_ = enabled;
+    }
 
 private:
     InstrumentRegistry() = default;  // Private constructor for singleton pattern
@@ -115,6 +157,8 @@ private:
     std::unordered_map<std::string, std::shared_ptr<Instrument>> instruments_;
     mutable std::mutex mutex_;
     bool initialized_{false};
+    /// The legacy rewrite of "ES", "YM", "NQ" lookups to the micro's row. On by default.
+    bool full_size_remap_{true};
 };
 
 }  // namespace trade_ngin

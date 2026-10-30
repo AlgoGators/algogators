@@ -1,0 +1,945 @@
+// classify_symbol_day: the per-symbol session classifier.
+//
+// SESSION | JUNK | NO_BAR(closure) | NO_BAR(feed hole) for one symbol on one date, from the
+// symbol's own history on the de-duplicated feed:
+//   norm = median volume of the trailing 20 WEEKDAY bars, strictly prior;
+//   JUNK iff high == low, or (volume < 0.01 x norm AND volume < 1,000 lots), or
+//            (volume < 50 AND volume < 0.25 x norm), or (no norm yet AND volume < 50);
+//   no bar: a named holiday, or the eve of a FIXED-date holiday -> closure; else a print on >= 1
+//   of the 8 preceding same-weekday dates -> feed hole; else closure.
+//
+// Three layers:
+//   * the rule's limbs on constructed series (each limb, each boundary, the norm's window);
+//   * the thin and wrong-instrument bar cases, on REAL bar values copied from the clone (the bar
+//     and its 20 prior weekday bars);
+//   * a database test (TRADE_NGIN_TEST_DSN only, read-only): the de-duplicating loader's own bars
+//     through PostgresDatabase::get_market_data, classified here, give the same verdicts and the
+//     same 2026 counts as a Python reference classifier.
+
+#include <gtest/gtest.h>
+#include <pqxx/pqxx>
+
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <stdexcept>
+#include <tuple>
+#include <ctime>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "trade_ngin/core/holiday_checker.hpp"
+#include "trade_ngin/core/logger.hpp"
+#include "trade_ngin/core/types.hpp"
+#include "trade_ngin/data/conversion_utils.hpp"
+#include "trade_ngin/data/postgres_database.hpp"
+#include "trade_ngin/data/session_classifier.hpp"
+
+using namespace trade_ngin;
+using Day = SessionClassifier::Day;
+
+namespace {
+
+Day ymd_day(const std::string& s) {
+    const int y = std::stoi(s.substr(0, 4));
+    const unsigned m = static_cast<unsigned>(std::stoi(s.substr(5, 2)));
+    const unsigned d = static_cast<unsigned>(std::stoi(s.substr(8, 2)));
+    return std::chrono::sys_days{std::chrono::year{y} / std::chrono::month{m} / std::chrono::day{d}};
+}
+
+Bar bar_on(const std::string& symbol, const std::string& date, double o, double h, double l,
+           double c, double v) {
+    // A few hours into the UTC day, to prove the key is the UTC calendar date.
+    return Bar(Timestamp(ymd_day(date)) + std::chrono::hours(5), o, h, l, c, v, symbol);
+}
+
+Bar bar_on(const std::string& symbol, const std::string& date, double v) {
+    return bar_on(symbol, date, 100.0, 101.0, 99.0, 100.5, v);
+}
+
+/// A calendar with the named entries only.
+HolidayLookup calendar(std::map<std::string, HolidayInfo> entries) {
+    return [entries = std::move(entries)](const std::string& d) -> std::optional<HolidayInfo> {
+        auto it = entries.find(d);
+        if (it == entries.end()) return std::nullopt;
+        return it->second;
+    };
+}
+
+HolidayInfo holiday(const std::string& date, const std::string& name, const std::string& type) {
+    HolidayInfo h;
+    h.date = date;
+    h.name = name;
+    h.type = type;
+    return h;
+}
+
+const HolidayLookup kNoHolidays = calendar({});
+
+/// `n` weekday bars of volume `v` ending the weekday before `last_exclusive`.
+void add_weekdays_before(SessionClassifier& c, const std::string& symbol,
+                         const std::string& last_exclusive, int n, double v) {
+    Day d = ymd_day(last_exclusive);
+    int added = 0;
+    while (added < n) {
+        d -= std::chrono::days{1};
+        const std::chrono::weekday wd{d};
+        if (wd == std::chrono::Saturday || wd == std::chrono::Sunday) continue;
+        c.add_bar(bar_on(symbol, SessionClassifier::ymd(d), v));
+        ++added;
+    }
+}
+
+struct Ohlcv {
+    double open, high, low, close, volume;
+};
+struct PriorBar {
+    const char* date;
+    double volume;
+};
+struct ThinBarCase {
+    const char* symbol;
+    const char* date;
+    Ohlcv bar;
+    std::vector<PriorBar> prior;  // the 20 weekday bars strictly before, oldest first
+};
+
+// The bar and its 20 prior weekday bars, as stored in the clone (the loader's keep order).
+const std::vector<ThinBarCase> kThinBarCases = {
+ThinBarCase{"6A.v.0", "2025-11-05", {0.6487, 0.65155, 0.64615, 0.6512, 76895},
+    {{"2025-10-08", 66678}, {"2025-10-09", 94355}, {"2025-10-10", 117910}, {"2025-10-13", 72690}, {"2025-10-14", 105339}, {"2025-10-15", 75246}, {"2025-10-16", 90755}, {"2025-10-17", 92990}, {"2025-10-20", 57764}, {"2025-10-21", 61699}, {"2025-10-22", 71780}, {"2025-10-23", 55707}, {"2025-10-24", 70458}, {"2025-10-27", 58285}, {"2025-10-28", 70873}, {"2025-10-29", 110234}, {"2025-10-30", 83182}, {"2025-10-31", 59447}, {"2025-11-03", 59844}, {"2025-11-04", 78356}}},
+ThinBarCase{"6B.v.0", "2025-11-05", {1.3018, 1.3053, 1.301, 1.3053, 487},
+    {{"2025-10-08", 64259}, {"2025-10-09", 102574}, {"2025-10-10", 105293}, {"2025-10-13", 57329}, {"2025-10-14", 90119}, {"2025-10-15", 74954}, {"2025-10-16", 74305}, {"2025-10-17", 71254}, {"2025-10-20", 45914}, {"2025-10-21", 59916}, {"2025-10-22", 105755}, {"2025-10-23", 51267}, {"2025-10-24", 73274}, {"2025-10-27", 51797}, {"2025-10-28", 97345}, {"2025-10-29", 112617}, {"2025-10-30", 82240}, {"2025-10-31", 80868}, {"2025-11-03", 65122}, {"2025-11-04", 86915}}},
+ThinBarCase{"6C.v.0", "2025-11-05", {0.70925, 0.7094, 0.7077, 0.7094, 275},
+    {{"2025-10-08", 54441}, {"2025-10-09", 72456}, {"2025-10-10", 83190}, {"2025-10-13", 44835}, {"2025-10-14", 71171}, {"2025-10-15", 56190}, {"2025-10-16", 55976}, {"2025-10-17", 60012}, {"2025-10-20", 38958}, {"2025-10-21", 56942}, {"2025-10-22", 62860}, {"2025-10-23", 43819}, {"2025-10-24", 64211}, {"2025-10-27", 41390}, {"2025-10-28", 53257}, {"2025-10-29", 81264}, {"2025-10-30", 60682}, {"2025-10-31", 60657}, {"2025-11-03", 69382}, {"2025-11-04", 52379}}},
+ThinBarCase{"6E.v.0", "2025-11-05", {1.14905, 1.1503, 1.14755, 1.1496, 3506},
+    {{"2025-10-08", 181692}, {"2025-10-09", 173854}, {"2025-10-10", 176304}, {"2025-10-13", 114218}, {"2025-10-14", 167042}, {"2025-10-15", 131160}, {"2025-10-16", 136733}, {"2025-10-17", 151394}, {"2025-10-20", 101574}, {"2025-10-21", 139484}, {"2025-10-22", 131382}, {"2025-10-23", 101995}, {"2025-10-24", 140067}, {"2025-10-27", 105045}, {"2025-10-28", 139142}, {"2025-10-29", 200795}, {"2025-10-30", 175918}, {"2025-10-31", 154538}, {"2025-11-03", 123109}, {"2025-11-04", 132543}}},
+ThinBarCase{"6J.v.0", "2025-11-05", {0.0065145, 0.006542, 0.0064885, 0.006496, 77},
+    {{"2025-10-08", 168441}, {"2025-10-09", 234578}, {"2025-10-10", 205500}, {"2025-10-13", 84793}, {"2025-10-14", 148340}, {"2025-10-15", 133614}, {"2025-10-16", 160645}, {"2025-10-17", 162404}, {"2025-10-20", 115086}, {"2025-10-21", 188343}, {"2025-10-22", 111429}, {"2025-10-23", 92345}, {"2025-10-24", 110498}, {"2025-10-27", 91423}, {"2025-10-28", 134427}, {"2025-10-29", 159504}, {"2025-10-30", 187657}, {"2025-10-31", 118678}, {"2025-11-03", 81925}, {"2025-11-04", 118342}}},
+ThinBarCase{"6M.v.0", "2025-11-05", {0.05348, 0.05362, 0.05348, 0.05362, 4},
+    {{"2025-10-08", 32315}, {"2025-10-09", 30197}, {"2025-10-10", 97447}, {"2025-10-13", 45240}, {"2025-10-14", 57350}, {"2025-10-15", 33316}, {"2025-10-16", 46213}, {"2025-10-17", 49950}, {"2025-10-20", 32709}, {"2025-10-21", 30977}, {"2025-10-22", 44128}, {"2025-10-23", 29910}, {"2025-10-24", 37373}, {"2025-10-27", 38394}, {"2025-10-28", 32882}, {"2025-10-29", 39714}, {"2025-10-30", 51826}, {"2025-10-31", 32457}, {"2025-11-03", 39353}, {"2025-11-04", 64487}}},
+ThinBarCase{"GC.v.0", "2025-11-05", {3929.9, 3983.5, 3929.9, 3979.7, 428},
+    {{"2025-10-08", 339486}, {"2025-10-09", 416704}, {"2025-10-10", 327814}, {"2025-10-13", 273724}, {"2025-10-14", 384990}, {"2025-10-15", 294730}, {"2025-10-16", 384882}, {"2025-10-17", 505130}, {"2025-10-20", 320550}, {"2025-10-21", 509584}, {"2025-10-22", 445265}, {"2025-10-23", 255179}, {"2025-10-24", 279016}, {"2025-10-27", 299916}, {"2025-10-28", 324062}, {"2025-10-29", 267917}, {"2025-10-30", 233910}, {"2025-10-31", 211761}, {"2025-11-03", 211320}, {"2025-11-04", 229598}}},
+ThinBarCase{"HG.v.0", "2025-11-05", {4.959, 4.9665, 4.959, 4.9665, 13},
+    {{"2025-10-08", 35081}, {"2025-10-09", 59979}, {"2025-10-10", 69147}, {"2025-10-13", 61532}, {"2025-10-14", 56980}, {"2025-10-15", 31932}, {"2025-10-16", 33537}, {"2025-10-17", 37417}, {"2025-10-20", 27776}, {"2025-10-21", 29542}, {"2025-10-22", 27045}, {"2025-10-23", 38248}, {"2025-10-24", 34473}, {"2025-10-27", 38249}, {"2025-10-28", 31750}, {"2025-10-29", 42988}, {"2025-10-30", 57827}, {"2025-10-31", 27990}, {"2025-11-03", 26850}, {"2025-11-04", 48371}}},
+ThinBarCase{"SI.v.0", "2025-11-05", {47.56, 47.88, 47.56, 47.815, 13},
+    {{"2025-10-08", 97410}, {"2025-10-09", 171215}, {"2025-10-10", 130775}, {"2025-10-13", 124347}, {"2025-10-14", 171501}, {"2025-10-15", 116123}, {"2025-10-16", 141254}, {"2025-10-17", 168261}, {"2025-10-20", 87315}, {"2025-10-21", 149871}, {"2025-10-22", 107334}, {"2025-10-23", 64006}, {"2025-10-24", 67151}, {"2025-10-27", 86557}, {"2025-10-28", 70879}, {"2025-10-29", 67901}, {"2025-10-30", 60510}, {"2025-10-31", 50708}, {"2025-11-03", 47071}, {"2025-11-04", 56619}}},
+ThinBarCase{"GC.v.0", "2025-09-03", {3568.1, 3593.7, 3553.2, 3577.8, 50},
+    {{"2025-08-06", 139086}, {"2025-08-07", 240689}, {"2025-08-08", 255302}, {"2025-08-11", 204728}, {"2025-08-12", 180433}, {"2025-08-13", 125552}, {"2025-08-14", 160339}, {"2025-08-15", 110189}, {"2025-08-18", 109540}, {"2025-08-19", 126196}, {"2025-08-20", 127835}, {"2025-08-21", 115850}, {"2025-08-22", 172684}, {"2025-08-25", 93693}, {"2025-08-26", 159021}, {"2025-08-27", 143041}, {"2025-08-28", 146033}, {"2025-08-29", 172933}, {"2025-09-01", 119668}, {"2025-09-02", 237193}}},
+ThinBarCase{"ZM.v.0", "2025-10-10", {274.1, 274.1, 274.1, 274.1, 0},
+    {{"2025-09-12", 40042}, {"2025-09-15", 33190}, {"2025-09-16", 29702}, {"2025-09-17", 37809}, {"2025-09-18", 41115}, {"2025-09-19", 36384}, {"2025-09-22", 55641}, {"2025-09-23", 55992}, {"2025-09-24", 60907}, {"2025-09-25", 76533}, {"2025-09-26", 56343}, {"2025-09-29", 48258}, {"2025-09-30", 50324}, {"2025-10-01", 70586}, {"2025-10-02", 63725}, {"2025-10-03", 48622}, {"2025-10-06", 29059}, {"2025-10-07", 36094}, {"2025-10-08", 37447}, {"2025-10-09", 35979}}},
+ThinBarCase{"ZR.v.0", "2025-10-10", {10.835, 10.835, 10.835, 10.835, 0},
+    {{"2025-09-12", 739}, {"2025-09-15", 868}, {"2025-09-16", 928}, {"2025-09-17", 675}, {"2025-09-18", 298}, {"2025-09-19", 290}, {"2025-09-22", 387}, {"2025-09-23", 266}, {"2025-09-24", 296}, {"2025-09-25", 248}, {"2025-09-26", 633}, {"2025-09-29", 350}, {"2025-09-30", 658}, {"2025-10-01", 1033}, {"2025-10-02", 380}, {"2025-10-03", 482}, {"2025-10-06", 509}, {"2025-10-07", 404}, {"2025-10-08", 544}, {"2025-10-09", 471}}},
+};
+
+const ThinBarCase& thin_case(const std::string& symbol, const std::string& date) {
+    for (const auto& c : kThinBarCases) {
+        if (symbol == c.symbol && date == c.date) return c;
+    }
+    throw std::runtime_error("no fixture for " + symbol + " " + date);
+}
+
+SymbolDayVerdict classify_thin(const ThinBarCase& tc) {
+    SessionClassifier c;
+    for (const auto& p : tc.prior) c.add_bar(bar_on(tc.symbol, p.date, p.volume));
+    c.add_bar(bar_on(tc.symbol, tc.date, tc.bar.open, tc.bar.high, tc.bar.low, tc.bar.close,
+                     tc.bar.volume));
+    return c.classify_symbol_day(tc.symbol, ymd_day(tc.date), kNoHolidays);
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------------------------
+// The limbs
+// ---------------------------------------------------------------------------------------------
+
+TEST(SessionClassifierRule, ANormalBarIsASession) {
+    SessionClassifier c;
+    add_weekdays_before(c, "ES", "2026-03-04", 20, 100000);
+    c.add_bar(bar_on("ES", "2026-03-04", 95000));
+    const auto v = c.classify_symbol_day("ES", ymd_day("2026-03-04"), kNoHolidays);
+    EXPECT_EQ(v.verdict, SessionVerdict::SESSION) << v.reason;
+    EXPECT_TRUE(v.has_bar);
+    ASSERT_TRUE(v.norm.has_value());
+    EXPECT_DOUBLE_EQ(*v.norm, 100000.0);
+    EXPECT_EQ(v.norm_bars, 20);
+    EXPECT_DOUBLE_EQ(*v.ratio, 0.95);
+}
+
+TEST(SessionClassifierRule, ALockedBarIsJunkWhateverItsVolume) {
+    // GF.v.0 / LE.v.0 2025-11-24: o == h == l == c at 468 and 1,405 lots, r about 0.05 -- five
+    // times above the fraction cut, so only this limb can see them.
+    SessionClassifier c;
+    add_weekdays_before(c, "LE", "2025-11-24", 20, 25000);
+    c.add_bar(bar_on("LE", "2025-11-24", 207.525, 207.525, 207.525, 207.525, 1405));
+    const auto v = c.classify_symbol_day("LE", ymd_day("2025-11-24"), kNoHolidays);
+    EXPECT_EQ(v.verdict, SessionVerdict::JUNK);
+    EXPECT_NE(v.reason.find("locked"), std::string::npos) << v.reason;
+}
+
+TEST(SessionClassifierRule, TheFractionLimbNeedsTheThousandLotCeilingToo) {
+    // ZN's Sunday 2026-02-22 printed 20,300 lots at r = 0.0099 of a 2.05M norm. It
+    // is a thin session, not a junk print: traded.
+    SessionClassifier c;
+    add_weekdays_before(c, "ZN", "2026-02-22", 20, 2049413.5);
+    c.add_bar(bar_on("ZN", "2026-02-22", 20300));
+    auto v = c.classify_symbol_day("ZN", ymd_day("2026-02-22"), kNoHolidays);
+    EXPECT_EQ(v.verdict, SessionVerdict::SESSION) << v.reason;
+
+    // Under both cuts: junk.
+    SessionClassifier d;
+    add_weekdays_before(d, "ZN", "2026-02-22", 20, 2049413.5);
+    d.add_bar(bar_on("ZN", "2026-02-22", 999));
+    v = d.classify_symbol_day("ZN", ymd_day("2026-02-22"), kNoHolidays);
+    EXPECT_EQ(v.verdict, SessionVerdict::JUNK);
+    EXPECT_NE(v.reason.find("corrupt print"), std::string::npos) << v.reason;
+
+    // At exactly 1 % of the norm the fraction limb does not fire (strict <).
+    SessionClassifier e;
+    add_weekdays_before(e, "6L", "2026-03-04", 20, 50000);
+    e.add_bar(bar_on("6L", "2026-03-04", 500));
+    EXPECT_EQ(e.classify_symbol_day("6L", ymd_day("2026-03-04"), kNoHolidays).verdict,
+              SessionVerdict::SESSION);
+    SessionClassifier f;
+    add_weekdays_before(f, "6L", "2026-03-04", 20, 50000);
+    f.add_bar(bar_on("6L", "2026-03-04", 499));
+    EXPECT_EQ(f.classify_symbol_day("6L", ymd_day("2026-03-04"), kNoHolidays).verdict,
+              SessionVerdict::JUNK);
+}
+
+TEST(SessionClassifierRule, TheFloorIsConjunctiveSoASmallContractKeepsItsSessions) {
+    // 6L.v.0 2011-11-28: 39 lots against a trailing weekday median of 6.5 -- six times its norm.
+    SessionClassifier c;
+    add_weekdays_before(c, "6L", "2011-11-28", 20, 6.5);
+    c.add_bar(bar_on("6L", "2011-11-28", 39));
+    EXPECT_EQ(c.classify_symbol_day("6L", ymd_day("2011-11-28"), kNoHolidays).verdict,
+              SessionVerdict::SESSION);
+
+    // A floor-only catch: 40 lots against a norm of 200 (40 is 20 % of it, above 1 %).
+    SessionClassifier d;
+    add_weekdays_before(d, "ZR", "2026-03-04", 20, 200);
+    d.add_bar(bar_on("ZR", "2026-03-04", 40));
+    const auto v = d.classify_symbol_day("ZR", ymd_day("2026-03-04"), kNoHolidays);
+    EXPECT_EQ(v.verdict, SessionVerdict::JUNK);
+    EXPECT_NE(v.reason.find("absolute floor"), std::string::npos) << v.reason;
+
+    // 40 lots against a norm of 150: 27 % of it, not under 25 %: a session.
+    SessionClassifier e;
+    add_weekdays_before(e, "ZR", "2026-03-04", 20, 150);
+    e.add_bar(bar_on("ZR", "2026-03-04", 40));
+    EXPECT_EQ(e.classify_symbol_day("ZR", ymd_day("2026-03-04"), kNoHolidays).verdict,
+              SessionVerdict::SESSION);
+}
+
+// A change of price source restarts the symbol's norm. MGC.v.0
+// reads GC's contracts (about 150,000 lots a day) until its listing and its own (a few hundred)
+// from it. The change bar is judged against the norm before it; every later bar against the
+// micro's own bars from the change, as a new symbol is (no SESSION bar yet: all its weekday bars).
+// The same volume step with no change of source stays judged against the old norm.
+TEST(SessionClassifierRule, AChangeOfPriceSourceRestartsTheNorm) {
+    auto change_bar = [](const std::string& date, double v, RollFromKind kind, const std::string& named) {
+        Bar b = bar_on("MGC.v.0", date, v);
+        RollFrom from;
+        from.close = 100.5;
+        from.instrument_id = "gcz0";
+        from.kind = kind;
+        from.date = named;
+        b.roll_from = from;
+        return b;
+    };
+    SessionClassifier c;
+    add_weekdays_before(c, "MGC.v.0", "2010-10-04", 20, 150000);
+    c.add_bar(change_bar("2010-10-04", 64, RollFromKind::SOURCE_CHANGE, "2010-10-04"));
+    c.add_bar(bar_on("MGC.v.0", "2010-10-05", 300));
+    c.add_bar(bar_on("MGC.v.0", "2010-10-06", 300));
+    auto v = c.classify_symbol_day("MGC.v.0", ymd_day("2010-10-04"), kNoHolidays);
+    ASSERT_TRUE(v.norm.has_value());
+    EXPECT_DOUBLE_EQ(*v.norm, 150000.0) << "the change bar is judged against the norm before it";
+    EXPECT_EQ(v.verdict, SessionVerdict::JUNK) << v.reason;
+    v = c.classify_symbol_day("MGC.v.0", ymd_day("2010-10-05"), kNoHolidays);
+    ASSERT_TRUE(v.norm.has_value());
+    EXPECT_DOUBLE_EQ(*v.norm, 64.0) << "no SESSION bar since the change: its weekday bars bootstrap it";
+    EXPECT_EQ(v.verdict, SessionVerdict::SESSION) << v.reason;
+    v = c.classify_symbol_day("MGC.v.0", ymd_day("2010-10-06"), kNoHolidays);
+    ASSERT_TRUE(v.norm.has_value());
+    EXPECT_DOUBLE_EQ(*v.norm, 300.0) << "the micro's own SESSION bars from the change";
+    EXPECT_EQ(v.verdict, SessionVerdict::SESSION) << v.reason;
+
+    // A consumer that withheld the change bar learns the change from the next bar's field.
+    SessionClassifier after;
+    add_weekdays_before(after, "MGC.v.0", "2010-10-04", 20, 150000);
+    after.add_bar(change_bar("2010-10-05", 300, RollFromKind::AFTER_SOURCE_CHANGE, "2010-10-04"));
+    v = after.classify_symbol_day("MGC.v.0", ymd_day("2010-10-05"), kNoHolidays);
+    EXPECT_FALSE(v.norm.has_value()) << "nothing on or after the change before this bar: the floor alone";
+    EXPECT_EQ(v.verdict, SessionVerdict::SESSION) << v.reason;
+
+    // No change of source: the same step is judged against the old norm.
+    SessionClassifier same;
+    add_weekdays_before(same, "MGC.v.0", "2010-10-04", 20, 150000);
+    same.add_bar(bar_on("MGC.v.0", "2010-10-04", 64));
+    same.add_bar(bar_on("MGC.v.0", "2010-10-05", 300));
+    v = same.classify_symbol_day("MGC.v.0", ymd_day("2010-10-05"), kNoHolidays);
+    ASSERT_TRUE(v.norm.has_value());
+    EXPECT_DOUBLE_EQ(*v.norm, 150000.0);
+    EXPECT_EQ(v.verdict, SessionVerdict::JUNK) << v.reason;
+}
+
+// A change learned late, from an AFTER_SOURCE_CHANGE bar that comes after bars
+// already judged, drops the cached verdicts from the change on. Here 10-05 and 10-06 are judged
+// (against GC's norm: JUNK) before the 10-07 bar names the change of 10-04; afterwards 10-05 and
+// 10-06 are SESSION on the restarted norm, so 10-07's norm is their median, 350. A stale 10-05 flag
+// would leave 10-06 alone: 300.
+TEST(SessionClassifierRule, AChangeLearnedLateDropsTheVerdictsCachedSinceIt) {
+    SessionClassifier c;
+    add_weekdays_before(c, "MGC.v.0", "2010-10-04", 20, 150000);
+    c.add_bar(bar_on("MGC.v.0", "2010-10-04", 64));
+    c.add_bar(bar_on("MGC.v.0", "2010-10-05", 400));
+    c.add_bar(bar_on("MGC.v.0", "2010-10-06", 300));
+    auto v = c.classify_symbol_day("MGC.v.0", ymd_day("2010-10-06"), kNoHolidays);
+    ASSERT_TRUE(v.norm.has_value());
+    EXPECT_DOUBLE_EQ(*v.norm, 150000.0) << "the change not known yet";
+    EXPECT_EQ(v.verdict, SessionVerdict::JUNK) << v.reason;
+    Bar after = bar_on("MGC.v.0", "2010-10-07", 300);
+    RollFrom from;
+    from.close = 100.5;
+    from.instrument_id = "gcz0";
+    from.kind = RollFromKind::AFTER_SOURCE_CHANGE;
+    from.date = "2010-10-04";
+    after.roll_from = from;
+    c.add_bar(after);
+    v = c.classify_symbol_day("MGC.v.0", ymd_day("2010-10-07"), kNoHolidays);
+    ASSERT_TRUE(v.norm.has_value());
+    EXPECT_DOUBLE_EQ(*v.norm, 350.0) << "10-05 and 10-06 judged again on the restarted norm";
+    EXPECT_EQ(v.norm_bars, 2);
+}
+
+// An AFTER_SOURCE_CHANGE bar whose date does not parse registers no change (the bar's own date is
+// not taken for the change, so the norm does not restart there). The
+// bar, and the bar after it, are judged against the norm before them, as with no change. (A change
+// dated on the bar itself would leave that bar on the old norm and restart the next one's from it:
+// the next bar is what tells the two apart.)
+TEST(SessionClassifierRule, AMalformedChangeDateRegistersNoChange) {
+    for (const char* bad : {"2010-1O-04", "", "2010-13-04", "04/10/2010"}) {
+        SCOPED_TRACE(std::string("date '") + bad + "'");
+        SessionClassifier c;
+        add_weekdays_before(c, "MGC.v.0", "2010-10-04", 20, 150000);
+        Bar after = bar_on("MGC.v.0", "2010-10-07", 300);
+        RollFrom from;
+        from.close = 100.5;
+        from.instrument_id = "gcz0";
+        from.kind = RollFromKind::AFTER_SOURCE_CHANGE;
+        from.date = bad;
+        after.roll_from = from;
+        c.add_bar(after);
+        c.add_bar(after);  // a second reading of the same bar: still nothing, warned once
+        c.add_bar(bar_on("MGC.v.0", "2010-10-08", 300));
+        for (const char* day : {"2010-10-07", "2010-10-08"}) {
+            const auto v = c.classify_symbol_day("MGC.v.0", ymd_day(day), kNoHolidays);
+            ASSERT_TRUE(v.norm.has_value()) << day << ": no change, the norm before the bar";
+            EXPECT_DOUBLE_EQ(*v.norm, 150000.0) << day;
+            EXPECT_EQ(v.verdict, SessionVerdict::JUNK) << day << " " << v.reason;
+        }
+    }
+}
+
+// With two changes of source for one symbol, the latest before the date rules.
+// The norm after the second change is taken over the bars from it (5,000 and 9,000: 7,000), not
+// over the first change's 300-lot bars.
+TEST(SessionClassifierRule, TheLatestChangeOfSourceRules) {
+    auto change = [](const std::string& date, double v) {
+        Bar b = bar_on("MGC.v.0", date, v);
+        RollFrom from;
+        from.close = 100.5;
+        from.instrument_id = "old";
+        from.kind = RollFromKind::SOURCE_CHANGE;
+        from.date = date;
+        b.roll_from = from;
+        return b;
+    };
+    SessionClassifier c;
+    add_weekdays_before(c, "MGC.v.0", "2010-10-04", 20, 150000);
+    c.add_bar(change("2010-10-04", 64));
+    add_weekdays_before(c, "MGC.v.0", "2010-11-01", 19, 300);  // 10-05 to 10-29
+    c.add_bar(change("2010-11-01", 5000));
+    c.add_bar(bar_on("MGC.v.0", "2010-11-02", 9000));
+    c.add_bar(bar_on("MGC.v.0", "2010-11-03", 9000));
+    auto v = c.classify_symbol_day("MGC.v.0", ymd_day("2010-11-01"), kNoHolidays);
+    ASSERT_TRUE(v.norm.has_value());
+    EXPECT_DOUBLE_EQ(*v.norm, 300.0) << "the second change bar against the first change's norm";
+    v = c.classify_symbol_day("MGC.v.0", ymd_day("2010-11-03"), kNoHolidays);
+    ASSERT_TRUE(v.norm.has_value());
+    EXPECT_DOUBLE_EQ(*v.norm, 7000.0) << "the bars from the latest change only";
+    EXPECT_EQ(v.norm_bars, 2);
+}
+
+TEST(SessionClassifierRule, WithNoNormYetTheFloorAppliesOnItsOwn) {
+    SessionClassifier c;
+    c.add_bar(bar_on("NEW", "2026-03-04", 49));
+    auto v = c.classify_symbol_day("NEW", ymd_day("2026-03-04"), kNoHolidays);
+    EXPECT_EQ(v.verdict, SessionVerdict::JUNK) << v.reason;
+    EXPECT_FALSE(v.norm.has_value());
+
+    SessionClassifier d;
+    d.add_bar(bar_on("NEW", "2026-03-04", 50));
+    v = d.classify_symbol_day("NEW", ymd_day("2026-03-04"), kNoHolidays);
+    EXPECT_EQ(v.verdict, SessionVerdict::SESSION) << v.reason;
+}
+
+TEST(SessionClassifierRule, TheNormIsWeekdayOnlyStrictlyPriorAndAMedian) {
+    SessionClassifier c;
+    // 20 weekday bars 2026-02-02..02-27 of 1,000..20,000; a weekend print of 1 lot on each
+    // Saturday and Sunday in between; and the day's own bar.
+    Day d = ymd_day("2026-02-02");
+    double v = 1000;
+    int weekdays = 0;
+    while (weekdays < 20) {
+        const std::chrono::weekday wd{d};
+        if (wd == std::chrono::Saturday || wd == std::chrono::Sunday) {
+            c.add_bar(bar_on("MBT", SessionClassifier::ymd(d), 1));
+        } else {
+            c.add_bar(bar_on("MBT", SessionClassifier::ymd(d), v));
+            v += 1000;
+            ++weekdays;
+        }
+        d += std::chrono::days{1};
+    }
+    // Also a 21st, OLDER weekday bar that must fall outside the window.
+    c.add_bar(bar_on("MBT", "2026-01-30", 999999));
+    c.add_bar(bar_on("MBT", "2026-03-02", 5));
+    int used = 0;
+    const auto n = c.norm("MBT", ymd_day("2026-03-02"), &used);
+    ASSERT_TRUE(n.has_value());
+    EXPECT_EQ(used, 20);
+    EXPECT_DOUBLE_EQ(*n, 10500.0);  // the median of 1,000..20,000, an even count
+    // The day's own bar is not in its own norm.
+    EXPECT_EQ(c.classify_symbol_day("MBT", ymd_day("2026-03-02"), kNoHolidays).verdict,
+              SessionVerdict::JUNK);
+}
+
+TEST(SessionClassifierRule, ASecondCopyOfABarKeepsTheCopyTheLoaderKeeps) {
+    // 6A.v.0 2025-11-05: the front-contract bar (76,895 lots, close 0.6512) and the one-day
+    // wrong-instrument bar (196 lots, close 0.65095). Either order: the 76,895 copy, a session.
+    const auto& tc = thin_case("6A.v.0", "2025-11-05");
+    for (int order = 0; order < 2; ++order) {
+        SessionClassifier c;
+        for (const auto& p : tc.prior) c.add_bar(bar_on(tc.symbol, p.date, p.volume));
+        const Bar good = bar_on(tc.symbol, tc.date, 0.6487, 0.65155, 0.64615, 0.6512, 76895);
+        const Bar bad = bar_on(tc.symbol, tc.date, 0.648, 0.651, 0.646, 0.65095, 196);
+        if (order == 0) {
+            c.add_bar(good);
+            c.add_bar(bad);
+        } else {
+            c.add_bar(bad);
+            c.add_bar(good);
+        }
+        const auto v = c.classify_symbol_day(tc.symbol, ymd_day(tc.date), kNoHolidays);
+        EXPECT_EQ(v.verdict, SessionVerdict::SESSION) << "order " << order << ": " << v.reason;
+        EXPECT_DOUBLE_EQ(v.volume, 76895.0);
+        EXPECT_DOUBLE_EQ(v.close, 0.6512);
+    }
+    // The 196-lot copy on its own would be junk.
+    SessionClassifier alone;
+    for (const auto& p : tc.prior) alone.add_bar(bar_on(tc.symbol, p.date, p.volume));
+    alone.add_bar(bar_on(tc.symbol, tc.date, 0.648, 0.651, 0.646, 0.65095, 196));
+    EXPECT_EQ(alone.classify_symbol_day(tc.symbol, ymd_day(tc.date), kNoHolidays).verdict,
+              SessionVerdict::JUNK);
+}
+
+// The norm is the median of the trailing 20 weekday bars
+// whose OWN verdict was SESSION, so a run of stubs cannot teach the norm; a norm of 0 is no norm.
+TEST(SessionClassifierRule, C7bTheNormIsTakenOverSessionBarsOnly) {
+    // 30 weekdays of 100,000 lots, then 11 weekdays of a 5-lot stub, then today's 5-lot stub.
+    // Over all 20 trailing weekday bars (11 stubs, 9 real) the median is 5, and the stub today
+    // passes both volume limbs (5 is not under 1 % of 5, nor under 25 % of it): a SESSION. Each
+    // stub was JUNK against a real norm, so the SESSION-only norm stays 100,000 and today's stub
+    // is JUNK too.
+    SessionClassifier c;
+    Day d = ymd_day("2026-01-05");
+    int weekdays = 0;
+    while (weekdays < 41) {
+        const std::chrono::weekday wd{d};
+        if (wd != std::chrono::Saturday && wd != std::chrono::Sunday) {
+            c.add_bar(bar_on("STUB", SessionClassifier::ymd(d), weekdays < 30 ? 100000.0 : 5.0));
+            ++weekdays;
+        }
+        d += std::chrono::days{1};
+    }
+    while (std::chrono::weekday{d} == std::chrono::Saturday ||
+           std::chrono::weekday{d} == std::chrono::Sunday) {
+        d += std::chrono::days{1};
+    }
+    c.add_bar(bar_on("STUB", SessionClassifier::ymd(d), 5.0));
+    int used = 0;
+    const auto n = c.norm("STUB", d, &used);
+    ASSERT_TRUE(n.has_value());
+    EXPECT_DOUBLE_EQ(*n, 100000.0) << "the stubs taught the norm";
+    EXPECT_EQ(used, 20);
+    const auto v = c.classify_symbol_day("STUB", d, kNoHolidays);
+    EXPECT_EQ(v.verdict, SessionVerdict::JUNK) << v.reason;
+    EXPECT_NE(v.reason.find("corrupt print"), std::string::npos) << v.reason;
+}
+
+TEST(SessionClassifierRule, C7bANormOfZeroIsNoNormAndTheFloorDecides) {
+    // A symbol whose every earlier weekday bar printed 0 lots on a moving price (not locked). Their
+    // median is 0, and `volume < 0.01 x 0` and `volume < 0.25 x 0` are both false, so a norm of 0
+    // would make a 10-lot print a SESSION. With no norm the floor decides: 10 lots is under 50,
+    // JUNK.
+    SessionClassifier c;
+    add_weekdays_before(c, "ZERO", "2026-03-04", 20, 0.0);
+    c.add_bar(bar_on("ZERO", "2026-03-04", 10.0));
+    const auto v = c.classify_symbol_day("ZERO", ymd_day("2026-03-04"), kNoHolidays);
+    EXPECT_FALSE(v.norm.has_value()) << "norm " << (v.norm ? *v.norm : -1.0);
+    EXPECT_EQ(v.verdict, SessionVerdict::JUNK) << v.reason;
+    EXPECT_NE(v.reason.find("absolute floor with no norm yet"), std::string::npos) << v.reason;
+}
+
+TEST(SessionClassifierRule, C7bAStubAddedEarlierInvalidatesTheLaterVerdicts) {
+    // Bars may arrive in any order: a stub added AFTER a later day was classified changes that
+    // later day's SESSION-only norm, and the answer is the one of an in-order load.
+    SessionClassifier in_order;
+    SessionClassifier late;
+    add_weekdays_before(in_order, "A", "2026-03-02", 25, 1000.0);
+    add_weekdays_before(late, "A", "2026-03-02", 25, 1000.0);
+    // Ten stubs of 1 lot on the ten weekdays 2026-03-02..03-13 (JUNK each: 1 < 50 and < 250).
+    std::vector<Bar> stubs;
+    for (Day d = ymd_day("2026-03-02"); d <= ymd_day("2026-03-13"); d += std::chrono::days{1}) {
+        const std::chrono::weekday wd{d};
+        if (wd == std::chrono::Saturday || wd == std::chrono::Sunday) continue;
+        stubs.push_back(bar_on("A", SessionClassifier::ymd(d), 1.0));
+    }
+    for (const auto& b : stubs) in_order.add_bar(b);
+    in_order.add_bar(bar_on("A", "2026-03-16", 40.0));
+    late.add_bar(bar_on("A", "2026-03-16", 40.0));
+    (void)late.classify_symbol_day("A", ymd_day("2026-03-16"), kNoHolidays);  // cached
+    for (const auto& b : stubs) late.add_bar(b);
+    const auto want = in_order.classify_symbol_day("A", ymd_day("2026-03-16"), kNoHolidays);
+    const auto got = late.classify_symbol_day("A", ymd_day("2026-03-16"), kNoHolidays);
+    EXPECT_EQ(got.verdict, want.verdict);
+    ASSERT_TRUE(got.norm.has_value());
+    EXPECT_DOUBLE_EQ(*got.norm, *want.norm);
+    EXPECT_DOUBLE_EQ(*got.norm, 1000.0);
+    EXPECT_EQ(got.verdict, SessionVerdict::JUNK) << "40 lots < 50 and < 250";
+}
+
+// ---------------------------------------------------------------------------------------------
+// No bar: closure or feed hole
+// ---------------------------------------------------------------------------------------------
+
+TEST(SessionClassifierNoBar, ANamedHolidayIsAClosure) {
+    SessionClassifier c;
+    add_weekdays_before(c, "ES", "2026-04-03", 40, 100000);
+    const auto v = c.classify_symbol_day(
+        "ES", ymd_day("2026-04-03"),
+        calendar({{"2026-04-03", holiday("2026-04-03", "Good Friday", "moving")}}));
+    EXPECT_EQ(v.verdict, SessionVerdict::NO_BAR_CLOSURE);
+    EXPECT_EQ(v.reason, "holiday: Good Friday");
+    EXPECT_FALSE(v.has_bar);
+}
+
+TEST(SessionClassifierNoBar, TheEveOfAFixedDateHolidayIsAClosureTheEveOfAMovingOneIsNot) {
+    // Sunday 2023-12-24 (Christmas Monday, fixed) against Sunday 2026-05-24 (Memorial Day
+    // Monday, moving): the second is the four-Sunday outage and must stay a feed hole.
+    SessionClassifier c;
+    for (int k = 1; k <= 8; ++k) {
+        c.add_bar(bar_on("MES", SessionClassifier::ymd(ymd_day("2023-12-24") - std::chrono::days{7 * k}), 30000));
+        c.add_bar(bar_on("MES", SessionClassifier::ymd(ymd_day("2026-05-24") - std::chrono::days{7 * k}), 30000));
+    }
+    const auto cal =
+        calendar({{"2023-12-25", holiday("2023-12-25", "Christmas Day", "fixed")},
+                  {"2026-05-25", holiday("2026-05-25", "Memorial Day", "moving")}});
+    const auto xmas = c.classify_symbol_day("MES", ymd_day("2023-12-24"), cal);
+    EXPECT_EQ(xmas.verdict, SessionVerdict::NO_BAR_CLOSURE);
+    EXPECT_NE(xmas.reason.find("eve of a fixed-date holiday: Christmas Day"), std::string::npos)
+        << xmas.reason;
+    const auto mem = c.classify_symbol_day("MES", ymd_day("2026-05-24"), cal);
+    EXPECT_EQ(mem.verdict, SessionVerdict::NO_BAR_FEED_HOLE) << mem.reason;
+}
+
+// The D+1 fixed-date-holiday limb is for a weekend D only
+// (Christmas and New Year's Sundays). A weekday that precedes a fixed-date holiday is a normal
+// session, so a missing print there is a feed hole: 6E.v.0 and GC.v.0 on Thu 2026-07-02, the eve
+// of the observed Independence Day, printed on the Thursday before (the clone).
+TEST(SessionClassifierNoBar, C7bTheEveLimbAppliesOnlyToAWeekendEve) {
+    SessionClassifier c;
+    add_weekdays_before(c, "GC", "2026-07-02", 60, 150000);  // last bar Wed 07-01
+    const auto cal = calendar(
+        {{"2026-07-03", holiday("2026-07-03", "Independence Day (Observed)", "fixed")},
+         {"2023-12-25", holiday("2023-12-25", "Christmas Day", "fixed")}});
+    const auto thu = c.classify_symbol_day("GC", ymd_day("2026-07-02"), cal);
+    EXPECT_EQ(thu.verdict, SessionVerdict::NO_BAR_FEED_HOLE) << thu.reason;
+    EXPECT_EQ(thu.hole_age_days, 1);
+
+    // The weekend limb is unchanged: a Sunday before a fixed-date Monday holiday is a closure.
+    SessionClassifier s;
+    for (int k = 1; k <= 8; ++k) {
+        s.add_bar(bar_on("MES", SessionClassifier::ymd(ymd_day("2023-12-24") - std::chrono::days{7 * k}), 30000));
+    }
+    const auto sun = s.classify_symbol_day("MES", ymd_day("2023-12-24"), cal);
+    EXPECT_EQ(sun.verdict, SessionVerdict::NO_BAR_CLOSURE) << sun.reason;
+}
+
+TEST(SessionClassifierNoBar, AFeedHoleIsAMissingPrintOnAWeekdayTheSymbolPrintsOnMaxOfEight) {
+    SessionClassifier c;
+    // Printed eight Sundays back only: still expected.
+    c.add_bar(bar_on("UB", SessionClassifier::ymd(ymd_day("2026-05-17") - std::chrono::days{56}), 900));
+    auto v = c.classify_symbol_day("UB", ymd_day("2026-05-17"), kNoHolidays);
+    EXPECT_EQ(v.verdict, SessionVerdict::NO_BAR_FEED_HOLE) << v.reason;
+    EXPECT_NE(v.reason.find("8 week(s) back"), std::string::npos) << v.reason;
+
+    // Printed nine Sundays back only: no longer expected -- a closure.
+    SessionClassifier d;
+    d.add_bar(bar_on("UB", SessionClassifier::ymd(ymd_day("2026-05-17") - std::chrono::days{63}), 900));
+    v = d.classify_symbol_day("UB", ymd_day("2026-05-17"), kNoHolidays);
+    EXPECT_EQ(v.verdict, SessionVerdict::NO_BAR_CLOSURE) << v.reason;
+
+    // A grain on a Sunday: never prints Sundays -> closure, not a hole.
+    SessionClassifier g;
+    add_weekdays_before(g, "ZC", "2026-05-18", 60, 150000);
+    v = g.classify_symbol_day("ZC", ymd_day("2026-05-17"), kNoHolidays);
+    EXPECT_EQ(v.verdict, SessionVerdict::NO_BAR_CLOSURE) << v.reason;
+}
+
+TEST(SessionClassifierNoBar, TheHoleCarriesItsAgeInCalendarDays) {
+    // MYM.v.0, April 2026: last bar Mon 04-20, nothing 04-21..04-26. Its ages on 04-21 / 04-22 /
+    // 04-23 are 1 / 2 / 3, on Fri 04-24 4.
+    SessionClassifier c;
+    add_weekdays_before(c, "MYM", "2026-04-21", 60, 90000);
+    for (const auto& [d, age] : std::vector<std::pair<std::string, int>>{
+             {"2026-04-21", 1}, {"2026-04-22", 2}, {"2026-04-23", 3}, {"2026-04-24", 4}}) {
+        const auto v = c.classify_symbol_day("MYM", ymd_day(d), kNoHolidays);
+        EXPECT_EQ(v.verdict, SessionVerdict::NO_BAR_FEED_HOLE) << d;
+        EXPECT_EQ(v.hole_age_days, age) << d;
+        EXPECT_EQ(v.last_bar_date, "2026-04-20") << d;
+    }
+}
+
+TEST(SessionClassifierNoBar, TheRollUpIsTheT1PriceMapsOwnPredicate) {
+    SessionClassifier c;
+    add_weekdays_before(c, "A", "2026-04-23", 60, 100000);
+    add_weekdays_before(c, "B", "2026-04-23", 60, 100000);  // B last printed 04-22
+    c.add_bar(bar_on("A", "2026-04-23", 900));             // A's T-1 is junk
+    const auto t1 = classify_t1(c, {"B", "A", "C"}, ymd_day("2026-04-23"), kNoHolidays);
+    ASSERT_EQ(t1.verdicts.size(), 3u);
+    EXPECT_EQ(t1.verdicts[0].symbol, "A");  // sorted
+    EXPECT_EQ(t1.junk, 1u);
+    EXPECT_EQ(t1.feed_hole, 1u);  // B
+    EXPECT_EQ(t1.closure, 1u);    // C: never printed, nothing to expect
+    EXPECT_EQ(t1.session, 0u);
+    EXPECT_TRUE(t1.any_printed());  // a junk bar is a T-1 price: the book is NOT carried
+    EXPECT_FALSE(t1.is_session("A"));
+    EXPECT_FALSE(t1.is_session("unknown"));
+    EXPECT_EQ(t1.max_hole_age_days, 1);
+    const auto j = t1.to_json({"A"});
+    EXPECT_EQ(j["t1_date"], "2026-04-23");
+    EXPECT_EQ(j["feed_hole"], 1);
+    EXPECT_EQ(j["junk_symbols"], nlohmann::json::array({"A"}));
+    EXPECT_EQ(j["feed_hole_symbols"], nlohmann::json::array({"B"}));
+    EXPECT_EQ(j["held_symbols"], nlohmann::json::array({"A"}));
+}
+
+TEST(SessionClassifierNoBar, ABarGroupIsClassifiedSymbolBySymbolAtItsOwnDate) {
+    // The backtest's use: the signal group's bars, each against its own symbol's history.
+    SessionClassifier c;
+    add_weekdays_before(c, "A", "2026-04-23", 30, 100000);
+    add_weekdays_before(c, "B", "2026-04-23", 30, 100000);
+    const std::vector<Bar> group = {bar_on("B", "2026-04-23", 900), bar_on("A", "2026-04-23", 90000),
+                                    bar_on("A", "2026-04-23", 10)};  // a lower copy of A
+    for (const auto& b : group) c.add_bar(b);
+    const auto v = classify_bar_group(c, group);
+    ASSERT_EQ(v.size(), 2u);
+    EXPECT_EQ(v[0].symbol, "A");
+    EXPECT_EQ(v[0].verdict, SessionVerdict::SESSION);
+    EXPECT_EQ(v[1].symbol, "B");
+    EXPECT_EQ(v[1].verdict, SessionVerdict::JUNK);
+}
+
+// ---------------------------------------------------------------------------------------------
+// DATA-thin-wrong-instrument-bars, real bar values
+// ---------------------------------------------------------------------------------------------
+
+TEST(SessionClassifierThinBars, TheRuledVerdictOnEveryNamedCase) {
+    struct Expect {
+        const char* symbol;
+        const char* date;
+        SessionVerdict verdict;
+        double norm;
+    };
+    // norm = the median of the 20 prior weekday volumes in the fixture.
+    const std::vector<Expect> expected = {
+        {"6A.v.0", "2025-11-05", SessionVerdict::SESSION, 72235.0},   // the kept 76,895 copy
+        {"6B.v.0", "2025-11-05", SessionVerdict::JUNK, 74629.5},      // 487 lots
+        {"6C.v.0", "2025-11-05", SessionVerdict::JUNK, 58477.0},      // 275
+        {"6E.v.0", "2025-11-05", SessionVerdict::SESSION, 139313.0},  // 3,506: above both cuts
+        {"6J.v.0", "2025-11-05", SessionVerdict::JUNK, 134020.5},     // 77
+        {"6M.v.0", "2025-11-05", SessionVerdict::JUNK, 38873.5},      // 4
+        {"GC.v.0", "2025-11-05", SessionVerdict::JUNK, 310233.0},     // 428
+        {"HG.v.0", "2025-11-05", SessionVerdict::JUNK, 36249.0},      // 13
+        {"SI.v.0", "2025-11-05", SessionVerdict::JUNK, 92362.5},      // 13
+        {"GC.v.0", "2025-09-03", SessionVerdict::JUNK, 144537.0},     // 50
+        {"ZM.v.0", "2025-10-10", SessionVerdict::JUNK, 44686.5},      // 0 lots, o=h=l=c
+        {"ZR.v.0", "2025-10-10", SessionVerdict::JUNK, 476.5},        // 0 lots, o=h=l=c
+    };
+    for (const auto& e : expected) {
+        SCOPED_TRACE(std::string(e.symbol) + " " + e.date);
+        const auto v = classify_thin(thin_case(e.symbol, e.date));
+        EXPECT_EQ(v.verdict, e.verdict) << v.reason;
+        ASSERT_TRUE(v.norm.has_value());
+        EXPECT_DOUBLE_EQ(*v.norm, e.norm);
+        EXPECT_EQ(v.norm_bars, 20);
+    }
+}
+
+TEST(SessionClassifierThinBars, SixEIsAboveBothJunkThresholdsAndTheRuleTradesIt) {
+    // 6E.v.0 2025-11-05 is a one-day wrong-instrument bar (raw instrument 42040878, on no other
+    // day), but at 3,506 lots it is 2.5 % of 6E's norm and above the 1,000-lot ceiling: the
+    // VOLUME limbs call it a session (this fixture carries no instrument ids). The instrument-id
+    // continuity limb holds it: test_session_classifier_instrument_id.cpp.
+    const auto v = classify_thin(thin_case("6E.v.0", "2025-11-05"));
+    EXPECT_EQ(v.verdict, SessionVerdict::SESSION);
+    ASSERT_TRUE(v.ratio.has_value());
+    EXPECT_GT(*v.ratio, 0.01);
+    EXPECT_GT(v.volume, 1000.0);
+}
+
+TEST(SessionClassifierThinBars, TheZeroVolumeFlatBarsAreCaughtAsLocked) {
+    for (const char* s : {"ZM.v.0", "ZR.v.0"}) {
+        const auto v = classify_thin(thin_case(s, "2025-10-10"));
+        EXPECT_EQ(v.verdict, SessionVerdict::JUNK) << s;
+        EXPECT_NE(v.reason.find("locked"), std::string::npos) << s << ": " << v.reason;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The loader's own bars, from the clone (TRADE_NGIN_TEST_DSN only; read-only)
+// ---------------------------------------------------------------------------------------------
+
+namespace {
+
+std::string holidays_path() {
+    for (const auto* p : {"include/trade_ngin/core/holidays.json",
+                          "../include/trade_ngin/core/holidays.json",
+                          "../../include/trade_ngin/core/holidays.json",
+                          "../../../include/trade_ngin/core/holidays.json"}) {
+        if (std::ifstream(p).good()) return p;
+    }
+    return {};
+}
+
+}  // namespace
+
+class SessionClassifierDb : public ::testing::Test {
+protected:
+    void SetUp() override {
+        const bool require_db = [] {
+            const char* v = std::getenv("TRADE_NGIN_REQUIRE_DB");
+            return v && std::string(v) == "1";
+        }();
+        const char* dsn = std::getenv("TRADE_NGIN_TEST_DSN");
+        if (!dsn || !*dsn) {
+            if (require_db) FAIL() << "TRADE_NGIN_REQUIRE_DB=1 but TRADE_NGIN_TEST_DSN is not set";
+            GTEST_SKIP() << "TRADE_NGIN_TEST_DSN not set";
+        }
+        conn_ = dsn;
+        try {
+            pqxx::connection probe(conn_);
+        } catch (const std::exception& e) {
+            if (require_db) FAIL() << "database unreachable: " << e.what();
+            GTEST_SKIP() << "database unreachable";
+        }
+    }
+    std::string conn_;
+};
+
+TEST_F(SessionClassifierDb, TheLoadersBarsGiveTheReferenceVerdictsAndThe2026Counts) {
+    const std::string cal_path = holidays_path();
+    if (cal_path.empty()) GTEST_SKIP() << "shipped holidays.json not reachable from cwd";
+    HolidayChecker checker(cal_path);
+    ASSERT_TRUE(checker.loaded());
+
+    LoggerConfig lc;
+    lc.destination = LogDestination::CONSOLE;
+    lc.min_level = LogLevel::WARNING;
+    lc.include_timestamp = false;
+    Logger::instance().initialize(lc);
+
+    auto db = std::make_shared<PostgresDatabase>(conn_);
+    ASSERT_TRUE(db->connect().is_ok());
+    std::vector<std::string> universe;
+    {
+        pqxx::connection c(conn_);
+        pqxx::work w(c);
+        for (const auto& r :
+             w.exec("SELECT DISTINCT symbol FROM futures_data.ohlcv_1d ORDER BY symbol")) {
+            universe.push_back(r[0].as<std::string>());
+        }
+    }
+    ASSERT_FALSE(universe.empty());
+    const Timestamp from(ymd_day("2024-01-01"));
+    const Timestamp to(ymd_day("2026-08-06"));
+    auto res = db->get_market_data(universe, from, to, AssetClass::FUTURES, DataFrequency::DAILY,
+                                   "ohlcv");
+    ASSERT_TRUE(res.is_ok()) << res.error()->what();
+    auto bars = DataConversionUtils::arrow_table_to_bars(res.value());
+    ASSERT_TRUE(bars.is_ok());
+    SessionClassifier c;
+    c.add_bars(bars.value());
+    const auto cal = holiday_lookup(checker);
+
+    // The named cases, through the loader (the loader's 6A is the kept 76,895 copy). A corrected copy
+    // of the table (as production holds it from 2026-10-25, 213 rows) replaces the thin and stub
+    // prints of 2025-09-03, 2025-10-10 and 2025-11-05, MYM's April hole and 6E/GC's 2026-07-02 with
+    // the contracts' own bars. A replaced case names its corrected bar's volume: the test reads which
+    // bar the table holds and expects the Python reference's verdict for that bar, so each copy is
+    // judged on its own bar.
+    struct Case {
+        std::string symbol, date;
+        SessionVerdict want;            // the verdict on the reference clone's bar
+        double corrected_volume = -1;   // the replaced bar's volume (-1: never replaced)
+    };
+    const std::vector<Case> cases = {
+        {"6A.v.0", "2025-11-05", SessionVerdict::SESSION},
+        {"6B.v.0", "2025-11-05", SessionVerdict::JUNK, 64415},
+        {"6C.v.0", "2025-11-05", SessionVerdict::JUNK, 56367},
+        {"6E.v.0", "2025-11-05", SessionVerdict::SESSION},
+        {"6J.v.0", "2025-11-05", SessionVerdict::JUNK, 125478},
+        {"6M.v.0", "2025-11-05", SessionVerdict::JUNK, 56396},
+        {"GC.v.0", "2025-11-05", SessionVerdict::JUNK, 158701},
+        {"HG.v.0", "2025-11-05", SessionVerdict::JUNK, 30470},
+        {"SI.v.0", "2025-11-05", SessionVerdict::JUNK, 43598},
+        {"GC.v.0", "2025-09-03", SessionVerdict::JUNK, 227686},
+        {"ZM.v.0", "2025-10-10", SessionVerdict::JUNK, 45809},
+        {"ZR.v.0", "2025-10-10", SessionVerdict::JUNK, 521},
+        // the chain window: MYM's April hole and the 6L Sunday junk print
+        {"MYM.v.0", "2026-04-23", SessionVerdict::NO_BAR_FEED_HOLE, 192198},
+        {"6L.v.0", "2026-04-26", SessionVerdict::JUNK},
+        // the dead Sundays: holes, including the Memorial Day eve (a moving holiday)
+        {"MES.v.0", "2026-05-17", SessionVerdict::NO_BAR_FEED_HOLE},
+        {"MES.v.0", "2026-05-24", SessionVerdict::NO_BAR_FEED_HOLE},
+        {"ZC.v.0", "2026-05-24", SessionVerdict::NO_BAR_CLOSURE},
+        // a weekday eve of a fixed-date holiday is a session day
+        {"6E.v.0", "2026-07-02", SessionVerdict::NO_BAR_FEED_HOLE, 188182},
+        {"GC.v.0", "2026-07-02", SessionVerdict::NO_BAR_FEED_HOLE, 113384},
+    };
+    std::map<std::pair<std::string, std::string>, double> volume_on;
+    for (const auto& b : bars.value()) {
+        volume_on[{b.symbol, SessionClassifier::ymd(SessionClassifier::day_of(b.timestamp))}] =
+            static_cast<double>(b.volume);
+    }
+    int corrected = 0;
+    for (const auto& cs : cases) {
+        const auto held = volume_on.find({cs.symbol, cs.date});
+        const bool replaced = cs.corrected_volume >= 0 && held != volume_on.end() &&
+                              held->second == cs.corrected_volume;
+        corrected += replaced;
+        const auto v = c.classify_symbol_day(cs.symbol, ymd_day(cs.date), cal);
+        EXPECT_EQ(v.verdict, replaced ? SessionVerdict::SESSION : cs.want)
+            << cs.symbol << " " << cs.date << (replaced ? " (the corrected bar)" : "") << ": " << v.reason;
+    }
+    // The hole's age: MYM's April hole on the reference clone; on a copy where it is filled, MES's
+    // Sunday hole of 2026-05-17 (last bar Friday 05-15: 2 days).
+    const bool mym_filled = volume_on.count({"MYM.v.0", "2026-04-23"}) > 0;
+    const auto hole = c.classify_symbol_day(mym_filled ? "MES.v.0" : "MYM.v.0",
+                                            ymd_day(mym_filled ? "2026-05-17" : "2026-04-23"), cal);
+    EXPECT_EQ(hole.verdict, SessionVerdict::NO_BAR_FEED_HOLE);
+    EXPECT_EQ(hole.hole_age_days, mym_filled ? 2 : 3);
+    EXPECT_TRUE(corrected == 0 || corrected == 13)
+        << corrected << " of the 13 replaced bars are the corrected ones: a copy with only some of the "
+                        "213 rows replaced is neither reference";
+
+    // The 2026 table, as the Python reference counts it on this clone (165,037 stored rows,
+    // last date 2026-08-06): SESSION 5,950 / JUNK 51 / NO_BAR(closure) 1,496 / feed hole 351.
+    // A weekday eve of a fixed-date holiday is a session day, so 6E.v.0 and GC.v.0 on Thu
+    // 2026-07-02 are feed holes, not closures; the SESSION-only norm moves no 2026 verdict.
+    long stored = 0;
+    std::string last;
+    {
+        pqxx::connection pc(conn_);
+        pqxx::work w(pc);
+        const auto r = w.exec(
+            "SELECT count(*), max(time)::date::text FROM futures_data.ohlcv_1d");
+        stored = r[0][0].as<long>();
+        last = r[0][1].as<std::string>();
+    }
+    // The reference counted on the corrected copy too (166,611 rows, last 2026-10-23): the 213
+    // corrected rows fill 227 feed holes.
+    struct Reference {
+        long stored;
+        const char* last;
+        int session, junk, closure, feed_hole;
+    };
+    const std::vector<Reference> references = {{165037, "2026-08-06", 5950, 51, 1496, 351},
+                                               {166611, "2026-10-23", 6177, 51, 1496, 124}};
+    const Reference* ref = nullptr;
+    for (const auto& r : references) {
+        if (r.stored == stored && last == r.last) ref = &r;
+    }
+    if (!ref) {
+        GTEST_SKIP() << "the table is not a clone the reference was counted on (" << stored
+                     << " rows, last " << last << ")";
+    }
+    std::map<SessionVerdict, int> counts;
+    for (Day d = ymd_day("2026-01-01"); d <= ymd_day("2026-08-06"); d += std::chrono::days{1}) {
+        const auto t1 = classify_t1(c, universe, d, cal);
+        counts[SessionVerdict::SESSION] += static_cast<int>(t1.session);
+        counts[SessionVerdict::JUNK] += static_cast<int>(t1.junk);
+        counts[SessionVerdict::NO_BAR_CLOSURE] += static_cast<int>(t1.closure);
+        counts[SessionVerdict::NO_BAR_FEED_HOLE] += static_cast<int>(t1.feed_hole);
+    }
+    EXPECT_EQ(counts[SessionVerdict::SESSION], ref->session);
+    EXPECT_EQ(counts[SessionVerdict::JUNK], ref->junk);
+    EXPECT_EQ(counts[SessionVerdict::NO_BAR_CLOSURE], ref->closure);
+    EXPECT_EQ(counts[SessionVerdict::NO_BAR_FEED_HOLE], ref->feed_hole);
+    db->disconnect();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Which verdicts WITHHOLD the bar from every
+// consumer. Every JUNK limb of judge_bar withholds (locked, corrupt print, the absolute floor, a
+// thin first print with no norm yet); a SESSION bar, a day without a bar and the instrument-id
+// limb's hold (the change bar, consumed and held) do not.
+// ---------------------------------------------------------------------------------------------
+
+TEST(SessionClassifierK01, EveryJudgeBarJunkLimbIsWithheld) {
+    SessionClassifier c;
+    add_weekdays_before(c, "ES", "2026-03-04", 20, 100000);
+    c.add_bar(bar_on("ES", "2026-03-04", 100.0, 100.0, 100.0, 100.0, 50000));  // locked
+    c.add_bar(bar_on("ES", "2026-03-05", 400));                                // corrupt print
+    add_weekdays_before(c, "ZR", "2026-03-04", 20, 120);
+    c.add_bar(bar_on("ZR", "2026-03-04", 20));                                 // absolute floor
+    c.add_bar(bar_on("NEW", "2026-03-04", 10));                                // thin first print
+    for (const auto& [symbol, date] : std::vector<std::pair<std::string, std::string>>{
+             {"ES", "2026-03-04"}, {"ES", "2026-03-05"}, {"ZR", "2026-03-04"}, {"NEW", "2026-03-04"}}) {
+        const auto v = c.classify_symbol_day(symbol, ymd_day(date), kNoHolidays);
+        EXPECT_EQ(v.verdict, SessionVerdict::JUNK) << symbol << " " << date << ": " << v.reason;
+        EXPECT_FALSE(v.id_change_hold) << symbol << " " << date;
+        EXPECT_TRUE(v.k01_withheld()) << symbol << " " << date << ": " << v.reason;
+    }
+}
+
+TEST(SessionClassifierK01, ASessionBarAndANoBarDayAreNotWithheld) {
+    SessionClassifier c;
+    add_weekdays_before(c, "ES", "2026-03-04", 20, 100000);
+    c.add_bar(bar_on("ES", "2026-03-04", 95000));
+    const auto session = c.classify_symbol_day("ES", ymd_day("2026-03-04"), kNoHolidays);
+    EXPECT_EQ(session.verdict, SessionVerdict::SESSION);
+    EXPECT_FALSE(session.k01_withheld());
+    const auto none = c.classify_symbol_day("ES", ymd_day("2026-03-05"), kNoHolidays);
+    EXPECT_FALSE(none.has_bar);
+    EXPECT_FALSE(none.k01_withheld()) << "a day without a bar has nothing to withhold";
+}
+
+TEST(SessionClassifierK01, TheInstrumentIdHoldIsConsumedNotWithheld) {
+    SessionClassifier c;
+    add_weekdays_before(c, "NG", "2026-03-04", 20, 200000);
+    for (Day d = ymd_day("2026-01-01"); d < ymd_day("2026-03-04"); d += std::chrono::days{1}) {
+        c.add_instrument_id("NG", d, "864");
+    }
+    c.add_bar(bar_on("NG", "2026-03-04", 9000));  // a thin print on a new id
+    c.add_instrument_id("NG", ymd_day("2026-03-04"), "863");
+    const auto v = c.classify_symbol_day("NG", ymd_day("2026-03-04"), kNoHolidays);
+    ASSERT_EQ(v.verdict, SessionVerdict::JUNK) << v.reason;
+    EXPECT_TRUE(v.id_change_hold);
+    EXPECT_FALSE(v.k01_withheld()) << "the change bar is consumed and held, never withheld";
+}

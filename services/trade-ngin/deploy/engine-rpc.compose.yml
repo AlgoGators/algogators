@@ -1,0 +1,102 @@
+# engine-rpc: the engine's gRPC server (docs/design/rpc.md). Its first service is the QT desk,
+# AlgoLens' command channel to the engine (docs/design/desk-service.md), which also runs the QT
+# catch-up scheduler (the model runs; contract C6).
+#
+# Same image as the cron runner, second entrypoint. Merge into the host's compose project or run
+# alongside it:
+#
+#   docker network create qt        # once per host; AlgoLens' backend joins it too
+#   install -d -m 0755 logs         # the catch-up logs (deploy/qt-engine.logrotate)
+#   docker compose -f docker-compose.yml -f engine-rpc.compose.yml up -d engine-rpc
+#
+# No host port is published: clients reach it as engine-rpc:50051 on the `qt` network only. The
+# alias desk-agent keeps the old address working for one release.
+# The desk runs the engine binary (--desk / --override / --publish, and the model runs of the
+# catch-up scheduler) inside this container, so it needs the runner's config directory and
+# enough memory for one engine run.
+services:
+  engine-rpc:
+    # D-61: a pinned image, never :latest (once the December 2025 trend image). TAG is the
+    # main-<sha> tag the CI pipeline pushes on every push to main; compose refuses to start
+    # without it.
+    image: ghcr.io/algogators/trade-ngin:${TAG:?set TAG to a pinned image tag (main-<sha>), never latest}
+    container_name: engine-rpc
+    command: rpc
+    # tini as PID 1: reaps the engine and flock processes the server spawns (no zombies).
+    init: true
+    # Server: RPC_LISTEN (default 0.0.0.0:50051), RPC_MAX_WORKERS (8), RPC_HEALTH_LISTEN
+    # (127.0.0.1:50052, health only, for the healthcheck), RPC_SERVICES (desk).
+    # Desk: DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME, or the database block of
+    # /app/config/defaults.json. Optional: QT_ENGINE_BINARY, QT_ENGINE_CWD, QT_LOCK_DIR,
+    # QT_JOB_TIMEOUT_S, QT_STALE_GRACE_S, QT_REDRIVE_INTERVAL_S, QT_APPROVE_URL_BASE,
+    # QT_EMAIL_DISABLED=1 (the only way the override link may land in a row's result).
+    # Scheduler (model runs, the 09:30 send, the 10:00 fallback; contract C7):
+    # QT_CATCHUP_ENABLED (1), QT_CATCHUP_PORTFOLIOS (qt_conservative; the twin is retired, D-1),
+    # QT_CATCHUP_WINDOW (06:30-22:00), QT_CATCHUP_EVERY_MIN (30), QT_CATCHUP_BUSY_WINDOW
+    # (06:30-10:30), QT_CATCHUP_BUSY_EVERY_MIN (5), QT_CATCHUP_TODAY_NOT_BEFORE (06:45),
+    # QT_MODEL_RETRY_MIN (15), QT_MODEL_ALERT_AT (08:30), QT_CATCHUP_LOCK_WAIT_S (600); New York
+    # time. The 09:30 send and 10:00 cutoff are fixed. QT_UNPUBLISHED_REMINDER_H is no longer read.
+    # Data-driven run (issues #191, #192; needs migration 028): data-ngin pulls at 04:30 ET once
+    # the vendor's ~8 h delayed historical data has bar D and writes ops.data_ready; today's model
+    # run waits for it. QT_EVENING_RUN (1; 0 = the 06:45-only schedule), QT_DATA_READY_DATASET
+    # (futures_ohlcv_1d; a comma-separated list; with per_contract_rolls on the run also waits for
+    # futures_contract_ohlcv_1d), QT_DATA_READY_MAX_MISSING (N, 2), the continuous row: the run is
+    # held with the data_stale alert only when more than N symbols have each had no bar for more than
+    # live.data_staleness_tolerance_days (X, 4 days), a failed pull included; otherwise it runs, each
+    # missing symbol alerted and held at its last price (the engine's FEED_HOLE guard still refuses
+    # today's run when the book holds one past X), QT_CONTRACT_DATA_READY_MAX_MISSING (N, 2) and
+    # QT_CONTRACT_DATA_READY_STALE_DAYS (X, unset = live.data_staleness_tolerance_days, 4), the
+    # per-contract row only: the run is held with the data_stale alert only when more than N roots
+    # have each had no contract bar for more than X days; otherwise it runs, each missing root alerted,
+    # QT_DATA_READY_ALERT_AT (06:00), QT_REVIEW_RECIPIENTS
+    # (dominickdupuy@ufl.edu; comma-separated), QT_DESK_URL, TRADE_NGIN_HOLIDAYS_JSON (the
+    # engine's calendar; default under QT_ENGINE_CWD). Recommended in the host .env with it:
+    # QT_CATCHUP_TODAY_NOT_BEFORE=04:30, QT_CATCHUP_WINDOW=04:00-22:00,
+    # QT_CATCHUP_BUSY_WINDOW=04:30-10:30.
+    env_file: .env
+    environment:
+      # "vp=<email>,president=<email>": the override approvers (contract section 6); the
+      # president also gets the catch-up alerts. Passed through from the shell or .env; without
+      # both the server does not start (D-39). deploy/qt_host_watchdog.py alerts from the host
+      # when this container is down.
+      QT_APPROVERS: ${QT_APPROVERS:-}
+      QT_LOG_DIR: /var/log/qt-engine
+    volumes:
+      # portfolios/<dir>/portfolio.json (portfolio_id -> --portfolio-config <dir>), email.json
+      # (override e-mail and alert SMTP) and defaults.json, read-only.
+      - ./config:/app/config:ro
+      # Credential store file for CredentialStore ({"database", "email"}, mode 600); the book e-mail does not read it.
+      - ./config.json:/app/config.json:ro
+      # flock(1) locks: desk jobs, the catch-up model runs and the watchdog all take them here.
+      - qt-locks:/tmp/qt-locks
+      # qt-catchup.log, qt-engine-runs.log, qt-alerts.json, qt-catchup.heartbeat.
+      - ./logs:/var/log/qt-engine
+    networks:
+      qt:
+        # The pre-rename DNS name, for AlgoLens builds that still dial desk-agent:50051.
+        # Remove in the next release.
+        aliases: [desk-agent]
+    mem_limit: 512m
+    restart: unless-stopped
+    # Bounded `docker logs` (never the daemon config: restarting dockerd restarts live trading).
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # The image's HEALTHCHECK watches cron, which this container does not run. This dials the
+    # health-only port, which has its own threads.
+    healthcheck:
+      test: ["CMD", "sh", "-c", "cd /opt/rpc/app && exec /opt/rpc/venv/bin/python -m algogators_rpc.healthcheck"]
+      interval: 1m
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+volumes:
+  qt-locks:
+    name: qt-locks
+
+networks:
+  qt:
+    external: true

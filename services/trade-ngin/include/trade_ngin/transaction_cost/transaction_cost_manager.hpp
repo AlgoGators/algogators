@@ -1,14 +1,25 @@
 #pragma once
 
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
+#include "trade_ngin/core/types.hpp"
 #include "trade_ngin/transaction_cost/asset_cost_config.hpp"
 #include "trade_ngin/transaction_cost/impact_model.hpp"
 #include "trade_ngin/transaction_cost/spread_model.hpp"
 
 namespace trade_ngin {
+
+// Forward decl: borrow-fee path uses InstrumentRegistry to look up the
+// EquityInstrument per symbol. Full header included in the .cpp.
+class InstrumentRegistry;
+
 namespace transaction_cost {
 
 /**
@@ -31,6 +42,31 @@ struct TransactionCostResult {
     // Total cost (dollars)
     double total_transaction_costs = 0.0;  // commissions_fees + slippage_market_impact
 };
+
+/**
+ * @brief A futures contract's specs as the metadata gives them (CM1)
+ *
+ * The cost model prices a futures trade with the SAME contract the strategy sizes with:
+ * metadata.contract_metadata through the InstrumentRegistry, looked up by the symbol without its
+ * continuous-contract suffix, as the strategies and the P&L managers look it up.
+ */
+struct ContractCostSpec {
+    double point_value = 0.0;  // "Contract Size": dollars per one price unit
+    double tick_size = 0.0;    // "Tick Size": one tick in price units (0 = none given)
+    std::optional<double> fee_per_contract;  // "Fee Per Contract", when the metadata has it
+};
+
+/**
+ * @brief Where the cost model reads contract specs from: symbol -> spec, or empty when the source
+ *        has no futures contract for the symbol. The default reads InstrumentRegistry::instance().
+ */
+using ContractCostSpecSource =
+    std::function<std::optional<ContractCostSpec>(const std::string& symbol)>;
+
+/**
+ * @brief The default spec source: the InstrumentRegistry singleton (the metadata table)
+ */
+std::optional<ContractCostSpec> registry_contract_cost_spec(const std::string& symbol);
 
 /**
  * @brief Central orchestrator for transaction cost calculation
@@ -70,7 +106,9 @@ public:
      * @brief Calculate all transaction costs for an execution
      *
      * @param symbol Instrument symbol
-     * @param quantity Trade quantity (signed; absolute value used)
+     * @param quantity Trade quantity. MUST be signed: negative is a sell. Every cost term
+     *        takes |quantity| EXCEPT the SEC/TAF regulatory fees, which are sell-side only
+     *        and are gated on `quantity < 0`. Passing an absolute value silently drops them.
      * @param reference_price Fill price (previous day close)
      * @return Detailed cost breakdown
      *
@@ -80,7 +118,8 @@ public:
     TransactionCostResult calculate_costs(
         const std::string& symbol,
         double quantity,
-        double reference_price) const;
+        double reference_price,
+        AssetType asset_type = AssetType::NONE) const;
 
     /**
      * @brief Calculate costs with explicit ADV and volatility multiplier
@@ -88,10 +127,16 @@ public:
      * Use this overload when you want to provide ADV/volatility externally.
      *
      * @param symbol Instrument symbol
-     * @param quantity Trade quantity (signed; absolute value used)
+     * @param quantity Trade quantity. MUST be signed: negative is a sell. See the overload
+     *        above -- the sign is load-bearing for the SEC/TAF regulatory fees.
      * @param reference_price Fill price
      * @param adv Average daily volume
      * @param volatility_multiplier Volatility regime multiplier (0.8-1.5)
+     * @param asset_type Optional asset class for dispatch fallback when the
+     *        symbol has no registered cost config. EQUITY callers should pass
+     *        AssetType::EQUITY so unregistered symbols get equity defaults
+     *        ($0.005/share, $1 min) instead of the futures fallback
+     *        ($1.50/share, point_value=100).
      * @return Detailed cost breakdown
      */
     TransactionCostResult calculate_costs(
@@ -99,7 +144,8 @@ public:
         double quantity,
         double reference_price,
         double adv,
-        double volatility_multiplier) const;
+        double volatility_multiplier,
+        AssetType asset_type = AssetType::NONE) const;
 
     /**
      * @brief Update market data for a symbol (call daily)
@@ -115,7 +161,42 @@ public:
         const std::string& symbol,
         double volume,
         double close_price,
-        double prev_close_price);
+        double prev_close_price,
+        bool change_bar = false);
+
+    /**
+     * @brief The volume half of update_market_data: append one volume to the impact
+     *        model's window (the ADV that prices participation and keys the k_bps tier).
+     *
+     * update_market_data(s, v, c, p) is exactly record_volume(s, v) followed by
+     * record_log_return(s, c, p). The two halves exist so a caller can give the two cost
+     * terms different windows (the live futures feed: the fill day's own
+     * volume for the impact term, a 20-return walk for the volatility term).
+     */
+    void record_volume(const std::string& symbol, double volume);
+
+    /**
+     * @brief The impact model's window becomes exactly this one volume (the symbol's earlier
+     *        volumes are dropped), so the ADV that prices participation and keys the k_bps tier
+     *        is that volume.
+     *
+     * A live futures run feeds a fresh manager one volume per symbol, the fill day's own
+     * (futures_cost_feed.hpp); the backtest's managers live for the whole run, so the backtest
+     * sets the same one-observation window every cycle.
+     */
+    void set_own_day_volume(const std::string& symbol, double volume);
+
+    /**
+     * @brief The return half of update_market_data: append ln(close / prev_close) to the
+     *        spread model's volatility window, only when both prices are positive (a zero
+     *        prev_close means "no previous close": nothing is recorded, nothing fabricated).
+     *        On a CHANGE bar (the bar's contract id
+     *        differs from the previous consumed bar's) the adjusted return is exactly 0 and that
+     *        is what the window takes (the date stays in it); on every other bar the engine's
+     *        own log form on the adjusted series is ln(close / prev_close).
+     */
+    void record_log_return(const std::string& symbol, double close_price,
+                           double prev_close_price, bool change_bar = false);
 
     /**
      * @brief Get current ADV for a symbol
@@ -123,19 +204,97 @@ public:
     double get_adv(const std::string& symbol) const;
 
     /**
+     * @brief Whether the symbol's volume was ever fed (update_market_data, record_volume or
+     *        set_own_day_volume). calculate_costs prices a symbol it was never fed on a generic
+     *        ADV; a caller that must not trade on that default asks this first.
+     */
+    bool has_volume_history(const std::string& symbol) const;
+
+    /**
+     * @brief Whether the symbol has a volume of its own to be priced on: it was fed AND the
+     *        average of what it was fed is above 0. A symbol fed nothing but zero volume has an
+     *        ADV of 0, and calculate_costs then prices it on the same generic ADV as a symbol it
+     *        was never fed.
+     */
+    bool has_usable_volume(const std::string& symbol) const;
+
+    /**
      * @brief Get current volatility multiplier for a symbol
      */
     double get_volatility_multiplier(const std::string& symbol) const;
 
     /**
-     * @brief Get asset configuration for a symbol
+     * @brief Get annualized volatility for a symbol (used by borrow-fee model).
+     * Returns 0.25 (25%) fallback if no observations are available.
+     */
+    double get_annual_volatility(const std::string& symbol) const;
+
+    /**
+     * @brief Get asset configuration for a symbol, a future's point_value and tick_size taken
+     *        from the contract spec source (the metadata) as calculate_costs prices it
      */
     AssetCostConfig get_asset_config(const std::string& symbol) const;
+
+    /**
+     * @brief Replace the contract spec source (tests; the default reads the InstrumentRegistry).
+     *        An empty function answers nothing: every future is then unpriced (ERROR).
+     */
+    void set_contract_spec_source(ContractCostSpecSource source);
 
     /**
      * @brief Register custom asset configuration
      */
     void register_asset_config(const AssetCostConfig& config);
+
+    /**
+     * @brief Register tier-appropriate equity cost configs from recent bars.
+     *
+     * For each symbol in `symbols`, computes 20-day (configurable) ADV from
+     * the most recent bars in `bars_by_symbol` and registers the matching
+     * tier returned by AssetCostConfigRegistry::get_tiered_equity_config.
+     *
+     * Symbols with no bars, fewer than 1 bar, or zero average volume are
+     * skipped with a WARN log; the registered config is taken from the
+     * tiered equity classifier in asset_cost_config.cpp (mega / large /
+     * mid / small / penny). Closes audit §1.1: today, unconfigured
+     * equities fall through to the futures default ($1.50/share).
+     *
+     * @param symbols Equity symbols to register
+     * @param bars_by_symbol Recent bars per symbol (most recent at back())
+     * @param adv_lookback_days Number of trailing bars to average for ADV
+     * @return Count of symbols successfully registered
+     */
+    int register_equity_costs_from_bars(
+        const std::vector<std::string>& symbols,
+        const std::unordered_map<std::string, std::vector<Bar>>& bars_by_symbol,
+        int adv_lookback_days = 20);
+
+    /**
+     * @brief Compute overnight borrow fees for short equity positions.
+     *
+     * For each short equity position, derives an annual borrow rate using
+     * multi-factor scoring per audit §3.2:
+     *   - Dollar volume (ADV × price) as a proxy for liquidity / lendable supply
+     *   - Price level (<$5 high risk; no medium tier currently implemented)
+     *   - is_easy_to_borrow flag (false forces HTB tier)
+     * Then scales by a volatility multiplier (clamp(annual_vol / 0.25, 1.0, 3.0)).
+     * Per-symbol `borrow_rate_override` on EquitySpec bypasses the formula.
+     *
+     * Daily fee = effective_annual_rate * |short_position_value| / 365.
+     *
+     * Caller (backtest daily loop or live EOD finalizer) sums the returned
+     * map and adds to total_transaction_costs for the day. Returns empty map
+     * if no shorts present. Long positions and non-equity positions are
+     * skipped.
+     *
+     * Market cap data isn't available in the system today; the dollar-volume
+     * fallback degrades precision but preserves directional correctness per
+     * audit §3.2.
+     */
+    std::unordered_map<std::string, double> calculate_overnight_borrow_fees(
+        const std::unordered_map<std::string, Position>& positions,
+        const std::unordered_map<std::string, double>& current_prices,
+        const InstrumentRegistry& registry) const;
 
     /**
      * @brief Clear all market data (for new backtest run)
@@ -148,10 +307,26 @@ public:
     double get_explicit_fee_per_contract() const { return config_.explicit_fee_per_contract; }
 
 private:
+    /**
+     * @brief The symbol's cost config; a futures config takes its point value and tick from the
+     *        contract spec source (the metadata); fee_out receives the metadata's
+     *        per-contract fee when the source gives one
+     */
+    AssetCostConfig resolve_asset_config(const std::string& symbol, AssetType asset_type,
+                                         std::optional<double>* fee_out = nullptr) const;
+
     Config config_;
     AssetCostConfigRegistry asset_configs_;
     SpreadModel spread_model_;
     ImpactModel impact_model_;
+    ContractCostSpecSource contract_spec_source_;
+    // Futures already reported (ERROR) as missing a usable metadata spec, once each per manager.
+    // Held by pointer so the manager stays copyable.
+    struct SpecWarnState {
+        std::mutex mutex;
+        std::unordered_set<std::string> warned;
+    };
+    std::shared_ptr<SpecWarnState> spec_warn_ = std::make_shared<SpecWarnState>();
 };
 
 }  // namespace transaction_cost

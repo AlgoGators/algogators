@@ -46,9 +46,23 @@ else()
     set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/${CMAKE_BUILD_TYPE}")
 endif()
 
+# RPATH: executables and libtrade_ngin.dylib share an output directory, so
+# resolve @rpath next to the loading binary. Without this, the build picks up
+# whatever rpath leaks from the environment (e.g. an active conda env's lib
+# dir) and binaries fail to find libtrade_ngin.dylib at launch.
+set(CMAKE_BUILD_RPATH "@loader_path")
+set(CMAKE_BUILD_WITH_INSTALL_RPATH OFF)
+
 # Find packages
 #set(GTest_DIR "C:/vcpkg/installed/x64-windows/share/gtest")
-find_package(GTest CONFIG REQUIRED)
+# What a build produces. All on by default, so every existing build is unchanged; the Python
+# wheel turns the tests, apps and benchmarks off and builds the library static.
+option(TRADE_NGIN_BUILD_TESTS "Build the unit tests" ON)
+option(TRADE_NGIN_BUILD_APPS "Build the runners and tools" ON)
+option(TRADE_NGIN_STATIC_LIB "Build the engine library static (the Python wheel)" OFF)
+if(TRADE_NGIN_BUILD_TESTS)
+    find_package(GTest CONFIG REQUIRED)
+endif()
 #set(nlohmann_json_DIR "C:/vcpkg/installed/x64-windows/share/nlohmann_json")
 find_package(nlohmann_json CONFIG REQUIRED)
 #set(Arrow_DIR "C:/vcpkg/installed/x64-windows/share/arrow")
@@ -60,12 +74,87 @@ if(TARGET Arrow::arrow_shared)
 else()
     set(TRADE_NGIN_ARROW Arrow::arrow_static)
 endif()
-find_package(libpqxx CONFIG REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(NLopt REQUIRED)
 
-# Find curl for email functionality
-find_package(CURL REQUIRED)
+# NEW-3 / M-17: scrub a stale absolute SDK path out of NLopt's imported target.
+#
+# Homebrew's NLopt ships NLoptLibraryDepends.cmake, which sets, verbatim:
+#
+#   set_target_properties(NLopt::nlopt PROPERTIES
+#     INTERFACE_LINK_LIBRARIES "/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk/usr/lib/libm.tbd")
+#
+# an absolute path baked in on the machine that built the bottle. When the local
+# Command Line Tools are a different version that directory does not exist, and
+# because it arrives through an INTERFACE property it propagates into the link
+# line of every target that links trade_ngin -- 22 generated files on this
+# checkout -- and every one of them fails to link.
+#
+# The workaround that grew around this was to reconfigure and then sed the
+# generated build tree, by hand, after every reconfigure. That is what this
+# replaces. NOTE for whoever chased the old memory note: the cause is NOT
+# Homebrew's pkgconfig. It is this one line in NLopt's own exported target file
+# (H8 in the E3 audit).
+#
+# The fix rewrites the imported target's interface: any element naming a
+# nonexistent .sdk path is dropped and, where it was libm, replaced by plain "m"
+# so the linker resolves it against whichever SDK is actually in use. Entries
+# that exist on this machine are left exactly as they are, so on a host whose
+# SDK does match, this is a no-op.
+if(APPLE AND TARGET NLopt::nlopt)
+    get_target_property(_nlopt_iface NLopt::nlopt INTERFACE_LINK_LIBRARIES)
+    if(_nlopt_iface)
+        set(_nlopt_fixed "")
+        foreach(_lib IN LISTS _nlopt_iface)
+            if(_lib MATCHES "\\.sdk/" AND NOT EXISTS "${_lib}")
+                if(_lib MATCHES "libm\\.(tbd|dylib|a)$")
+                    list(APPEND _nlopt_fixed "m")
+                    message(STATUS
+                        "NLopt: replaced stale SDK libm path with -lm (NEW-3): ${_lib}")
+                else()
+                    message(STATUS
+                        "NLopt: dropped stale SDK path from imported target (NEW-3): ${_lib}")
+                endif()
+            else()
+                list(APPEND _nlopt_fixed "${_lib}")
+            endif()
+        endforeach()
+        set_target_properties(NLopt::nlopt PROPERTIES
+                              INTERFACE_LINK_LIBRARIES "${_nlopt_fixed}")
+
+        # Self-check. If a future NLopt bottle bakes in a stale absolute path of
+        # some other shape, the scrub above will miss it and the only symptom
+        # would be a link error in 22 unrelated targets with nothing pointing
+        # back to here. Fail at configure time instead, naming the file to look
+        # at.
+        foreach(_lib IN LISTS _nlopt_fixed)
+            if(IS_ABSOLUTE "${_lib}" AND NOT EXISTS "${_lib}")
+                message(FATAL_ERROR
+                    "NLopt::nlopt still carries a nonexistent absolute path after the NEW-3 "
+                    "scrub: ${_lib}\n"
+                    "It comes from NLoptLibraryDepends.cmake in the NLopt install prefix "
+                    "(INTERFACE_LINK_LIBRARIES). Widen the scrub above to cover it.")
+            endif()
+        endforeach()
+    endif()
+    unset(_nlopt_iface)
+    unset(_nlopt_fixed)
+endif()
+
+# vcpkg (the mono repo's CI, and Windows) ships libpqxx's CMake config; Homebrew
+# has only pkg-config. Use the config when there is one.
+find_package(libpqxx CONFIG QUIET)
+if(NOT TARGET libpqxx::pqxx)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(PQXX REQUIRED libpqxx)
+    add_library(libpqxx::pqxx UNKNOWN IMPORTED)
+    set_target_properties(libpqxx::pqxx PROPERTIES
+        IMPORTED_LOCATION "${PQXX_LINK_LIBRARIES}"
+        INTERFACE_INCLUDE_DIRECTORIES "${PQXX_INCLUDE_DIRS}"
+        INTERFACE_LINK_LIBRARIES "${PQXX_LIBRARIES}"
+    )
+    link_directories(${PQXX_LIBRARY_DIRS})
+endif()
 
 
 # Include code coverage module if enabled
@@ -79,55 +168,89 @@ set(TRADE_NGIN_SOURCES
     src/core/config_base.cpp
     src/core/config_loader.cpp
     src/core/logger.cpp
-    src/core/email_sender.cpp
-    src/core/chart_generator.cpp
     src/core/run_id_generator.cpp
     src/data/postgres_database.cpp
     src/data/postgres_database_extensions.cpp
+    src/data/postgres_strategy_config.cpp
     src/data/market_data_bus.cpp
     src/data/conversion_utils.cpp
     src/data/credential_store.cpp
     src/data/database_pooling.cpp
+    src/data/market_data_utils.cpp
+    src/data/session_classifier.cpp
+    src/data/listing_dates.cpp
+    src/data/market_data_source.cpp
+    src/data/roll_series.cpp
+    src/data/roll_calendar.cpp
+    src/data/contract_bars.cpp
+    src/data/roll_cycle.cpp
+    src/data/carry_quote.cpp
+    src/data/contract_roll_rule.cpp
+    src/data/contract_rolls.cpp
+    src/data/per_contract_source.cpp
+    src/data/report_roll_view.cpp
+    src/live/report_roll_query.cpp
     src/instruments/futures.cpp
     src/instruments/equity.cpp
     src/instruments/option.cpp
     src/instruments/instrument_registry.cpp
     src/order/order_manager.cpp
     src/risk/risk_manager.cpp
+    src/risk/risk_module.cpp
+    src/risk/carver_risk_module.cpp
+    src/risk/overlay.cpp
+    src/risk/basic_risk_modules.cpp
+    src/risk/risk_module_config.cpp
     src/optimization/dynamic_optimizer.cpp
+    src/optimization/one_pass.cpp
     src/execution/execution_engine.cpp
     src/portfolio/portfolio_manager.cpp
+    src/portfolio/desk_book.cpp
     src/backtest/transaction_cost_analysis.cpp
     src/backtest/backtest_pnl_manager.cpp
     src/backtest/backtest_price_manager.cpp
     src/backtest/backtest_metrics_calculator.cpp
+    src/backtest/backtest_statistics_columns.cpp
     src/backtest/backtest_execution_manager.cpp
     src/backtest/backtest_data_loader.cpp
-    src/backtest/backtest_portfolio_constraints.cpp
+    src/api/backtest_api.cpp
     src/backtest/backtest_coordinator.cpp
     src/backtest/backtest_csv_exporter.cpp
     src/backtest/slippage_model.cpp
+    src/backtest/equity_cost_warmup.cpp
     src/transaction_cost/asset_cost_config.cpp
     src/transaction_cost/spread_model.cpp
     src/transaction_cost/impact_model.cpp
     src/transaction_cost/transaction_cost_manager.cpp
+    src/transaction_cost/netting.cpp
     src/strategy/base_strategy.cpp
     src/strategy/trend_following.cpp
-    src/strategy/trend_following_slow.cpp
-    src/strategy/trend_following_fast.cpp
+    src/strategy/trend_estimator.cpp
+    src/strategy/carry_estimator.cpp
+    src/strategy/mean_reversion.cpp
     src/strategy/regime_detector.cpp
     src/storage/results_manager_base.cpp
     src/storage/backtest_results_manager.cpp
     src/storage/live_results_manager.cpp
     src/live/live_data_loader.cpp
+    src/live/live_settings.cpp
+    src/live/qt_desk.cpp
+    src/live/python_mail.cpp
     src/live/live_historical_metrics.cpp
+    src/live/live_statistics_columns.cpp
     src/live/live_metrics_calculator.cpp
     src/live/live_trading_coordinator.cpp
     src/live/live_price_manager.cpp
     src/live/live_pnl_manager.cpp
     src/live/execution_manager.cpp
+    src/live/execution_price_resolver.cpp
     src/live/margin_manager.cpp
     src/live/csv_exporter.cpp
+    src/live/corporate_actions_applier.cpp
+    src/live/corporate_actions_classification.cpp
+    src/live/corporate_actions_lifecycle.cpp
+    src/live/corporate_actions_audit_log.cpp
+    src/live/broker_frame.cpp
     src/statistics/utils/statistics_utils.cpp
     src/statistics/transformers/normalizer.cpp
     src/statistics/transformers/pca.cpp
@@ -154,7 +277,16 @@ set(TRADE_NGIN_SOURCES
 )
 
 # Add library target
-add_library(trade_ngin SHARED ${TRADE_NGIN_SOURCES})
+if(WIN32)
+    # The QT desk spawns the engine with fork/exec and reads /proc/self/exe; it is a Linux
+    # service and is not part of a Windows build.
+    list(REMOVE_ITEM TRADE_NGIN_SOURCES src/live/qt_desk.cpp)
+endif()
+if(TRADE_NGIN_STATIC_LIB)
+    add_library(trade_ngin STATIC ${TRADE_NGIN_SOURCES})
+else()
+    add_library(trade_ngin SHARED ${TRADE_NGIN_SOURCES})
+endif()
 
  # Add test-specific compile definitions when building tests
 if(BUILD_TESTING)
@@ -167,7 +299,6 @@ target_link_libraries(trade_ngin
         nlohmann_json::nlohmann_json
         libpqxx::pqxx
         ${TRADE_NGIN_ARROW}
-        CURL::libcurl
         Eigen3::Eigen
         NLopt::nlopt
 )
@@ -177,6 +308,16 @@ if(WIN32)
     set_target_properties(trade_ngin PROPERTIES
         WINDOWS_EXPORT_ALL_SYMBOLS ON
     )
+endif()
+
+if(MSVC)
+    # POSIX time functions for MSVC (core/portability_win.hpp), UTF-8 sources, and the usual
+    # Windows header hygiene.
+    target_compile_options(trade_ngin PUBLIC
+        /FI${CMAKE_CURRENT_SOURCE_DIR}/include/trade_ngin/core/portability_win.hpp
+        /utf-8 /bigobj /permissive- /EHsc /Zc:__cplusplus)
+    target_compile_definitions(trade_ngin PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN _USE_MATH_DEFINES
+        _CRT_SECURE_NO_WARNINGS)
 endif()
 
 # Set up include directories for the library
@@ -195,7 +336,29 @@ endif()
 enable_testing()
 
 # Add tests subdirectory
-add_subdirectory(tests)
+if(TRADE_NGIN_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
+
+# The Python wrapper (pybind11, python/): off by default, so the engine image and the cron
+# runner build exactly as before. pybind11 is a git submodule (extern/pybind11).
+option(BUILD_PYTHON_WRAPPER "Build the Python wrapper using pybind11" OFF)
+if(BUILD_PYTHON_WRAPPER)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/extern/pybind11/CMakeLists.txt")
+        message(FATAL_ERROR
+            "BUILD_PYTHON_WRAPPER=ON but extern/pybind11 is empty. Run "
+            "git submodule update --init extern/pybind11, or build without the wrapper.")
+    endif()
+    add_subdirectory(extern/pybind11)
+    add_subdirectory(python)
+endif()
 
 # Add apps subdirectory
-add_subdirectory(apps)
+if(TRADE_NGIN_BUILD_APPS)
+    add_subdirectory(apps)
+endif()
+
+# Add benchmarks subdirectory (separate from tests; not in default test run)
+if(TRADE_NGIN_BUILD_APPS)
+    add_subdirectory(benchmarks)
+endif()

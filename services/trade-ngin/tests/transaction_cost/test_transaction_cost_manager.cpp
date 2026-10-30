@@ -1,0 +1,802 @@
+// TransactionCostManager -- all cost paths for the component in one place.
+//
+// Sections below: registering equity costs from bars (the ADV/spread
+// classifier), overnight borrow-fee accrual on short equity, and the
+// calculate_costs fallback when a symbol has no registered config.
+
+#include <chrono>
+#include <cmath>
+#include <gtest/gtest.h>
+#include <memory>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "../core/test_base.hpp"
+#include "../data/test_db_utils.hpp"
+#include "trade_ngin/core/types.hpp"
+#include "trade_ngin/core/logger.hpp"
+#include "trade_ngin/instruments/equity.hpp"
+#include "trade_ngin/instruments/futures.hpp"
+#include "trade_ngin/instruments/instrument_registry.hpp"
+#include "trade_ngin/transaction_cost/transaction_cost_manager.hpp"
+
+using namespace trade_ngin;
+using namespace trade_ngin::transaction_cost;
+using namespace trade_ngin::testing;
+
+// ──────────────────────────────────────────────────────────────────────────
+// Equity cost registration from bars -- the ADV classifier.
+// register_equity_costs_from_bars derives a liquidity tier from recent
+// volume, so a thinly-traded symbol is not charged mega-cap spreads. Pins
+// the tier boundaries and that the wiring is actually reached.
+// ──────────────────────────────────────────────────────────────────────────
+
+// register_equity_costs_from_bars computes ADV from recent bars and registers
+// the appropriate tier, so no traded equity needs an explicit hardcoded config
+// in TransactionCostManager.
+
+namespace {
+
+std::vector<Bar> synthetic_equity_bars(const std::string& symbol,
+                                       int days,
+                                       double price,
+                                       double volume) {
+    std::vector<Bar> bars;
+    bars.reserve(days);
+    auto now = std::chrono::system_clock::now();
+    for (int i = 0; i < days; ++i) {
+        Bar b;
+        b.symbol = symbol;
+        b.timestamp = now - std::chrono::hours(24 * (days - i));
+        b.open = price;
+        b.high = price * 1.005;
+        b.low = price * 0.995;
+        b.close = price;
+        b.volume = volume;
+        bars.push_back(b);
+    }
+    return bars;
+}
+
+}  // namespace
+
+// NVDA-shaped mega-cap: ADV >> 10M, price > $100 → mega-cap tier.
+// Expected from get_tiered_equity_config:
+//   point_value = 1.0 (per share, not per "contract")
+//   commission_per_unit = 0.005 ($0.005/share, IBKR Pro)
+//   apply_regulatory_fees = FALSE, as on every tier in asset_cost_config.cpp, not
+//     `true (SEC + FINRA on sells)`: IBKR Pro FIXED's $0.005/share is all-inclusive of exchange,
+//     clearing and regulatory fees, so charging SEC/FINRA on top double-charges. It would be
+//     true under Tiered, where those fees are passed through.
+//   baseline_spread_ticks = 1.0 (mega-cap = tight spread)
+TEST(ADVClassifierWireupTest, MegaCapSymbolGetsTier1Config) {
+    TransactionCostManager::Config tcm_config;
+    TransactionCostManager tcm(tcm_config);
+
+    std::unordered_map<std::string, std::vector<Bar>> bars_by_symbol;
+    bars_by_symbol["NVDA"] = synthetic_equity_bars("NVDA", /*days=*/30,
+                                                    /*price=*/500.0,
+                                                    /*volume=*/50'000'000.0);
+
+    int registered = tcm.register_equity_costs_from_bars({"NVDA"}, bars_by_symbol);
+    EXPECT_EQ(registered, 1);
+
+    AssetCostConfig cfg = tcm.get_asset_config("NVDA");
+    EXPECT_EQ(cfg.asset_type, AssetType::EQUITY);
+    EXPECT_DOUBLE_EQ(cfg.point_value, 1.0);
+    EXPECT_DOUBLE_EQ(cfg.commission_per_unit, 0.005);
+    // False under IBKR Pro Fixed, whose $0.005/share is all-inclusive of exchange,
+    // clearing and regulatory fees. Charging SEC/FINRA on top double-charges. It would be
+    // true under Tiered, where fees are passed through.
+    EXPECT_FALSE(cfg.apply_regulatory_fees);
+    EXPECT_LE(cfg.baseline_spread_ticks, 2.0)
+        << "Mega-cap should have tight spread (≤2 ticks); got "
+        << cfg.baseline_spread_ticks;
+}
+
+// A symbol with no bars is registered with the UNTIERED EQUITY DEFAULT, not skipped.
+// Skipping would leave it absent from configs_, and an absent symbol does not fall back to
+// the equity default -- get_config() only reaches that when the caller passes
+// AssetType::EQUITY, which the production call sites do not. So a skipped equity would
+// resolve to the FUTURES default: $1.50/share instead of $0.005 and point_value 100
+// instead of 1. Worse, configs_ is one flat map shared across asset classes and real tickers
+// collide with futures roots (CL = Colgate-Palmolive AND Crude Oil; ES = Eversource AND the
+// E-mini S&P). Registering the default makes the futures fallthrough unreachable for a
+// configured equity regardless of what any call site passes.
+TEST(ADVClassifierWireupTest, SymbolWithNoBarsGetsEquityDefaultNotFuturesPricing) {
+    TransactionCostManager::Config tcm_config;
+    TransactionCostManager tcm(tcm_config);
+
+    std::unordered_map<std::string, std::vector<Bar>> bars_by_symbol;
+    // No entry for "MSFT".
+
+    int registered = tcm.register_equity_costs_from_bars({"MSFT"}, bars_by_symbol);
+    EXPECT_EQ(registered, 1) << "A configured equity with no bars must still be registered.";
+
+    AssetCostConfig cfg = tcm.get_asset_config("MSFT");
+    EXPECT_DOUBLE_EQ(cfg.point_value, 1.0)
+        << "Unregistered equity inherited a futures point_value -- 100x the slippage.";
+    EXPECT_DOUBLE_EQ(cfg.commission_per_unit, 0.005)
+        << "Unregistered equity inherited the futures per-contract fee, i.e. $1.50/SHARE.";
+}
+
+// Same reasoning as the no-bars case -- a degenerate ADV must not leave a
+// configured equity resolving as a future.
+TEST(ADVClassifierWireupTest, ZeroVolumeGetsEquityDefaultNotFuturesPricing) {
+    TransactionCostManager::Config tcm_config;
+    TransactionCostManager tcm(tcm_config);
+
+    std::unordered_map<std::string, std::vector<Bar>> bars_by_symbol;
+    bars_by_symbol["GOOG"] = synthetic_equity_bars("GOOG", 20, 150.0, /*volume=*/0.0);
+
+    int registered = tcm.register_equity_costs_from_bars({"GOOG"}, bars_by_symbol);
+    EXPECT_EQ(registered, 1) << "A zero-ADV equity must still be registered.";
+
+    AssetCostConfig cfg = tcm.get_asset_config("GOOG");
+    EXPECT_DOUBLE_EQ(cfg.point_value, 1.0);
+    EXPECT_DOUBLE_EQ(cfg.commission_per_unit, 0.005);
+}
+
+// Smaller bar history than the lookback window still computes ADV from what
+// is available (capped by bars.size()) and registers a config.
+TEST(ADVClassifierWireupTest, ShortHistoryStillRegisters) {
+    TransactionCostManager::Config tcm_config;
+    TransactionCostManager tcm(tcm_config);
+
+    std::unordered_map<std::string, std::vector<Bar>> bars_by_symbol;
+    bars_by_symbol["AAPL"] = synthetic_equity_bars("AAPL", /*days=*/3,
+                                                    /*price=*/180.0,
+                                                    /*volume=*/30'000'000.0);
+
+    int registered = tcm.register_equity_costs_from_bars(
+        {"AAPL"}, bars_by_symbol, /*adv_lookback_days=*/20);
+    EXPECT_EQ(registered, 1);
+    AssetCostConfig cfg = tcm.get_asset_config("AAPL");
+    EXPECT_EQ(cfg.asset_type, AssetType::EQUITY);
+}
+
+// Multiple symbols at once.
+TEST(ADVClassifierWireupTest, MultipleSymbolsBatch) {
+    TransactionCostManager::Config tcm_config;
+    TransactionCostManager tcm(tcm_config);
+
+    std::unordered_map<std::string, std::vector<Bar>> bars_by_symbol;
+    bars_by_symbol["AAPL"] = synthetic_equity_bars("AAPL", 30, 180.0, 30'000'000.0);
+    bars_by_symbol["MSFT"] = synthetic_equity_bars("MSFT", 30, 400.0, 20'000'000.0);
+    bars_by_symbol["NVDA"] = synthetic_equity_bars("NVDA", 30, 500.0, 50'000'000.0);
+
+    int registered = tcm.register_equity_costs_from_bars(
+        {"AAPL", "MSFT", "NVDA"}, bars_by_symbol);
+    EXPECT_EQ(registered, 3);
+    EXPECT_EQ(tcm.get_asset_config("AAPL").asset_type, AssetType::EQUITY);
+    EXPECT_EQ(tcm.get_asset_config("MSFT").asset_type, AssetType::EQUITY);
+    EXPECT_EQ(tcm.get_asset_config("NVDA").asset_type, AssetType::EQUITY);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Overnight borrow fees -- short equity carry.
+// A short equity position accrues a borrow fee per calendar day held.
+// Hard-to-borrow names cost more, and the accrual must not fire for longs
+// or on an account mode that forbids shorting.
+// ──────────────────────────────────────────────────────────────────────────
+
+// The borrow fee model on TCM.
+// Multi-factor risk scoring (dollar-volume + price + is_easy_to_borrow flag)
+// × volatility multiplier × short notional / 365. Per-symbol
+// borrow_rate_override bypasses the formula.
+
+namespace {
+
+// Synthesize bars at constant price/volume so ADV is exactly `volume`.
+std::vector<Bar> bars_for(const std::string& symbol, int days, double price, double volume) {
+    std::vector<Bar> bars;
+    bars.reserve(days);
+    auto now = std::chrono::system_clock::now();
+    for (int i = 0; i < days; ++i) {
+        Bar b;
+        b.symbol = symbol;
+        b.timestamp = now - std::chrono::hours(24 * (days - i));
+        b.open = price;
+        b.high = price * 1.001;
+        b.low = price * 0.999;
+        b.close = price;
+        b.volume = volume;
+        bars.push_back(b);
+    }
+    return bars;
+}
+
+EquitySpec regt_spec(bool shorts = true) {
+    EquitySpec spec;
+    spec.exchange = "NASDAQ";
+    spec.currency = "USD";
+    spec.tick_size = 0.01;
+    spec.account_mode = EquityAccountMode::REG_T;
+    spec.short_selling_allowed = shorts;
+    return spec;
+}
+
+class BorrowFeesTest : public TestBase {
+protected:
+    void SetUp() override {
+        TestBase::SetUp();
+        auto& registry = InstrumentRegistry::instance();
+        auto db = std::make_shared<MockPostgresDatabase>("mock://borrow_fees_test");
+        ASSERT_TRUE(db->connect().is_ok());
+        (void)registry.initialize(db);  // Idempotent.
+    }
+};
+
+}  // namespace
+
+// T2.6: REG_T short 100 AAPL @ $150, mega-cap (ADV >10M -> dollar volume
+// >$1.5B/day, no flag), price > $10 (no flag), default is_easy_to_borrow=true
+// (no flag) -> 0 flags -> 25 bps base. Annual vol 25% -> multiplier 1.0.
+// Daily fee = 0.0025 * $15,000 / 365 ~= $0.1027.
+TEST_F(BorrowFeesTest, MegaCapShortYieldsLowFee) {
+    TransactionCostManager::Config tcm_config;
+    TransactionCostManager tcm(tcm_config);
+    auto& registry = InstrumentRegistry::instance();
+
+    const std::string sym = "PHASE2_T26_AAPL";
+    registry.register_instrument(sym, std::make_shared<EquityInstrument>(sym, regt_spec()));
+
+    // Register equity cost config so impact_model knows the ADV.
+    std::unordered_map<std::string, std::vector<Bar>> bars;
+    bars[sym] = bars_for(sym, 30, 150.0, 50'000'000.0);
+    tcm.register_equity_costs_from_bars({sym}, bars);
+
+    // Feed log returns to seed the vol estimate at 25% annualized.
+    // daily_log_return for 25% annual vol = 0.25/sqrt(252) ~ 0.01575.
+    const double daily_ret = 0.25 / std::sqrt(252.0);
+    for (int i = 0; i < 22; ++i) {
+        const double r = (i % 2 == 0) ? daily_ret : -daily_ret;
+        tcm.update_market_data(sym, 50'000'000.0, 150.0 + r * 150.0, 150.0);
+    }
+
+    // Short 100 shares.
+    std::unordered_map<std::string, Position> positions;
+    Position p;
+    p.symbol = sym;
+    p.quantity = -100.0;
+    p.average_price = 150.0;
+    positions[sym] = p;
+
+    std::unordered_map<std::string, double> prices;
+    prices[sym] = 150.0;
+
+    auto fees = tcm.calculate_overnight_borrow_fees(positions, prices, registry);
+    ASSERT_EQ(fees.size(), 1u);
+
+    const double expected = 0.0025 * 15000.0 / 365.0;  // ~0.1027
+    EXPECT_NEAR(fees.at(sym), expected, 0.05)
+        << "Mega-cap short fee should be ~$0.10/day (25 bps × $15K / 365); "
+           "got " << fees.at(sym);
+}
+
+// T2.7: short 100 of small-cap @ $4. ADV 80K -> dollar volume $320K/day -> 1 flag.
+// Price < $5 -> 1 flag. is_easy_to_borrow=true so no extra flag. Total 2 flags
+// -> 150 bps base. Annual vol set to 75% -> raw multiplier 3.0 (capped).
+// Annual rate = 0.015 × 3.0 = 0.045 (4.5%). Daily fee = 0.045 × $400 / 365 ~= $0.0493.
+TEST_F(BorrowFeesTest, SmallCapHighVolYieldsScaledFee) {
+    TransactionCostManager::Config tcm_config;
+    TransactionCostManager tcm(tcm_config);
+    auto& registry = InstrumentRegistry::instance();
+
+    const std::string sym = "PHASE2_T27_SMALLCAP";
+    registry.register_instrument(sym, std::make_shared<EquityInstrument>(sym, regt_spec()));
+
+    std::unordered_map<std::string, std::vector<Bar>> bars;
+    bars[sym] = bars_for(sym, 30, 4.0, 80'000.0);
+    tcm.register_equity_costs_from_bars({sym}, bars);
+
+    // Seed 75% annual vol via daily log returns.
+    const double daily_ret = 0.75 / std::sqrt(252.0);
+    for (int i = 0; i < 22; ++i) {
+        const double r = (i % 2 == 0) ? daily_ret : -daily_ret;
+        tcm.update_market_data(sym, 80'000.0, 4.0 + r * 4.0, 4.0);
+    }
+
+    std::unordered_map<std::string, Position> positions;
+    Position p;
+    p.symbol = sym;
+    p.quantity = -100.0;
+    p.average_price = 4.0;
+    positions[sym] = p;
+
+    std::unordered_map<std::string, double> prices;
+    prices[sym] = 4.0;
+
+    auto fees = tcm.calculate_overnight_borrow_fees(positions, prices, registry);
+    ASSERT_EQ(fees.size(), 1u);
+
+    // 2 flags -> 150 bps base. 75% vol -> 3× cap. Annual rate = 0.045.
+    // Daily fee = 0.045 × $400 / 365 ~= $0.0493
+    const double expected = 0.045 * 400.0 / 365.0;
+    EXPECT_NEAR(fees.at(sym), expected, 0.02)
+        << "Small-cap high-vol short should scale via 2-flag base × 3× vol mult; "
+           "got " << fees.at(sym);
+}
+
+// T2.8: borrow_rate_override = 0.50 (50% annual). Formula is bypassed entirely.
+// Daily fee = 0.50 × $15,000 / 365 ~= $20.55.
+TEST_F(BorrowFeesTest, OverrideBypassesFormula) {
+    TransactionCostManager::Config tcm_config;
+    TransactionCostManager tcm(tcm_config);
+    auto& registry = InstrumentRegistry::instance();
+
+    const std::string sym = "PHASE2_T28_OVERRIDE";
+    EquitySpec spec = regt_spec();
+    spec.borrow_rate_override = 0.50;
+    registry.register_instrument(sym, std::make_shared<EquityInstrument>(sym, spec));
+
+    // No ADV / vol seeding -- override means formula isn't consulted.
+
+    std::unordered_map<std::string, Position> positions;
+    Position p;
+    p.symbol = sym;
+    p.quantity = -100.0;
+    p.average_price = 150.0;
+    positions[sym] = p;
+
+    std::unordered_map<std::string, double> prices;
+    prices[sym] = 150.0;
+
+    auto fees = tcm.calculate_overnight_borrow_fees(positions, prices, registry);
+    ASSERT_EQ(fees.size(), 1u);
+
+    const double expected = 0.50 * 15000.0 / 365.0;  // ~$20.55
+    EXPECT_NEAR(fees.at(sym), expected, 0.05)
+        << "Override should bypass formula; expected " << expected
+        << ", got " << fees.at(sym);
+}
+
+// Longs and non-equities should be skipped (no borrow fee).
+TEST_F(BorrowFeesTest, LongsAndNonEquitiesAreSkipped) {
+    TransactionCostManager::Config tcm_config;
+    TransactionCostManager tcm(tcm_config);
+    auto& registry = InstrumentRegistry::instance();
+
+    const std::string sym = "PHASE2_T28_LONG";
+    registry.register_instrument(sym, std::make_shared<EquityInstrument>(sym, regt_spec()));
+
+    std::unordered_map<std::string, Position> positions;
+    Position p;
+    p.symbol = sym;
+    p.quantity = 100.0;  // Long.
+    p.average_price = 150.0;
+    positions[sym] = p;
+
+    std::unordered_map<std::string, double> prices;
+    prices[sym] = 150.0;
+
+    auto fees = tcm.calculate_overnight_borrow_fees(positions, prices, registry);
+    EXPECT_TRUE(fees.empty()) << "Long positions must not accrue borrow fees.";
+}
+
+// A SHORT futures position pays no equity borrow fee and is skipped SILENTLY, not through
+// get_equity_instrument, which WARNs "Invalid equity instrument: <sym>" for every non-equity
+// and would print that line once per short symbol per day of a futures backtest.
+TEST_F(BorrowFeesTest, ShortSignShortFuturesAreSkippedSilently) {
+    TransactionCostManager::Config tcm_config;
+    TransactionCostManager tcm(tcm_config);
+    auto& registry = InstrumentRegistry::instance();
+
+    const std::string sym = "BORROW_SKIPS_FUTURE";
+    FuturesSpec spec;
+    spec.root_symbol = sym;
+    spec.exchange = "CME";
+    spec.currency = "USD";
+    spec.multiplier = 5.0;
+    spec.tick_size = 0.25;
+    spec.commission_per_contract = 1.0;
+    spec.initial_margin = 1000.0;
+    spec.maintenance_margin = 900.0;
+    spec.weight = 1.0;
+    registry.register_instrument(sym, std::make_shared<FuturesInstrument>(sym, spec));
+
+    std::unordered_map<std::string, Position> positions;
+    Position p;
+    p.symbol = sym;
+    p.quantity = -2.0;  // Short futures.
+    p.average_price = 100.0;
+    positions[sym] = p;
+    std::unordered_map<std::string, double> prices;
+    prices[sym] = 100.0;
+
+    LoggerConfig lc;
+    lc.destination = LogDestination::CONSOLE;
+    lc.min_level = LogLevel::DEBUG;
+    lc.include_timestamp = false;
+    Logger::instance().initialize(lc);
+    ::testing::internal::CaptureStdout();
+    auto fees = tcm.calculate_overnight_borrow_fees(positions, prices, registry);
+    const std::string out = ::testing::internal::GetCapturedStdout();
+
+    EXPECT_TRUE(fees.empty()) << "A short futures position must not accrue an equity borrow fee.";
+    EXPECT_EQ(out.find("Invalid equity instrument"), std::string::npos) << out;
+    EXPECT_EQ(out.find(sym), std::string::npos) << "the expected skip logs nothing: " << out;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Unregistered-symbol dispatch -- the calculate_costs fallback.
+// An equity symbol with no registered cost config must fall back to a
+// documented default rather than silently costing zero, which would make a
+// backtest look cheaper than reality.
+// ──────────────────────────────────────────────────────────────────────────
+
+// The default branch of asset_configs_.get_config() is gated on
+// `asset_type == EQUITY`; called without asset_type it receives NONE, so an
+// unknown equity symbol would fall through to the futures default:
+// point_value=100, commission=$1.50/share, a ~157× cost overstatement.
+// calculate_costs accepts an optional `asset_type` parameter that threads
+// through to get_config, allowing equity callers to opt into the correct
+// fallback even for unregistered symbols.
+
+// Unregistered symbol "ZZZZ", buy 100 shares at $50.
+// With AssetType::EQUITY hint: commission = max($1 floor, 100 × $0.005) = $1.00.
+// Without the hint: commission would be 100 × $1.50 = $150 (futures fallback).
+TEST(UnknownEquityCostsDispatchTest, EquityHintRoutesUnregisteredToEquityDefault) {
+    TransactionCostManager::Config tcm_config;
+    TransactionCostManager tcm(tcm_config);
+
+    // No registration of "ZZZZ"; calling code passes AssetType::EQUITY so
+    // the fallback at AssetCostConfigRegistry::get_config returns equity
+    // defaults instead of futures defaults.
+    auto result = tcm.calculate_costs("ZZZZ", /*quantity=*/100.0,
+                                       /*reference_price=*/50.0,
+                                       AssetType::EQUITY);
+
+    // $1.00 min commission floor binds (raw = 100 × $0.005 = $0.50).
+    EXPECT_NEAR(result.commissions_fees, 1.00, 0.01)
+        << "Unregistered equity should fall back to equity default ($0.005/share, $1 min). "
+        << "Got " << result.commissions_fees
+        << " -- if this is ~$150, the dispatch dead-end has regressed.";
+}
+
+// Larger trade so the per-share rate exceeds the floor. 500 shares × $0.005 = $2.50.
+TEST(UnknownEquityCostsDispatchTest, EquityHintScalesByShares) {
+    TransactionCostManager::Config tcm_config;
+    TransactionCostManager tcm(tcm_config);
+
+    auto result = tcm.calculate_costs("UNKNOWN_LARGE", /*quantity=*/500.0,
+                                       /*reference_price=*/100.0,
+                                       AssetType::EQUITY);
+    EXPECT_NEAR(result.commissions_fees, 2.50, 0.01)
+        << "500 × $0.005 = $2.50; got " << result.commissions_fees;
+}
+
+// Without the hint, an unknown symbol still gets the legacy futures default.
+// This documents the contract: callers MUST pass AssetType::EQUITY for the
+// equity fallback to apply.
+TEST(UnknownEquityCostsDispatchTest, WithoutHintFallsThroughToFuturesDefault) {
+    TransactionCostManager::Config tcm_config;
+    TransactionCostManager tcm(tcm_config);
+
+    // No asset_type hint -> defaults to AssetType::NONE -> falls through to
+    // get_default_config() (futures: point_value=100, commission absent so
+    // global config_.explicit_fee_per_contract kicks in).
+    auto result = tcm.calculate_costs("UNKNOWN_NO_HINT", /*quantity=*/100.0,
+                                       /*reference_price=*/50.0);
+    // Documents that the unhinted path is NOT equity-shaped. Production
+    // callers that handle equities should always pass AssetType::EQUITY.
+    EXPECT_GT(result.commissions_fees, 1.50)
+        << "Without an equity hint, fallback should still be futures-shaped. "
+           "If this asserts because the result is ~$1, dispatch defaults changed.";
+}
+
+// ===========================================================================
+// The equity commission schedule is IBKR Pro FIXED:
+//   $0.005/share, minimum $1.00 per order, maximum 1% of trade value,
+//   all-inclusive of exchange, clearing and regulatory fees.
+//
+// The floor and the cap do different jobs and only collide on very small orders --
+// exactly what a fractional-share book trades. The floor protects the broker on
+// small-but-normal orders; the cap protects the client on tiny ones. IBKR publishes the
+// cap as "Maximum per order", so it is a ceiling and must be applied LAST.
+//
+// max(floor, min(cap, raw)) would let the floor override the cap and make
+// max_commission_pct provably dead for any stock above $0.50/share: the inner
+// min(cap, raw) picks the cap only when pct*price < commission_per_unit, so above that the
+// expression collapses to max(floor, raw) and the configured cap cannot change a single
+// output value.
+//
+// Real numbers from EQUITY_MR_PORTFOLIO, 2026-07-24..08-03, so the fixture cannot drift
+// from what production produced: the cap binds on 5 of 15 executions; without it they are a
+// 21% over-charge ($15.00 vs $12.35) concentrated on the smallest clips.
+// ===========================================================================
+
+namespace {
+// AAPL et al. are pre-registered by initialize_default_configs(), so these exercise the
+// real production config rather than a synthetic one.
+TransactionCostManager make_equity_tcm() {
+    TransactionCostManager::Config cfg;
+    return TransactionCostManager(cfg);
+}
+}  // namespace
+
+TEST(EquityCommissionSchedule, CapSupersedesFloorOnATinyOrder) {
+    auto tcm = make_equity_tcm();
+
+    // The worst observed case: AMZN 2026-07-29, 0.081001 shares at $230.86 = $18.70 notional.
+    //   raw  = 0.081001 * 0.005 = $0.000405
+    //   cap  = 1% * 18.70       = $0.187
+    //   floor                   = $1.00
+    const double qty = 0.081001, px = 230.86;
+    auto r = tcm.calculate_costs("AMZN", qty, px);
+
+    EXPECT_NEAR(r.commissions_fees, 0.01 * qty * px, 1e-9)
+        << "The 1% cap did not bind. Production charged $1.00 on an $18.70 trade -- 535 bps "
+           "where the schedule caps at 100 bps. A maximum a minimum can exceed is not a "
+           "maximum; the cap must be applied after the floor.";
+    EXPECT_LT(r.commissions_fees, 1.0)
+        << "Commission is still pinned at the $1.00 floor, i.e. the old clamp order.";
+}
+
+TEST(EquityCommissionSchedule, FloorAppliesWhenTheCapSitsAboveIt) {
+    auto tcm = make_equity_tcm();
+
+    // GOOGL 2026-07-24: 7.149959 shares at $317.69 = $2,271.47 notional.
+    //   raw = $0.0357, cap = 1% * 2271.47 = $22.71, floor = $1.00  -> floor wins.
+    auto r = tcm.calculate_costs("GOOGL", 7.149959, 317.69);
+
+    EXPECT_NEAR(r.commissions_fees, 1.00, 1e-9)
+        << "The $1.00 per-order minimum stopped applying on a normal-sized order. The cap "
+           "must not be allowed to pull the charge below the floor when it sits above it.";
+}
+
+TEST(EquityCommissionSchedule, LargeOrderPaysThePerShareRate) {
+    auto tcm = make_equity_tcm();
+
+    // 10,000 shares at $300: raw = $50, floor $1.00, cap 1% * 3,000,000 = $30,000.
+    // Neither bound applies -- the per-share rate is what is charged.
+    auto r = tcm.calculate_costs("AAPL", 10000.0, 300.0);
+
+    EXPECT_NEAR(r.commissions_fees, 50.0, 1e-9)
+        << "A large order should pay the per-share rate, with neither bound binding.";
+}
+
+TEST(EquityCommissionSchedule, RegulatoryFeesAreNotChargedOnTopOfFixed) {
+    auto tcm = make_equity_tcm();
+
+    // AMZN 2026-08-03 sell: 16.590374 shares at $271.58 = $4,505.61.
+    // Under Fixed the $0.005/share already includes exchange, clearing and regulatory fees,
+    // so SEC ($0.0928 here) and FINRA TAF ($0.0032) must NOT be added.
+    const double qty = 16.590374, px = 271.58;
+    auto sell = tcm.calculate_costs("AMZN", -qty, px);
+    auto buy = tcm.calculate_costs("AMZN", qty, px);
+
+    EXPECT_NEAR(sell.commissions_fees, buy.commissions_fees, 1e-9)
+        << "A sell was charged more than the identical buy, i.e. regulatory fees were added "
+           "on top of an all-inclusive Fixed schedule. That is a double-charge. It would be "
+           "correct under Tiered, where fees are passed through.";
+}
+
+// ===========================================================================
+// A missing prior close must omit the RETURN, not the VOLUME.
+//
+// When a symbol has no bar on the previous processed day, BacktestCoordinator still calls
+// update_market_data, with prev_close = 0.0, relying on the gate below: skipping the call
+// would drop the volume observation along with the log return. Volume is a valid, correct
+// observation regardless of whether a prior bar exists, and ADV is what sizes market impact.
+//
+// The futures universe has mixed calendars: the eight grain/livestock roots have ZERO Sunday
+// bars while the rest of the book has ~95 over two years, so every Monday those symbols hit
+// the missing-prior-bar path. Skipping would exclude Mondays from a 20-day ADV window for ten
+// symbols -- 6.7% of all symbol-days, ~21% of trading days for those ten. KE.v.0 sits on the
+// 20,000 ADV bucket boundary (20,092 with Mondays, 19,948 without), flipping its impact
+// coefficient 60 -> 80 bps purely on which days are counted.
+//
+// Do NOT pass prev_close = close instead: that injects a
+// log(close/close) = 0 return, a false observation that biases volatility downward.
+// ===========================================================================
+
+TEST(MarketDataUpdate, ZeroPrevCloseStillRecordsVolume) {
+    TransactionCostManager::Config cfg;
+    TransactionCostManager tcm(cfg);
+
+    // No prior close available -- the coordinator's missing-T-1-bar case.
+    tcm.update_market_data("ZC", /*volume=*/12345.0, /*close=*/600.0, /*prev_close=*/0.0);
+
+    EXPECT_DOUBLE_EQ(tcm.get_adv("ZC"), 12345.0)
+        << "Volume was not recorded when the prior close was unavailable. ADV must still "
+           "advance -- dropping it is what excluded Mondays from the ag symbols' ADV window "
+           "and flipped KE.v.0 across the 20,000 impact bucket boundary.";
+}
+
+TEST(MarketDataUpdate, ZeroPrevCloseAddsNoReturnObservation) {
+    TransactionCostManager::Config cfg;
+    TransactionCostManager tcm(cfg);
+
+    // A symbol that has only ever been seen without a prior close carries no return
+    // observations at all, so volatility falls back to the model default rather than being
+    // pulled toward zero by fabricated log(close/close) = 0 entries.
+    const double untouched = tcm.get_annual_volatility("NEVER_SEEN");
+
+    for (int i = 0; i < 5; ++i) {
+        tcm.update_market_data("ZW", 1000.0, 600.0 + i, /*prev_close=*/0.0);
+    }
+
+    EXPECT_DOUBLE_EQ(tcm.get_annual_volatility("ZW"), untouched)
+        << "A return was recorded from an absent prior close. Passing prev_close = close "
+           "instead (what main does) injects a zero return, which biases the volatility "
+           "estimate downward on 1 day in 5 for symbols with no Sunday session.";
+    EXPECT_DOUBLE_EQ(tcm.get_adv("ZW"), 1000.0)
+        << "Volume must still have been recorded on every one of those bars.";
+}
+
+TEST(MarketDataUpdate, ValidPrevCloseRecordsBothVolumeAndReturn) {
+    TransactionCostManager::Config cfg;
+    TransactionCostManager tcm(cfg);
+
+    // Varying returns, so the series has real dispersion -- a constant return has zero
+    // stddev and would prove nothing.
+    const double closes[] = {600.0, 612.0, 605.0, 621.0, 610.0, 628.0};
+    for (int i = 1; i < 6; ++i) {
+        tcm.update_market_data("ZS", 1000.0, closes[i], closes[i - 1]);
+    }
+
+    EXPECT_DOUBLE_EQ(tcm.get_adv("ZS"), 1000.0);
+    EXPECT_GT(tcm.get_annual_volatility("ZS"), 0.0)
+        << "A genuine prior close must still produce a return observation.";
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Regulatory fees are keyed on the SIGN of quantity. A negative
+// quantity is a sell and carries SEC + TAF; a positive one does not; and the
+// fees stay off entirely on a config that does not enable them (IBKR Fixed).
+// ──────────────────────────────────────────────────────────────────────────
+TEST(RegulatoryFeesTest, NegativeQuantityIsTheSellSideAndCarriesSecAndTaf) {
+    TransactionCostManager tcm{TransactionCostManager::Config{}};
+    AssetCostConfig cfg;
+    cfg.symbol = "TIERD";
+    cfg.asset_type = AssetType::EQUITY;
+    cfg.commission_per_unit = 0.0035;
+    cfg.min_commission_per_order = 0.35;
+    cfg.max_commission_per_order = 1e9;
+    cfg.apply_regulatory_fees = true;
+    tcm.register_asset_config(cfg);
+
+    const double qty = 1000.0, px = 50.0;
+    auto buy = tcm.calculate_costs("TIERD", +qty, px, 1e6, 1.0, AssetType::EQUITY);
+    auto sell = tcm.calculate_costs("TIERD", -qty, px, 1e6, 1.0, AssetType::EQUITY);
+    const double sec_fee = (qty * px / 1e6) * cfg.sec_fee_per_million;
+    const double taf = std::min(qty * cfg.finra_taf_per_share, cfg.finra_taf_cap_per_trade);
+    EXPECT_NEAR(sell.commissions_fees - buy.commissions_fees, sec_fee + taf, 1e-9);
+
+    AssetCostConfig fixed = cfg;
+    fixed.symbol = "FIXED";
+    fixed.apply_regulatory_fees = false;
+    tcm.register_asset_config(fixed);
+    auto fbuy = tcm.calculate_costs("FIXED", +qty, px, 1e6, 1.0, AssetType::EQUITY);
+    auto fsell = tcm.calculate_costs("FIXED", -qty, px, 1e6, 1.0, AssetType::EQUITY);
+    EXPECT_DOUBLE_EQ(fsell.commissions_fees, fbuy.commissions_fees)
+        << "IBKR Fixed is all-inclusive: no separate regulatory fee on either side";
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// CM1: a future's contract specs come from the metadata (one source of truth with sizing). The
+// spec source is injected here so each test controls it; the default source is the
+// InstrumentRegistry singleton (tests/transaction_cost/test_cost_metadata_specs.cpp).
+// ──────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+ContractCostSpecSource only(const std::string& sym, ContractCostSpec spec) {
+    return [sym, spec](const std::string& s) -> std::optional<ContractCostSpec> {
+        if (s.substr(0, s.find('.')) == sym) return spec;
+        return std::nullopt;
+    };
+}
+
+}  // namespace
+
+// ZT's spread term with the metadata's tick (1/256); with the source turned off the cost table
+// has no tick of its own to fall back on (CM1 d), so nothing implicit is priced.
+TEST(CostContractSpecSource, SpreadFollowsTheSourceTick) {
+    TransactionCostManager tcm;
+    tcm.set_contract_spec_source(only("ZT", {2000.0, 0.00390625}));
+    const auto with_metadata = tcm.calculate_costs("ZT.v.0", 1.0, 104.0, 1.0e6, 1.0);
+    EXPECT_DOUBLE_EQ(with_metadata.spread_price_impact, 0.25 * 1.0 * 0.00390625);
+
+    tcm.set_contract_spec_source({});
+    const auto no_source = tcm.calculate_costs("ZT.v.0", 1.0, 104.0, 1.0e6, 1.0);
+    EXPECT_DOUBLE_EQ(no_source.spread_price_impact, 0.0);
+    EXPECT_DOUBLE_EQ(no_source.slippage_market_impact, 0.0);
+    EXPECT_DOUBLE_EQ(no_source.commissions_fees, 1.50);
+}
+
+// The fee per contract is the metadata's when it carries one, else the configured 1.50.
+TEST(CostContractSpecSource, FeeFollowsTheSourceFee) {
+    TransactionCostManager tcm;
+    tcm.set_contract_spec_source(only("6E", {125000.0, 0.00005, 0.62}));
+    EXPECT_DOUBLE_EQ(tcm.calculate_costs("6E.v.0", -3.0, 1.10, 1.0e6, 1.0).commissions_fees,
+                     3.0 * 0.62);
+
+    tcm.set_contract_spec_source(only("6E", {125000.0, 0.00005, std::nullopt}));
+    EXPECT_DOUBLE_EQ(tcm.calculate_costs("6E.v.0", -3.0, 1.10, 1.0e6, 1.0).commissions_fees,
+                     3.0 * 1.50);
+}
+
+// A metadata row without a positive tick is not priced on a constant: no spread or impact, the
+// fee still charged (CM1 d).
+TEST(CostContractSpecSource, MissingTickIsNotPricedOnAConstant) {
+    TransactionCostManager tcm;
+    tcm.set_contract_spec_source(only("6E", {12500.0, 0.0, 0.62}));
+    const auto cfg = tcm.get_asset_config("6E.v.0");
+    EXPECT_DOUBLE_EQ(cfg.point_value, 0.0);
+    EXPECT_DOUBLE_EQ(cfg.tick_size, 0.0);
+    const auto cost = tcm.calculate_costs("6E.v.0", 2.0, 1.10, 1.0e6, 1.0);
+    EXPECT_DOUBLE_EQ(cost.implicit_price_impact, 0.0);
+    EXPECT_DOUBLE_EQ(cost.slippage_market_impact, 0.0);
+    EXPECT_DOUBLE_EQ(cost.total_transaction_costs, 2.0 * 0.62);
+}
+
+// A future the cost table names but the metadata does not carry is an ERROR, never priced on the
+// table's old point value 125,000 and tick 0.00005 (CM1 d): its spread and impact are 0 and only
+// the configured fee is charged.
+TEST(CostContractSpecSource, FutureMissingFromTheMetadataIsNotPricedOnAConstant) {
+    TransactionCostManager tcm;
+    tcm.set_contract_spec_source([](const std::string&) { return std::nullopt; });
+    const auto cfg = tcm.get_asset_config("6E.v.0");
+    EXPECT_DOUBLE_EQ(cfg.point_value, 0.0);
+    EXPECT_DOUBLE_EQ(cfg.tick_size, 0.0);
+    const auto cost = tcm.calculate_costs("6E.v.0", 3.0, 1.10, 1.0e6, 1.0);
+    EXPECT_DOUBLE_EQ(cost.spread_price_impact, 0.0);
+    EXPECT_DOUBLE_EQ(cost.market_impact_price_impact, 0.0);
+    EXPECT_DOUBLE_EQ(cost.slippage_market_impact, 0.0);
+    EXPECT_DOUBLE_EQ(cost.total_transaction_costs, 3.0 * 1.50);
+}
+
+// A future the table does not name but the metadata does (a micro row, say) takes its point
+// value and tick from the metadata.
+TEST(CostContractSpecSource, FutureOnlyInTheMetadataTakesItsSpecs) {
+    TransactionCostManager tcm;
+    tcm.set_contract_spec_source(only("M6E", {12500.0, 0.0001}));
+    const auto cfg = tcm.get_asset_config("M6E.v.0");
+    EXPECT_DOUBLE_EQ(cfg.point_value, 12500.0);
+    EXPECT_DOUBLE_EQ(cfg.tick_size, 0.0001);
+}
+
+// MGC and SIL have entries of their own, their full-size roots' spread in ticks
+// and impact caps (not the futures default's 2 ticks and 100 bps), and their fills pay impact on
+// their own volume: one MGC at 1,300 on a 100-contract ADV (the 2010-2015 micro) pays 80 x
+// sqrt(1/100) = 8 bps, on a 300,000 ADV (2025) 20 x sqrt(1/300,000) bps.
+TEST(CostContractSpecSource, TheGoldAndSilverMicrosHaveTheirOwnEntriesAndPayImpactOnTheirOwnVolume) {
+    TransactionCostManager tcm;
+    tcm.set_contract_spec_source([](const std::string& s) -> std::optional<ContractCostSpec> {
+        const std::string root = s.substr(0, s.find('.'));
+        if (root == "MGC") return ContractCostSpec{10.0, 0.1, 0.96};
+        if (root == "SIL") return ContractCostSpec{1000.0, 0.005, 0.86};
+        return std::nullopt;
+    });
+    const auto gold = tcm.get_asset_config("MGC.v.0");
+    EXPECT_DOUBLE_EQ(gold.baseline_spread_ticks, 1.0);
+    EXPECT_DOUBLE_EQ(gold.max_spread_ticks, 5.0);
+    EXPECT_DOUBLE_EQ(gold.max_impact_bps, 50.0);
+    const auto silver = tcm.get_asset_config("SIL.v.0");
+    EXPECT_DOUBLE_EQ(silver.baseline_spread_ticks, 1.0);
+    EXPECT_DOUBLE_EQ(silver.max_impact_bps, 60.0);
+    const auto thin = tcm.calculate_costs("MGC.v.0", 1.0, 1300.0, 100.0, 1.0);
+    const auto busy = tcm.calculate_costs("MGC.v.0", 1.0, 1300.0, 300000.0, 1.0);
+    EXPECT_DOUBLE_EQ(thin.spread_price_impact, 0.5 * 1.0 * 0.1);
+    EXPECT_NEAR(thin.market_impact_price_impact, 1300.0 * 8.0 / 1e4, 1e-9);
+    EXPECT_NEAR(busy.market_impact_price_impact, 1300.0 * 20.0 * std::sqrt(1.0 / 300000.0) / 1e4, 1e-12);
+    EXPECT_DOUBLE_EQ(thin.commissions_fees, 0.96);
+}
+
+// An equity cost config never reads a futures spec, even when the source answers for its ticker
+// (equity tickers collide with futures roots: CL, ES).
+TEST(CostContractSpecSource, EquityConfigNeverReadsAFuturesSpec) {
+    TransactionCostManager tcm;
+    const auto before = tcm.calculate_costs("AAPL", 100.0, 200.0, 5.0e7, 1.0);
+    tcm.set_contract_spec_source(
+        [](const std::string&) -> std::optional<ContractCostSpec> {
+            return ContractCostSpec{50.0, 0.25};
+        });
+    const auto after = tcm.calculate_costs("AAPL", 100.0, 200.0, 5.0e7, 1.0);
+    EXPECT_DOUBLE_EQ(after.total_transaction_costs, before.total_transaction_costs);
+    EXPECT_DOUBLE_EQ(tcm.get_asset_config("AAPL").point_value, 1.0);
+}

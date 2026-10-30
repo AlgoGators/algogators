@@ -1,23 +1,81 @@
 #include "trade_ngin/backtest/backtest_coordinator.hpp"
+#include "trade_ngin/live/live_estimator_history.hpp"
+#include "trade_ngin/live/live_roll_legs.hpp"
+#include "trade_ngin/strategy/trend_estimator.hpp"
+#include "trade_ngin/backtest/equity_cost_warmup.hpp"
+#include "trade_ngin/backtest/junk_signal_feed.hpp"
+#include "trade_ngin/backtest/stored_run_refusal.hpp"
+#include "trade_ngin/data/backtest_position_row.hpp"
+#include <unordered_set>
 #include <algorithm>
 #include <iomanip>
+#include <cstdlib>
+#include <set>
+#include <chrono>
 #include <sstream>
 #include "trade_ngin/core/logger.hpp"
 #include "trade_ngin/core/run_id_generator.hpp"
 #include "trade_ngin/core/time_utils.hpp"
+#include "trade_ngin/data/conversion_utils.hpp"
+#include "trade_ngin/data/listing_dates.hpp"
+#include "trade_ngin/data/per_contract_source.hpp"
 #include "trade_ngin/data/market_data_bus.hpp"
+#include "trade_ngin/live/live_historical_metrics.hpp"
+#include "trade_ngin/portfolio/sizing_capital.hpp"
+#include "trade_ngin/risk/risk_scale_report.hpp"
 #include "trade_ngin/storage/backtest_results_manager.hpp"
+#include "trade_ngin/strategy/base_strategy.hpp"
 #include "trade_ngin/strategy/trend_following.hpp"
-#include "trade_ngin/strategy/trend_following_fast.hpp"
+#include "trade_ngin/strategy/types.hpp"
+#include "trade_ngin/transaction_cost/netting.hpp"
 
 namespace trade_ngin {
 namespace backtest {
+
+namespace {
+// Listing dates and declared id relabels (the identity without portfolio.json's listing_dates and
+// instrument_id_relabels): the id rows as data/listing_dates.hpp reads them.
+Result<std::vector<market_data_utils::FuturesInstrumentId>> with_predecessor_ids(
+    const std::vector<std::string>& symbols,
+    Result<std::vector<market_data_utils::FuturesInstrumentId>> ids) {
+    return ListingDates::instance().read_ids(symbols, std::move(ids));
+}
+
+// The vendor ids a run without a database reads from the bars it was given (a MarketDataSource's
+// Bar::instrument_id), in the rows PostgresDatabase::get_futures_instrument_ids returns: one per
+// bar, its UTC date. The session classifier's id-continuity limb then judges the bars of a source
+// as it judges the same bars read from the database. A source whose bars carry no id gives the
+// error the run always gave, so the limb is reported as unavailable.
+Result<std::vector<market_data_utils::FuturesInstrumentId>> instrument_ids_from_bars(
+    const std::vector<Bar>& bars) {
+    std::vector<market_data_utils::FuturesInstrumentId> rows;
+    for (const auto& bar : bars) {
+        if (bar.instrument_id.empty()) continue;
+        rows.push_back({bar.symbol, core::format_utc_date(bar.timestamp), bar.instrument_id});
+    }
+    if (rows.empty()) {
+        return make_error<std::vector<market_data_utils::FuturesInstrumentId>>(
+            ErrorCode::NOT_INITIALIZED, "the backtest has no database and its bars carry no id",
+            "BacktestCoordinator");
+    }
+    return Result<std::vector<market_data_utils::FuturesInstrumentId>>(std::move(rows));
+}
+}  // namespace
 
 BacktestCoordinator::BacktestCoordinator(std::shared_ptr<PostgresDatabase> db,
                                          InstrumentRegistry* registry,
                                          const BacktestCoordinatorConfig& config)
     : config_(config),
       db_(std::move(db)),
+      registry_(registry),
+      current_portfolio_value_(config.initial_capital) {}
+
+BacktestCoordinator::BacktestCoordinator(std::shared_ptr<MarketDataSource> source,
+                                         InstrumentRegistry* registry,
+                                         const BacktestCoordinatorConfig& config)
+    : config_(config),
+      db_(nullptr),
+      data_source_(std::move(source)),
       registry_(registry),
       current_portfolio_value_(config.initial_capital) {}
 
@@ -47,7 +105,8 @@ Result<void> BacktestCoordinator::initialize() {
 
 Result<void> BacktestCoordinator::create_components() {
     // Create data loader
-    data_loader_ = std::make_unique<BacktestDataLoader>(db_);
+    data_loader_ = data_source_ ? std::make_unique<BacktestDataLoader>(data_source_)
+                                : std::make_unique<BacktestDataLoader>(db_);
 
     // Create metrics calculator (stateless)
     metrics_calculator_ = std::make_unique<BacktestMetricsCalculator>();
@@ -62,17 +121,16 @@ Result<void> BacktestCoordinator::create_components() {
     BacktestExecutionConfig exec_config;
     execution_manager_ = std::make_unique<BacktestExecutionManager>(exec_config);
 
-    // Create portfolio constraints manager
-    PortfolioConstraintsConfig constraints_config;
-    constraints_config.use_risk_management = config_.use_risk_management;
-    constraints_config.use_optimization = config_.use_optimization;
-    constraints_manager_ = std::make_unique<BacktestPortfolioConstraints>(constraints_config);
-
     return Result<void>();
 }
 
 Result<void> BacktestCoordinator::validate_connection() const {
     if (!db_) {
+        // A database is optional when a market data source was injected: results are simply
+        // not persisted.
+        if (data_source_) {
+            return Result<void>();
+        }
         return make_error<void>(ErrorCode::CONNECTION_ERROR, "Database interface is null",
                                 "BacktestCoordinator");
     }
@@ -101,6 +159,11 @@ Result<BacktestResults> BacktestCoordinator::run_single_strategy(
             return make_error<BacktestResults>(init_result.error()->code(),
                                                init_result.error()->what(), "BacktestCoordinator");
         }
+    }
+
+    if (auto k = require_statistics_sessions_per_year(); k.is_error()) {
+        return make_error<BacktestResults>(k.error()->code(), k.error()->what(),
+                                           "BacktestCoordinator");
     }
 
     // Reset state
@@ -145,8 +208,11 @@ Result<BacktestResults> BacktestCoordinator::run_single_strategy(
     }
 
     // Calculate final metrics
-    auto results = metrics_calculator_->calculate_all_metrics(equity_curve, all_executions,
-                                                              config_.warmup_days);
+    const auto grid =
+        statistics_grid(grouped_bars, asset_class, config_.statistics_sessions_per_year);
+    auto results = metrics_calculator_->calculate_all_metrics(
+        equity_curve, all_executions, config_.warmup_days, trade_point_value_source(), grid);
+    log_statistics_convention(grid, asset_class, results, equity_curve.size());
 
     // Copy executions to results
     results.executions = all_executions;
@@ -183,18 +249,41 @@ Result<BacktestResults> BacktestCoordinator::run_portfolio(
         }
     }
 
+    if (auto k = require_statistics_sessions_per_year(); k.is_error()) {
+        return make_error<BacktestResults>(k.error()->code(), k.error()->what(),
+                                           "BacktestCoordinator");
+    }
+
     // Reset all state
     reset();
     reset_portfolio_state();
+    // The session hold is the futures book's; the equity backtest does not hold.
+    session_hold_enabled_ = (asset_class == AssetClass::FUTURES);
+    // The record of what this futures run consumes for an external check
+    // (consumed_series_record.hpp), only when the environment names a directory; it writes no log
+    // line and changes nothing the run computes or stores.
+    consumed_record_ = ConsumedSeriesRecord();
+    if (session_hold_enabled_) {
+        if (const char* dir = std::getenv("TRADE_NGIN_SERIES_DUMP_DIR"); dir != nullptr && *dir) {
+            consumed_record_.enable(dir);
+        }
+    }
+    risk_scale_report_enabled_ = (asset_class == AssetClass::FUTURES);
+    size_on_equity_enabled_ = (asset_class == AssetClass::FUTURES);
+    // The per-bar re-tier is the equity book's; futures roots keep their static
+    // per-root cost configs.
+    equity_cost_retier_enabled_ = (asset_class == AssetClass::EQUITIES);
+    // The futures book's cost managers read live's own-day basis.
+    own_day_cost_feed_enabled_ = (asset_class == AssetClass::FUTURES);
 
     // Store backtest dates for later use in save_portfolio_results_to_db
     backtest_start_date_ = start_date;
     backtest_end_date_ = end_date;
 
-    // Share risk manager with portfolio if available
-    if (risk_manager_ && portfolio) {
-        portfolio->set_risk_manager(
-            std::shared_ptr<RiskManager>(risk_manager_.get(), [](RiskManager*) {}));
+    // The portfolio's risk modules see RiskContext::is_backtest = true, and the PortfolioManager nets
+    // each bar's sleeve reports, which here are the fills the backtest stores
+    if (portfolio) {
+        portfolio->set_backtest_mode(true);
     }
 
     // Disable MarketDataBus publishing during data loading
@@ -222,6 +311,44 @@ Result<BacktestResults> BacktestCoordinator::run_portfolio(
 
     auto& all_bars = data_result.value();
     auto grouped_bars = data_loader_->group_bars_by_timestamp(all_bars);
+
+    if (equity_cost_retier_enabled_) {
+        load_equity_cost_retier(symbols, start_date, end_date);
+    }
+
+    // The session classifier's instrument-id continuity
+    // limb reads each kept bar's vendor id, over the window the bars were loaded for (the query
+    // the live runners read). The verdict of a bar reads no later bar, although this classifier
+    // holds the cycle's group before it classifies the signal group. The ids are read from the
+    // start of the classifier's history prefix (seed_estimator_history feeds its bars), as the
+    // live runners read them, so the id limb judges the window's first bars as live does.
+    if (session_hold_enabled_) {
+        auto pg = std::dynamic_pointer_cast<PostgresDatabase>(db_);
+        const auto feed = feed_instrument_ids(
+            session_classifier_,
+            pg ? with_predecessor_ids(
+                     symbols,
+                     pg->get_futures_instrument_ids(symbols, k01_classifier_history_start(start_date),
+                                                    end_date))
+               : with_predecessor_ids(symbols, instrument_ids_from_bars(all_bars)));
+        if (feed.fed) {
+            INFO(feed.line);
+        } else {
+            WARN(feed.line);
+        }
+    }
+
+    // The estimators' window reaches back W consumed bars before the first sized day: the bars
+    // before the backtest's window are judged by a classifier of their own, withheld bars left
+    // out, and handed to the sleeves as history. They are no cycle: nothing is marked, sized or
+    // stored on them, and the window's own classifier and roll status start at the window.
+    if (session_hold_enabled_) {
+        auto seeded = seed_estimator_history(portfolio, symbols, start_date, asset_class, data_freq);
+        if (seeded.is_error()) {
+            return make_error<BacktestResults>(seeded.error()->code(), seeded.error()->what(),
+                                               "BacktestCoordinator");
+        }
+    }
 
     // Get portfolio config
     const auto& portfolio_config = portfolio->get_config();
@@ -253,6 +380,26 @@ Result<BacktestResults> BacktestCoordinator::run_portfolio(
     current_run_id_ = generate_portfolio_run_id(strategy_names_for_id, end_date);
     INFO("Generated portfolio backtest run_id: " + current_run_id_);
 
+    // The id is the strategy ids and the window's end, so it is the id of any earlier
+    // run of these strategies to this end date. A storing run whose id already has rows is
+    // refused here, before its first cycle: nothing of it has been stored
+    // (stored_run_refusal.hpp).
+    if (config_.store_trade_details && db_) {
+        std::string unchecked;
+        if (auto stored = refuse_stored_run(*db_, current_run_id_, &unchecked); stored.is_error()) {
+            const std::string refusal = stored.error()->what();
+            ERROR(refusal);
+            current_run_id_.clear();
+            return make_error<BacktestResults>(stored.error()->code(), refusal,
+                                               "BacktestCoordinator");
+        }
+        if (!unchecked.empty()) {
+            WARN("The stored rows of run_id " + current_run_id_ +
+                 " could not be counted, so the run is not checked against an earlier run of "
+                 "the same id: " + unchecked);
+        }
+    }
+
     // Enable backtest mode on all strategies
     for (auto& strategy : portfolio->get_strategies()) {
         strategy->set_backtest_mode(true);
@@ -264,15 +411,51 @@ Result<BacktestResults> BacktestCoordinator::run_portfolio(
     int calculated_warmup_days = calculate_warmup_days(portfolio->get_strategies());
     INFO("Calculated warmup days from strategies: " + std::to_string(calculated_warmup_days) +
          ", total available days: " + std::to_string(grouped_bars.size()));
+    if (!config_.first_traded_date.empty()) {
+        const std::string& fd = config_.first_traded_date;
+        int y = 0;
+        unsigned m = 0, d = 0;
+        char a = 0, b = 0;
+        std::istringstream in(fd);
+        in >> y >> a >> m >> b >> d;
+        const std::chrono::year_month_day ymd{std::chrono::year{y}, std::chrono::month{m},
+                                              std::chrono::day{d}};
+        if (fd.size() != 10 || a != '-' || b != '-' || !in || !ymd.ok()) {
+            return make_error<BacktestResults>(
+                ErrorCode::INVALID_ARGUMENT,
+                "backtest.first_traded_date is not a real YYYY-MM-DD date: '" + fd + "'",
+                "BacktestCoordinator");
+        }
+        const std::chrono::sys_days first{ymd};
+        int before = 0;
+        for (const auto& [timestamp, bars] : grouped_bars) {
+            if (std::chrono::floor<std::chrono::days>(timestamp) >= first) break;
+            ++before;
+        }
+        WARN("FIRST_TRADED_DATE " + fd + " (test-only): warm-up rows " +
+             std::to_string(std::max(before, calculated_warmup_days)) + " (the strategies' own " +
+             std::to_string(calculated_warmup_days) + ", rows before the date " +
+             std::to_string(before) + ")");
+        calculated_warmup_days = std::max(before, calculated_warmup_days);
+    }
 
-    // Initialize CSV exporter
-    csv_exporter_ = std::make_unique<BacktestCSVExporter>(config_.csv_output_path);
-    auto csv_init_result = csv_exporter_->initialize_files();
-    if (csv_init_result.is_error()) {
-        WARN("Failed to initialize CSV exporter: " + std::string(csv_init_result.error()->what()));
-        csv_exporter_.reset();
+    // Initialize CSV exporter, unless export is off (a run started from an arbitrary working
+    // directory, as the Python wrapper's can be).
+    // Each portfolio's run writes into its own directory under the configured path.
+    const std::string csv_directory =
+        BacktestCSVExporter::portfolio_directory(config_.csv_output_path, config_.portfolio_id);
+    if (config_.export_csv) {
+        csv_exporter_ = std::make_unique<BacktestCSVExporter>(csv_directory);
+        auto csv_init_result = csv_exporter_->initialize_files();
+        if (csv_init_result.is_error()) {
+            WARN("Failed to initialize CSV exporter: " +
+                 std::string(csv_init_result.error()->what()));
+            csv_exporter_.reset();
+        } else {
+            INFO("CSV exporter initialized, output: " + csv_directory);
+        }
     } else {
-        INFO("CSV exporter initialized, output: " + config_.csv_output_path);
+        INFO("CSV export disabled");
     }
 
     // Track last saved date
@@ -288,6 +471,21 @@ Result<BacktestResults> BacktestCoordinator::run_portfolio(
                 process_portfolio_day(timestamp, bars, portfolio, all_executions, equity_curve,
                                       risk_metrics, is_warmup, initial_capital);
 
+            if (process_result.is_error() && netting_refused_stop_) {
+                // A ROLL or BORROW row carrying a netting adjustment fails the run on the day the
+                // row is met: never a warning, never the equity carried flat and the run going on.
+                ERROR(std::string(process_result.error()->what()));
+                return make_error<BacktestResults>(process_result.error()->code(),
+                                                   process_result.error()->what(),
+                                                   "BacktestCoordinator");
+            }
+            if (process_result.is_error() && roll_leg_stop_) {
+                // A leg without a usable close fails the run.
+                ERROR(std::string(process_result.error()->what()));
+                return make_error<BacktestResults>(process_result.error()->code(),
+                                                   process_result.error()->what(),
+                                                   "BacktestCoordinator");
+            }
             if (process_result.is_error()) {
                 WARN("Portfolio data processing failed: " +
                      std::string(process_result.error()->what()));
@@ -297,6 +495,15 @@ Result<BacktestResults> BacktestCoordinator::run_portfolio(
                 }
             }
         } catch (const std::exception& e) {
+            // The exception path stops on an owed roll exactly as
+            // the error return above does; it never warns and goes on with the roll un-legged.
+            if (auto stop = roll_owed_stop(e.what()); stop.is_error() || roll_leg_stop_) {
+                const std::string what =
+                    stop.is_error() ? std::string(stop.error()->what()) : std::string(e.what());
+                ERROR(what);
+                return make_error<BacktestResults>(ErrorCode::INVALID_DATA, what,
+                                                   "BacktestCoordinator");
+            }
             WARN("Exception processing portfolio data: " + std::string(e.what()));
             if (!equity_curve.empty()) {
                 equity_curve.emplace_back(timestamp, equity_curve.back().second);
@@ -320,24 +527,117 @@ Result<BacktestResults> BacktestCoordinator::run_portfolio(
             }
         }
 
+        // Migration 037: the per-symbol P&L cells of the rows this date stores (the same dates
+        // as the daily save: after the warm-up, once a date), kept for the worst day's symbol.
+        if (!is_warmup && !bars.empty()) {
+            const std::string stored_date = core::format_utc_date(timestamp);
+            if (stored_date != symbol_day_pnl_date_) {
+                auto cells = stored_symbol_day_pnl(
+                    portfolio->get_strategy_positions(),
+                    [&](const std::string& id) { return keeps_closed_rows(portfolio, id); },
+                    stored_date);
+                symbol_day_pnl_.insert(symbol_day_pnl_.end(), cells.begin(), cells.end());
+                symbol_day_pnl_date_ = stored_date;
+                // STAT_QUALITY: the same date's held symbols with no bar, for the summary's lines.
+                note_stat_quality_day(portfolio->get_strategy_positions(), stored_date);
+            }
+        }
+
         day_index++;
     }
+    if (!consumed_record_.write()) {
+        record_file::report_failure(consumed_record_.dir(),
+                                    "a file of the consumed series record could not be written");
+    }
 
-    // Sort executions by timestamp
-    std::sort(all_executions.begin(), all_executions.end(),
-              [](const ExecutionReport& a, const ExecutionReport& b) {
-                  return a.fill_time < b.fill_time;
-              });
+    if (equity_cost_retier_enabled_) {
+        INFO("EQUITY_COST_RETIER_SUMMARY cycles=" + std::to_string(equity_cost_retier_cycles_) +
+             " tier_changes=" + std::to_string(equity_cost_retier_changes_) +
+             " splits=" + std::to_string(equity_cost_retier_.split_count()) +
+             ": every cycle re-tiered both cost managers from the 20 bars ending at its signal "
+             "bar, in window-end share units");
+    }
 
-    // Calculate final metrics
+    // Sort executions by timestamp: a stable sort that keeps the stored sub-order inside a bar,
+    // ROLL legs (closing, then opening, as inserted) before the bar's STRATEGY fills and the
+    // BORROW rows after them. The trade statistics do not depend on
+    // it: the calculator nets these rows into the account's fills in its own stated order.
+    auto type_rank = [](const ExecutionReport& e) {
+        return e.execution_type == ExecutionType::ROLL       ? 0
+               : e.execution_type == ExecutionType::STRATEGY ? 1
+                                                             : 2;
+    };
+    std::stable_sort(all_executions.begin(), all_executions.end(),
+                     [&](const ExecutionReport& a, const ExecutionReport& b) {
+                         if (a.fill_time != b.fill_time) return a.fill_time < b.fill_time;
+                         return type_rank(a) < type_rank(b);
+                     });
+
+    // Migration 018: the run's cost totals from the stored rows themselves (STRATEGY + ROLL +
+    // BORROW: the sum the equity curve charged, each fill at its cost after netting), the ROLL
+    // subset (a ROLL leg is never netted: its own cost) and the count of ROLL rows. Taken BEFORE
+    // the metrics: a ROLL or BORROW row carrying a netting adjustment (a BORROW row is appended
+    // after its cycle's sum, so this is where one is first seen) fails the run here, by name, as
+    // an error result: no backtest.results row, no executions and no equity curve are stored. The
+    // backtest.final_positions rows the bar loop wrote day by day (here the whole window's; after
+    // a day stop, the earlier days') remain, as after a ROLL_LEG stop.
+    transaction_cost::RunCostTotals cost_totals;
+    try {
+        cost_totals = transaction_cost::run_cost_totals(all_executions);
+    } catch (const transaction_cost::NettingRefused& e) {
+        ERROR(std::string("NETTING STOP at the end of the run: ") + e.what());
+        return make_error<BacktestResults>(
+            ErrorCode::INVALID_DATA,
+            std::string("NETTING STOP: ") + e.what() + ". Failing the run",
+            "BacktestCoordinator");
+    }
+
+    // Calculate final metrics, on the statistics grid of the run's own bars
     INFO("Calculating portfolio backtest metrics");
-    auto results = metrics_calculator_->calculate_all_metrics(equity_curve, all_executions,
-                                                              calculated_warmup_days);
+    const auto grid =
+        statistics_grid(grouped_bars, asset_class, config_.statistics_sessions_per_year);
+    // Migration 037 reads the rows the run stores: the per-symbol P&L of its position rows and
+    // the sizing capital of each equity-curve row's risk_detail.
+    BacktestStatisticsInputs statistics_inputs;
+    statistics_inputs.symbol_pnl = symbol_day_pnl_;
+    statistics_inputs.capitals =
+        stored_sizing_capitals(equity_curve, equity_risk_detail_rows(equity_curve.size()));
+    auto results = metrics_calculator_->calculate_all_metrics(
+        equity_curve, all_executions, calculated_warmup_days, trade_point_value_source(), grid,
+        statistics_inputs);
+    log_statistics_convention(grid, asset_class, results, equity_curve.size());
+    INFO("BACKTEST_STATISTICS " + backtest_statistics_log_line(results.statistics_columns));
     results.warmup_days = calculated_warmup_days;
+    results.transaction_costs = cost_totals.transaction_costs;
+    results.roll_costs = cost_totals.roll_costs;
+    results.total_roll_fills = cost_totals.roll_fills;
+    // Migration 040: the split's totals, with the switch on only.
+    if (contract_rolls::PerContractSource::instance().enabled()) {
+        const auto split = roll_series::roll_split_totals(all_executions);
+        results.roll_bar_moves = split.roll_bar_moves;
+        results.roll_gap_values = split.roll_gap_values;
+        INFO("ROLL_SPLIT_TOTALS rolls=" + std::to_string(split.rolls) + " roll_bar_moves=" +
+             std::to_string(split.roll_bar_moves) + " roll_gap_values=" +
+             std::to_string(split.roll_gap_values) + " roll_costs=" +
+             std::to_string(cost_totals.roll_costs) + " (the gaps are not P&L)");
+    }
 
     // Add executions and equity curve to results
     results.executions = std::move(all_executions);
     results.equity_curve = std::move(equity_curve);
+    results.equity_risk_detail = equity_risk_detail_rows(results.equity_curve.size());
+    if (!equity_overlay_.empty()) {
+        results.equity_overlay.assign(results.equity_curve.size(), OverlayColumns());
+        for (const auto& [index, columns] : equity_overlay_) {
+            if (index < results.equity_overlay.size()) results.equity_overlay[index] = columns;
+        }
+        INFO("OVERLAY_COLUMNS rows=" + std::to_string(equity_overlay_.size()) + " of " +
+             std::to_string(results.equity_curve.size()) + " curve rows; equal_to_pass=" +
+             std::to_string(overlay_rows_equal_to_pass_) +
+             ": the overlay's readings of the stored book of each sized rebalance, and on how "
+             "many rows the five equal the pass's own readings of its stored book to the bit");
+    }
+    for (const auto& line : stat_quality_lines(grid)) INFO(line);
 
     // Get final portfolio positions: sum per-strategy quantities (Σ qᵢ).
     // get_portfolio_positions() applies allocation a second time, producing
@@ -367,7 +667,8 @@ Result<BacktestResults> BacktestCoordinator::run_portfolio(
     // Finalize CSV exporter
     if (csv_exporter_) {
         csv_exporter_->finalize();
-        INFO("CSV export finalized to: " + config_.csv_output_path);
+        INFO("CSV export finalized to: " + BacktestCSVExporter::portfolio_directory(
+                                               config_.csv_output_path, config_.portfolio_id));
     }
 
     INFO("Portfolio backtest completed: " + std::to_string(day_index) + " days processed, " +
@@ -376,6 +677,14 @@ Result<BacktestResults> BacktestCoordinator::run_portfolio(
     return results;
 }
 
+// Reachable only from run_single_strategy(), which no app and no test calls; every
+// backtest runner uses the portfolio path (run_portfolio_backtest).
+// run_single_strategy() is a documented public entry point (src/strategy/README.md
+// shows it as the way to backtest one strategy), and this path does what its name says.
+//
+// `is_warmup` is ignored inside: the caller passes it, the body does not consult it,
+// so warm-up days would be treated exactly like live days. Fix that before using
+// this for anything.
 Result<void> BacktestCoordinator::process_day(
     const Timestamp& timestamp, const std::vector<Bar>& bars,
     std::shared_ptr<StrategyInterface> strategy, std::vector<ExecutionReport>& executions,
@@ -405,15 +714,17 @@ Result<void> BacktestCoordinator::process_day(
                 current_positions_, new_positions, price_manager_->get_all_previous_day_prices(),
                 timestamp);
 
-            // Update current positions
-            for (const auto& [symbol, pos] : new_positions) {
-                current_positions_[symbol] = pos;
-            }
-
-            // Notify strategy of fills
+            // Generate executions first, then notify strategy of fills
             for (const auto& exec : new_executions) {
                 strategy->on_execution(exec);
                 executions.push_back(exec);
+            }
+
+            // Update current positions AFTER on_execution so average_price
+            // and unrealized_pnl reflect fill-updated values (not stale on_data values)
+            const auto& updated_positions = strategy->get_positions();
+            for (const auto& [symbol, pos] : updated_positions) {
+                current_positions_[symbol] = pos;
             }
         }
 
@@ -426,12 +737,34 @@ Result<void> BacktestCoordinator::process_day(
             double volume = static_cast<double>(bar.volume);
 
             // Get previous close for log return calculation
-            double prev_close = close;  // Default to current if no previous
+            double prev_close = 0.0;
+            bool found_prev = false;
             for (const auto& prev_bar : previous_bars_) {
                 if (prev_bar.symbol == bar.symbol) {
                     prev_close = static_cast<double>(prev_bar.close);
+                    found_prev = true;
                     break;
                 }
+            }
+            if (!found_prev) {
+                // Record the VOLUME anyway; omit only the return.
+                //
+                // Today's volume is a valid, correct observation regardless of whether a
+                // prior bar exists, and ADV is what sizes market impact. Skipping the bar
+                // would leave a 20-observation ADV window that systematically excludes Mondays
+                // for the agricultural/livestock symbols, which have no Sunday session while
+                // the rest of the universe does, and a symbol near an ADV bucket boundary
+                // would change its impact coefficient purely by which days got counted.
+                //
+                // Passing prev_close = 0.0 is deliberate and sufficient: update_market_data
+                // records volume unconditionally and gates update_log_returns on
+                // `prev_close_price > 0.0`, so the return is omitted rather than fabricated.
+                //
+                // Do NOT set `prev_close = close`. That injects a
+                // log(close/close) = 0 return -- a false observation that biases the
+                // volatility estimate downward on 1 day in 5 for the affected symbols.
+                WARN("No T-1 bar found for " + bar.symbol +
+                     " -- recording volume, omitting the return");
             }
 
             execution_manager_->update_market_data(bar.symbol, volume, close, prev_close);
@@ -443,18 +776,6 @@ Result<void> BacktestCoordinator::process_day(
 
         // Update equity curve
         equity_curve.emplace_back(timestamp, portfolio_value);
-
-        // Apply portfolio constraints if enabled (updates current_positions_)
-        if (constraints_manager_ && (constraints_manager_->is_risk_management_enabled() ||
-                                     constraints_manager_->is_optimization_enabled())) {
-            constraints_manager_->update_historical_returns(bars);
-            auto constraint_result =
-                constraints_manager_->apply_constraints(bars, current_positions_, risk_metrics);
-            if (constraint_result.is_error()) {
-                WARN("Constraint application failed: " +
-                     std::string(constraint_result.error()->what()));
-            }
-        }
 
         // Store previous bars for next iteration
         previous_bars_ = bars;
@@ -472,8 +793,11 @@ Result<void> BacktestCoordinator::process_day(
 Result<void> BacktestCoordinator::process_portfolio_day(
     const Timestamp& timestamp, const std::vector<Bar>& bars,
     std::shared_ptr<PortfolioManager> portfolio, std::vector<ExecutionReport>& executions,
-    std::vector<std::pair<Timestamp, double>>& equity_curve, std::vector<RiskResult>& risk_metrics,
-    bool is_warmup, double initial_capital) {
+    std::vector<std::pair<Timestamp, double>>& equity_curve,
+    std::vector<RiskResult>& /*risk_metrics*/, bool is_warmup, double initial_capital) {
+    // risk_metrics is never written: its only writer was the coordinator's own risk gate,
+    // which read a risk_manager_ nothing ever assigned, and has been deleted.
+    cycle_rolls_owed_.clear();
     try {
         // BEGINNING-OF-DAY MODEL FOR PORTFOLIO BACKTEST:
         // - Use previous day's bars for signal generation via PortfolioManager
@@ -484,6 +808,47 @@ Result<void> BacktestCoordinator::process_portfolio_day(
             return make_error<void>(ErrorCode::MARKET_DATA_ERROR,
                                     "Empty market data provided for portfolio backtest",
                                     "BacktestCoordinator");
+        }
+
+        // Every group enters the session classifier as it arrives, so a group is
+        // classified later (as the signal group) against strictly earlier bars only.
+        if (session_hold_enabled_) session_classifier_.add_bars(bars);
+
+        // This cycle's bar group as the marks
+        // consume it. A WITHHELD bar books no P&L and does not move the symbol's previous
+        // close, so its next consumed bar books against the last consumed close. Its verdict reads
+        // no later bar, so it is the verdict the next cycle's signal feed acts on.
+        mark_withheld_.clear();
+        mark_change_.clear();
+        mark_close_.clear();
+        mark_previous_close_.clear();
+        row_no_bar_.clear();
+        held_no_bar_.clear();
+        if (session_hold_enabled_) {
+            for (const auto& v : classify_bar_group(session_classifier_, bars)) {
+                if (v.k01_withheld()) mark_withheld_.insert(v.symbol);
+            }
+        }
+
+        // Before this group reaches the cost models or
+        // the PortfolioManager, both cost managers are re-tiered from the 20 bars ending at the
+        // PREVIOUS group, the signal bar whose close prices this cycle's fills (live re-tiers on
+        // every run from the 20 bars ending at T-1), in the window-end share unit
+        // (equity_cost_retier.hpp). Then this group joins the trailing windows.
+        if (equity_cost_retier_enabled_) {
+            const auto pass =
+                equity_cost_retier_.retier(execution_manager_->get_transaction_cost_manager(),
+                                           portfolio->get_transaction_cost_manager());
+            ++equity_cost_retier_cycles_;
+            for (const auto& c : pass.changes) {
+                ++equity_cost_retier_changes_;
+                INFO("EQUITY_COST_RETIER date=" + core::format_utc_date(timestamp) +
+                     " symbol=" + c.symbol + " tier " + c.from + "->" + c.to +
+                     " adv=" + std::to_string(c.adv) + " bars=" + std::to_string(c.bars) +
+                     " window=" + c.first_bar + ".." + c.last_bar +
+                     " (split-consistent shares; both cost managers)");
+            }
+            equity_cost_retier_.append(bars);
         }
 
         // If this is the first bar set, initialize previous_bars and return early
@@ -497,18 +862,54 @@ Result<void> BacktestCoordinator::process_portfolio_day(
             return Result<void>();  // Early return, don't process day 1
         }
 
-        // Update transaction cost manager with market data for ADV and volatility tracking
-        for (const auto& bar : bars) {
+        // Update transaction cost manager with market data for ADV and volatility tracking.
+        // The futures book (own_day_cost_feed_enabled_) is fed below from the
+        // signal feed, live's basis. The equity book is fed its
+        // SIGNAL group (T-1, the bar whose close prices this cycle's fills), with each bar's return
+        // against the group fed on the previous cycle, so its 20-bar ADV and its volatility window
+        // end at T-1 as the live equity runner's do (LiveDailyCycle::feed_cost_model); feeding this
+        // cycle's own group, day T, before its fills are priced would be a one-bar look-ahead.
+        static const std::vector<Bar> kNotFedHere;
+        const std::vector<Bar>& signal_group_cost_feed =
+            own_day_cost_feed_enabled_ ? kNotFedHere : portfolio_previous_bars_;
+        for (const auto& bar : signal_group_cost_feed) {
             double close = static_cast<double>(bar.close);
-            double volume = static_cast<double>(bar.volume);
+            // An equity's volume in the window-end share
+            // unit, so the ADV that scales participation is in the unit of the traded quantity and
+            // of the tier's ADV (live's two ADVs are the same twenty observations).
+            double volume = equity_cost_retier_enabled_
+                                ? equity_cost_retier_.split_consistent_volume(bar)
+                                : static_cast<double>(bar.volume);
 
             // Get previous close for log return calculation
-            double prev_close = close;  // Default to current if no previous
-            for (const auto& prev_bar : portfolio_previous_bars_) {
+            double prev_close = 0.0;
+            bool found_prev = false;
+            for (const auto& prev_bar : cost_feed_previous_group_) {
                 if (prev_bar.symbol == bar.symbol) {
                     prev_close = static_cast<double>(prev_bar.close);
+                    found_prev = true;
                     break;
                 }
+            }
+            if (!found_prev) {
+                // Record the VOLUME anyway; omit only the return.
+                //
+                // Today's volume is a valid, correct observation regardless of whether a
+                // prior bar exists, and ADV is what sizes market impact. Skipping the bar
+                // would leave a 20-observation ADV window that systematically excludes Mondays
+                // for the agricultural/livestock symbols, which have no Sunday session while
+                // the rest of the universe does, and a symbol near an ADV bucket boundary
+                // would change its impact coefficient purely by which days got counted.
+                //
+                // Passing prev_close = 0.0 is deliberate and sufficient: update_market_data
+                // records volume unconditionally and gates update_log_returns on
+                // `prev_close_price > 0.0`, so the return is omitted rather than fabricated.
+                //
+                // Do NOT set `prev_close = close`. That injects a
+                // log(close/close) = 0 return -- a false observation that biases the
+                // volatility estimate downward on 1 day in 5 for the affected symbols.
+                WARN("No T-1 bar found for " + bar.symbol +
+                     " -- recording volume, omitting the return");
             }
 
             execution_manager_->update_market_data(bar.symbol, volume, close, prev_close);
@@ -516,6 +917,7 @@ Result<void> BacktestCoordinator::process_portfolio_day(
             // Also update portfolio's cost manager for execution cost calculation
             portfolio->update_cost_manager_market_data(bar.symbol, volume, close, prev_close);
         }
+        if (!own_day_cost_feed_enabled_) cost_feed_previous_group_ = portfolio_previous_bars_;
 
         // Track strategy execution counts BEFORE processing (for commission calculation)
         std::unordered_map<std::string, size_t> strategy_exec_counts_before;
@@ -530,19 +932,362 @@ Result<void> BacktestCoordinator::process_portfolio_day(
         // Use previous day's bars for signal generation
         const auto& bars_for_signals = had_previous_bars ? portfolio_previous_bars_ : bars;
 
-        auto data_result = portfolio->process_market_data(bars_for_signals, is_warmup, timestamp);
-        if (data_result.is_error()) {
-            return data_result;
+        // The backtest predicate: a symbol trades on this
+        // cycle only when its bar in the signal group is a SESSION. A symbol with no bar there,
+        // or a JUNK bar, gets no fill and no book change (the PM holds it at its filled ledger).
+        std::unordered_set<std::string> signal_group_sessions;
+        const std::unordered_set<std::string>* session_symbols = nullptr;
+        // A JUNK bar and a thin first print of the signal group are WITHHELD. They leave this
+        // cycle's feed and are never fed later, so no consumer (the strategies, the
+        // PortfolioManager's history, the cost models fed below, the roll status) ever consumes
+        // them, and the next consumed bar's return is taken against the last consumed close. An
+        // unconfirmed instrument-id change the classifier holds is NOT withheld: it is the change
+        // bar, consumed and held. Every non-SESSION symbol is held on this cycle (no fill, no book
+        // change). Warm-up included, as the hold is.
+        const std::vector<Bar>* signal_feed = &bars_for_signals;
+        std::vector<Bar> k01_feed;
+        // The symbols whose bar fed on this cycle CONFIRMED a roll, with that bar's date: their legs
+        // are booked on this cycle, once.
+        std::map<std::string, std::string> confirmed_now;
+        // The micros' changes of price source confirmed on this cycle: read as
+        // rolls by the series, never legged (no execution, no cost); logged with their gap.
+        std::map<std::string, std::string> source_changes_now;
+        if (session_hold_enabled_ && had_previous_bars) {
+            std::set<std::string> withheld_symbols;
+            const std::vector<SymbolDayVerdict> verdicts =
+                classify_bar_group(session_classifier_, bars_for_signals);
+            for (const auto& v : verdicts) {
+                if (!is_warmup && !v.id_note.empty()) {
+                    INFO("BT_SESSION_CLASSIFIER INSTRUMENT_ID " + v.symbol + " " + v.date + ": " +
+                         v.id_note);
+                }
+                if (v.is_session()) {
+                    signal_group_sessions.insert(v.symbol);
+                } else {
+                    if (v.k01_withheld()) withheld_symbols.insert(v.symbol);
+                    if (!is_warmup) {
+                        INFO("BT_SESSION_CLASSIFIER JUNK " + v.symbol + " " + v.date + ": " +
+                             v.reason + " -- no fill and no book change on this cycle");
+                    }
+                }
+            }
+            session_symbols = &signal_group_sessions;
+            if (!withheld_symbols.empty()) {
+                const std::string cycle = "(signal group of " +
+                                          SessionClassifier::ymd(SessionClassifier::day_of(timestamp)) +
+                                          ", warmup=" + (is_warmup ? "1" : "0") + "): ";
+                auto k01 = k01_signal_feed(bars_for_signals, withheld_symbols);
+                for (const auto& b : k01.withheld) {
+                    INFO("BT_JUNK_FEED withheld " + b.symbol + " " +
+                         SessionClassifier::ymd(SessionClassifier::day_of(b.timestamp)) + " " + cycle +
+                         "kept out of the strategies, the PortfolioManager's history and the cost "
+                         "models; never fed later");
+                }
+                k01_feed = std::move(k01.feed);
+                signal_feed = &k01_feed;
+                consumed_record_.add_cycle(
+                    SessionClassifier::ymd(SessionClassifier::day_of(bars_for_signals.front().timestamp)),
+                    verdicts, k01.withheld, *signal_feed);
+            } else {
+                consumed_record_.add_cycle(
+                    SessionClassifier::ymd(SessionClassifier::day_of(bars_for_signals.front().timestamp)),
+                    verdicts, {}, *signal_feed);
+            }
+            // Each symbol's roll status on its CONSUMED
+            // sequence (the bars fed this cycle; a withheld bar never walks it), one bar at a time. A
+            // symbol whose LAST consumed bar is pending (a change bar, either bar of a flip, an id-less
+            // bar inside a pending roll) is HELD at this rebalance: out of the session set, so the
+            // PortfolioManager fixes it at its filled quantity, counts it at that quantity and books no
+            // fill in it. The status persists across cycles that consume no bar of the symbol (the hold
+            // covers them); the confirming bar ends it. Warm-up included, as the session hold is.
+            std::set<std::string> fed_now;
+            for (const auto& b : *signal_feed) {
+                signal_roll_status_[b.symbol] = roll_trackers_[b.symbol].add(
+                    b.instrument_id, static_cast<double>(b.close), b.roll_from);
+                fed_now.insert(b.symbol);
+                if (signal_roll_status_[b.symbol].confirm) {
+                    auto& into = signal_roll_status_[b.symbol].price_source_change ? source_changes_now
+                                                                                    : confirmed_now;
+                    into[b.symbol] = SessionClassifier::ymd(SessionClassifier::day_of(b.timestamp));
+                }
+            }
+            for (const auto& [symbol, st] : signal_roll_status_) {
+                if (!st.holds()) continue;
+                signal_group_sessions.erase(symbol);
+                if (is_warmup) continue;
+                INFO("CHANGE_BAR_HOLD " + symbol + " date=" + core::format_utc_date(timestamp) +
+                     " kind=" + (st.flip ? "flip_revert" : st.change ? "pending_change" : "idless_pending") +
+                     " held_id=" + st.held_id +
+                     ": the last consumed bar is pending; held at the filled quantity, no fill");
+                if (st.flip && fed_now.count(symbol)) {
+                    INFO("FLIP_PAIR " + symbol + " date=" +
+                         core::format_utc_date(bars_for_signals.front().timestamp) +
+                         " held_id=" + st.held_id + " bars=" + std::to_string(st.bars_pending + 1) +
+                         ": the id returned to the held contract; no legs, every bar of it held and "
+                         "its returns excluded");
+                }
+            }
         }
+
+        // The futures book's two cost managers are fed the cycle's SIGNAL feed, the bars the
+        // strategies and the PortfolioManager are fed below (a JUNK bar withheld on its cycle, as
+        // live's strategy feed withholds it), on live's basis (futures_cost_feed.hpp): each
+        // symbol's own-day volume (its signal bar's) is the impact model's only observation, and
+        // its returns walk ends at that bar. So the optimizer's cost vector and every fill's cost
+        // read what a live run with this T-1 reads, and nothing of day T.
+        if (own_day_cost_feed_enabled_) {
+            // The participation volume is the weekend
+            // merge's on this cycle's fill day (futures_cost_feed.hpp, rules 1-3): a weekday
+            // signal bar takes the weekend stub(s) right before it; a weekend signal bar on a
+            // weekday cycle is priced on the last session before the stub(s) plus the stub(s).
+            const auto fed = feed_futures_cost_model_step(
+                execution_manager_->get_transaction_cost_manager(), *signal_feed, timestamp,
+                execution_cost_carry_);
+            feed_futures_cost_model_step(portfolio->get_transaction_cost_manager(), *signal_feed,
+                                         timestamp, portfolio_cost_carry_);
+            size_t merged_symbols = 0;
+            size_t stub_signal_symbols = 0;
+            double merged_volume = 0.0;
+            double previous_session_volume = 0.0;
+            auto count_merge = [&](const FuturesCostFeedSymbol& s) {
+                if (s.merged_weekend_bars == 0) return;
+                ++merged_symbols;
+                merged_volume += s.merged_weekend_volume;
+                if (futures_cost_feed_detail::is_weekend_day(s.own_day_time)) {
+                    ++stub_signal_symbols;
+                    previous_session_volume += s.previous_session_volume;
+                }
+            };
+            for (const auto& s : fed.symbols) count_merge(s);
+            for (const auto& s : fed.reevaluated) count_merge(s);
+            if (!is_warmup && (merged_symbols > 0 || !fed.reevaluated.empty())) {
+                INFO("BT_COST_FEED_WEEKEND_MERGE date=" + core::format_utc_date(timestamp) +
+                     " symbols=" + std::to_string(merged_symbols) +
+                     " weekend_volume=" + std::to_string(merged_volume) +
+                     " stub_signal_symbols=" + std::to_string(stub_signal_symbols) +
+                     " previous_session_volume=" + std::to_string(previous_session_volume) +
+                     " reevaluated=" + std::to_string(fed.reevaluated.size()) +
+                     ": a weekday signal bar's participation volume includes its symbol's "
+                     "weekend stub; a stub signal bar on a weekday cycle is priced on the last "
+                     "session plus the stub");
+            }
+            if (!is_warmup) {
+                INFO("BT_COST_FEED date=" + core::format_utc_date(timestamp) + " signal_group=" +
+                     (bars_for_signals.empty()
+                          ? std::string("none")
+                          : core::format_utc_date(bars_for_signals.front().timestamp)) +
+                     " symbols=" + std::to_string(fed.symbols.size()) +
+                     " returns=" + std::to_string(fed.returns_fed) +
+                     ": both cost managers read each symbol's own-day volume and the returns "
+                     "walk ending at its signal bar (live's basis)");
+            }
+        }
+
+        // Half compounding: the book is sized on the starting capital
+        // less the drawdown of the cumulative net P&L from its running peak, never above the
+        // starting capital. The settled history is the equity curve's own rows up to its LAST row,
+        // the previous cycle's (this cycle's row is appended below, after its fills and its marks);
+        // it is recomputed from the curve on every cycle and nothing persists it. Every sizing
+        // input follows it (PortfolioManager::set_sizing_capital). Warm-up rows are flat at the
+        // initial capital, so warm-up sizes on it and is not logged.
+        if (size_on_equity_enabled_) {
+            const HalfCompounding sizing = backtest_half_compounding(equity_curve, initial_capital);
+            cycle_account_value_ = sizing.account;
+            auto sized = portfolio->set_sizing_capital(sizing.capital);
+            if (sized.is_error()) {
+                return sized;
+            }
+            if (!is_warmup) {
+                INFO("SIZING_CAPITAL date=" + core::format_utc_date(timestamp) +
+                     " capital=" + std::to_string(sizing.capital) +
+                     " account=" + std::to_string(sizing.account) +
+                     " peak=" + std::to_string(sizing.peak) + " settled_through=" +
+                     (equity_curve.empty() ? std::string("none")
+                                           : core::format_utc_date(equity_curve.back().first)) +
+                     " source=equity_curve");
+            }
+        }
+
+        // Section 6.5: the held book at the START of the bar, per sleeve, the quantity the roll legs
+        // are booked at. The book is the FILLED one: a sleeve's target that warm-up set and no fill
+        // stands behind is not held, and a roll confirmed on the first traded cycle has no leg.
+        const auto start_of_bar_book = confirmed_now.empty() && source_changes_now.empty()
+                                           ? std::unordered_map<std::string, std::unordered_map<std::string, Position>>{}
+                                           : portfolio->get_filled_strategy_positions();
+        // The rolls owed from here until the legs are booked below (the tracker has
+        // consumed their confirming bars); the day's catch and the run loop's read it.
+        if (!is_warmup) {
+            for (const auto& [symbol, confirm_date] : confirmed_now) {
+                for (const auto& [strategy_id, book] : start_of_bar_book) {
+                    const auto held = book.find(symbol);
+                    if (held == book.end() ||
+                        std::abs(static_cast<double>(held->second.quantity)) < 1e-9) {
+                        continue;
+                    }
+                    cycle_rolls_owed_.push_back(symbol + " (" + strategy_id + ") confirmed " +
+                                                confirm_date);
+                }
+            }
+        }
+
+        if (signal_feed->empty()) {
+            // Every bar of the signal group is JUNK and nothing is carried: live's feed would hold
+            // no new bar either, so the strategies' signals and the book stay where they are.
+            INFO("BT_JUNK_FEED the signal group of " +
+                 SessionClassifier::ymd(SessionClassifier::day_of(timestamp)) +
+                 " holds only JUNK bars: nothing is fed to the strategies or the PortfolioManager "
+                 "on this cycle");
+            if (consumed_record_.enabled() && had_previous_bars) {
+                portfolio->record_no_pass(
+                    SessionClassifier::ymd(SessionClassifier::day_of(bars_for_signals.front().timestamp)),
+                    timestamp, is_warmup);
+            }
+        } else {
+            auto data_result = portfolio->process_market_data(*signal_feed, is_warmup, timestamp,
+                                                              session_symbols);
+            if (data_result.is_error()) {
+                // The tracker has consumed this cycle's confirming bars, so a
+                // cycle that returns here would leave a held symbol's roll un-legged for good. A
+                // STOP, never a loss.
+                if (!is_warmup) {
+                    for (const auto& [symbol, confirm_date] : confirmed_now) {
+                        for (const auto& [strategy_id, book] : start_of_bar_book) {
+                            const auto held = book.find(symbol);
+                            if (held == book.end() ||
+                                std::abs(static_cast<double>(held->second.quantity)) < 1e-9) {
+                                continue;
+                            }
+                            roll_leg_stop_ = true;
+                            return make_error<void>(
+                                ErrorCode::INVALID_DATA,
+                                "ROLL_LEG STOP " + symbol + " (" + strategy_id +
+                                    "): the cycle failed (" + data_result.error()->what() +
+                                    ") and its roll confirmed " + confirm_date +
+                                    " would not be legged. Failing the run",
+                                "BacktestCoordinator");
+                        }
+                    }
+                }
+                return data_result;
+            }
+        }
+
+        // The two ROLL legs of every roll the signal feed CONFIRMED on
+        // this cycle, per sleeve holding the symbol at the start of the bar, inserted ahead of this
+        // bar's STRATEGY fills (stored order: closing leg, opening leg, then the fills), priced by the
+        // PortfolioManager's cost model (the model the stored fills use), STRICT: a leg without a
+        // usable close fails the run. Post-warm-up only (warm-up clears every execution).
+        if (!is_warmup && had_previous_bars) {
+            // The cost model's inputs on each ROLL_LEG line (ADV, volatility multiplier), so a reader can
+            // recompute the leg's implicit cost.
+            auto& cost_model = portfolio->get_transaction_cost_manager();
+            auto model_input = [](double x) {
+                std::ostringstream o;
+                o << std::setprecision(12) << x;
+                return o.str();
+            };
+            for (const auto& [symbol, confirm_date] : source_changes_now) {
+                const auto& st = signal_roll_status_.at(symbol);
+                const double points = st.change_bar_close - st.last_close_before_change;
+                const double point_value = pnl_manager_ ? pnl_manager_->get_point_value(symbol) : 1.0;
+                for (const auto& [strategy_id, book] : start_of_bar_book) {
+                    const auto held = book.find(symbol);
+                    const double q = held == book.end() ? 0.0 : static_cast<double>(held->second.quantity);
+                    INFO("PRICE_SOURCE_CHANGE " + strategy_id + " " + symbol + " date=" + confirm_date + " " +
+                         st.previous_held_id + "->" + st.held_id + " old_close=" +
+                         model_input(st.last_close_before_change) + " new_close=" +
+                         model_input(st.change_bar_close) + " qty=" + model_input(q) + " gap_points=" +
+                         model_input(points) + " gap_value=" + model_input(points * q * point_value) +
+                         ": the micro's price source changes to its own contract; no trade, no legs, "
+                         "no cost (the gap is not P&L)");
+                }
+            }
+            for (const auto& [symbol, confirm_date] : confirmed_now) {
+                const auto& st = signal_roll_status_.at(symbol);
+                INFO("ROLL_CONFIRMED " + symbol + " date=" + confirm_date + " " + st.previous_held_id +
+                     "->" + st.held_id + " closing_px=" + std::to_string(st.last_close_before_change) +
+                     " opening_px=" + std::to_string(st.change_bar_close) +
+                     " change_bars=" + std::to_string(st.bars_pending) +
+                     (st.mark_close ? ": a per-contract roll known on its bar"
+                                    : ": the next consumed bar kept the new id") +
+                     "; the legs are booked on this cycle");
+                for (const auto& [strategy_id, book] : start_of_bar_book) {
+                    const auto held = book.find(symbol);
+                    if (held == book.end()) continue;
+                    const double q = static_cast<double>(held->second.quantity);
+                    if (std::abs(q) < 1e-9) continue;
+                    size_t& seq = roll_leg_seq_[strategy_id];
+                    const std::string id_close = "RL-" + strategy_id + "-" + std::to_string(seq);
+                    const std::string id_open = "RL-" + strategy_id + "-" + std::to_string(seq + 1);
+                    std::vector<ExecutionReport> legs;
+                    try {
+                        legs = roll_series::make_roll_legs(
+                            symbol, q, st.last_close_before_change, st.change_bar_close,
+                            st.previous_held_id, st.held_id, timestamp, id_close, id_close, id_open,
+                            id_open, [&](const std::string& s, double signed_q, double px) {
+                                const auto c = cost_model.calculate_costs(s, signed_q, px);
+                                return roll_series::RollLegCost{c.commissions_fees,
+                                                                c.implicit_price_impact,
+                                                                c.slippage_market_impact,
+                                                                c.total_transaction_costs};
+                            });
+                    } catch (const std::exception& e) {
+                        roll_leg_stop_ = true;
+                        return make_error<void>(ErrorCode::INVALID_DATA,
+                                                "ROLL_LEG STOP " + symbol + " (" + strategy_id +
+                                                    "): " + e.what() +
+                                                    ". Failing the run: a leg without a usable close",
+                                                "BacktestCoordinator");
+                    }
+                    seq += 2;
+                    // Ruling 18 (migration 040): a per-contract roll's split, on its closing leg.
+                    if (st.roll_bar_points) {
+                        const double point_value =
+                            pnl_manager_ ? pnl_manager_->get_point_value(symbol) : 1.0;
+                        roll_series::attach_roll_split(legs, q, *st.roll_bar_points, point_value);
+                        INFO("ROLL_SPLIT " + strategy_id + " " + symbol + " date=" +
+                             core::format_utc_date(timestamp) + " confirmed=" + confirm_date +
+                             " qty=" + model_input(q) + " points=" +
+                             model_input(*st.roll_bar_points) + " multiplier=" +
+                             model_input(point_value) + " roll_bar_move=" +
+                             model_input(*legs.front().roll_bar_move) + " roll_gap_points=" +
+                             model_input(*legs.front().roll_gap_points) + " roll_gap_value=" +
+                             model_input(*legs.front().roll_gap_value) +
+                             " (the gap is not P&L)");
+                    }
+                    const size_t at = strategy_exec_counts_before.count(strategy_id)
+                                          ? strategy_exec_counts_before.at(strategy_id)
+                                          : 0;
+                    portfolio->insert_executions_at(strategy_id, at, legs);
+                    for (const auto& leg : legs) {
+                        INFO("ROLL_LEG " + strategy_id + " " + symbol + " " +
+                             (leg.exec_id == id_close ? "RC" : "RO") + " " +
+                             (leg.side == Side::BUY ? "BUY" : "SELL") + " qty=" +
+                             std::to_string(static_cast<double>(leg.filled_quantity)) + " px=" +
+                             std::to_string(static_cast<double>(leg.fill_price)) + " instrument=" +
+                             leg.instrument_id + " cost=" +
+                             std::to_string(static_cast<double>(leg.total_transaction_costs)) +
+                             " adv=" + model_input(cost_model.get_adv(symbol)) + " vol_mult=" +
+                             model_input(cost_model.get_volatility_multiplier(symbol)) +
+                             " date=" + core::format_utc_date(timestamp) + " confirmed=" +
+                             confirm_date +
+                             " (an upper bound: two outright legs; realised 0; outside netting)");
+                    }
+                }
+            }
+        }
+        cycle_rolls_owed_.clear();  // booked (or none owed): a later failure of the cycle owes no roll
 
         // WARMUP HANDLING: keep equity flat, no executions
         if (is_warmup) {
             // Clear any executions that might have been generated
             portfolio->clear_all_executions();
 
-            // Update previous close prices for first post-warmup day
+            // Update previous close prices for first post-warmup day (a withheld bar is never
+            // a previous close)
             std::unordered_map<std::string, double> warmup_closes;
             for (const auto& bar : bars) {
+                if (mark_withheld_.count(bar.symbol)) continue;
                 warmup_closes[bar.symbol] = static_cast<double>(bar.close);
             }
             pnl_manager_->update_previous_closes(warmup_closes);
@@ -558,6 +1303,29 @@ Result<void> BacktestCoordinator::process_portfolio_day(
         }
 
         // POST-WARMUP: Normal trading logic
+
+        // The rebalance's applied risk scale, once per post-warmup cycle, from
+        // the PortfolioManager's own record of the call above (risk_scale_report.hpp defines each
+        // field). reporter=na: the backtest has no snapshot RiskManager and stores no risk figure.
+        // date = this cycle's timestamp (UTC), the date its fills and equity row carry. Log only.
+        // A cycle whose signal group held only JUNK bars never called process_market_data, so the
+        // PM's record is still the previous cycle's: this cycle ran no risk lap and reports an
+        // empty record (laps=0) rather than repeating yesterday's.
+        if (risk_scale_report_enabled_) {
+            const std::vector<RiskDecisionRecord> this_cycle =
+                signal_feed->empty() ? std::vector<RiskDecisionRecord>{}
+                                     : portfolio->last_risk_decisions();
+            INFO(format_risk_scale_report(std::string("na"), summarize_applied_risk(this_cycle),
+                                          core::format_utc_date(timestamp)));
+            // The delivered cut beside the request, from the same call's
+            // measurement (risk_scale_report.hpp defines each field); an all-JUNK cycle ran no
+            // rebalance and reports the empty measurement (every figure na). Log only.
+            INFO(format_risk_delivered(
+                summarize_applied_risk(this_cycle),
+                signal_feed->empty() ? DeliveredCut{} : portfolio->last_delivered_cut(),
+                core::format_utc_date(timestamp), "capped_target_gross"));
+        }
+
         std::vector<ExecutionReport> period_executions;
 
         if (had_previous_bars) {
@@ -580,30 +1348,15 @@ Result<void> BacktestCoordinator::process_portfolio_day(
             }
         }
 
-        // Apply transaction costs to executions
-        for (auto& exec : period_executions) {
-            try {
-                exec.fill_time = timestamp;
-
-                // TransactionCostManager is the single source of truth.
-                double ref_price = static_cast<double>(exec.fill_price);
-                double qty = static_cast<double>(exec.filled_quantity);
-
-                auto cost_result =
-                    execution_manager_->get_transaction_cost_manager().calculate_costs(
-                        exec.symbol, qty, ref_price);
-
-                exec.commissions_fees = Decimal(cost_result.commissions_fees);
-                exec.implicit_price_impact = Decimal(cost_result.implicit_price_impact);
-                exec.slippage_market_impact = Decimal(cost_result.slippage_market_impact);
-                exec.total_transaction_costs = Decimal(cost_result.total_transaction_costs);
-
-                executions.push_back(exec);
-            } catch (const std::exception& e) {
-                WARN("Exception processing execution for " + exec.symbol + ": " +
-                     std::string(e.what()));
-            }
-        }
+        // The period's fills are reported as the PortfolioManager stored them: these
+        // reports are the rows save_portfolio_results_to_db writes to backtest.executions and the
+        // costs the equity curve charges (calculate_period_transaction_costs), priced by the
+        // PortfolioManager's cost model and netted per symbol-day with that same model, and
+        // stamped with this cycle's timestamp (process_market_data's current_timestamp). They are
+        // not re-priced here: a second model's costs beside the first model's netting_adjustment
+        // would break "the net costs of a symbol-day sum to C(Q)" on the rows the trade statistics
+        // and the strategies' on_execution read, and would part them from the stored rows.
+        executions.insert(executions.end(), period_executions.begin(), period_executions.end());
 
         // Feed executions back to strategies
         for (const auto& exec : period_executions) {
@@ -629,6 +1382,45 @@ Result<void> BacktestCoordinator::process_portfolio_day(
             current_close_prices[bar.symbol] = static_cast<double>(bar.close);
         }
 
+        // Each consumed bar of this group read
+        // against its symbol's roll status (the trackers hold every consumed bar before it: the
+        // signal feed walked them above), without moving the tracker (the next cycle's signal
+        // feed walks this bar). A change bar (a roll's switch day or either bar of a flip) books
+        // no P&L: the move onto it is the splice's price gap, not the held contract's move. Every
+        // row stored for this cycle carries the contract held after this bar (no-bar and withheld
+        // rows: after the symbol's last consumed bar).
+        if (session_hold_enabled_) {
+            row_held_id_.clear();
+            for (const auto& [symbol, tracker] : roll_trackers_) row_held_id_[symbol] = tracker.held_id();
+            for (const auto& bar : bars) {
+                if (mark_withheld_.count(bar.symbol)) continue;
+                roll_series::RollTracker probe = roll_trackers_[bar.symbol];
+                const auto st =
+                    probe.add(bar.instrument_id, static_cast<double>(bar.close), bar.roll_from);
+                // A per-contract roll bar books the old contract's own move over
+                // it (to its close on the bar); only a change bar with no old close books 0.
+                if (st.change && !st.mark_close && !st.previous_close) mark_change_.insert(bar.symbol);
+                if (st.mark_close) mark_close_[bar.symbol] = *st.mark_close;
+                if (st.previous_close) mark_previous_close_[bar.symbol] = *st.previous_close;
+                row_held_id_[bar.symbol] = st.held_id;
+            }
+            if (consumed_record_.enabled()) {
+                std::vector<ConsumedSeriesRecord::FinalMark> marks;
+                for (const auto& bar : bars) {
+                    ConsumedSeriesRecord::FinalMark m;
+                    m.symbol = bar.symbol;
+                    m.date = SessionClassifier::ymd(SessionClassifier::day_of(bar.timestamp));
+                    m.close = static_cast<double>(bar.close);
+                    m.instrument_id = bar.instrument_id;
+                    m.withheld = mark_withheld_.count(bar.symbol) > 0;
+                    m.change = mark_change_.count(bar.symbol) > 0;
+                    m.held_id = row_held_id_[bar.symbol];
+                    marks.push_back(std::move(m));
+                }
+                consumed_record_.set_final_marks(std::move(marks));
+            }
+        }
+
         // Calculate transaction costs from per-strategy executions
         double total_transaction_costs =
             calculate_period_transaction_costs(portfolio, strategy_exec_counts_before);
@@ -636,38 +1428,244 @@ Result<void> BacktestCoordinator::process_portfolio_day(
         // Calculate PnL for each strategy using its individual quantities
         auto strategy_positions = portfolio->get_strategy_positions();
 
+        // Build a per-strategy PnL accounting method lookup so
+        // we can branch on REALIZED_ONLY (futures: daily MTM IS realized) vs
+        // MIXED/UNREALIZED_ONLY (equities: realized_pnl only on actual close,
+        // written by on_execution -- coordinator must NOT stamp realized_pnl
+        // here for equities).
+        std::unordered_map<std::string, PnLAccountingMethod> pnl_method_by_strategy;
+        // And a lookup of each strategy's OWN fill-maintained holdings, which is
+        // where a real cost basis lives.
+        //
+        // The positions this loop iterates come from get_strategy_positions() ==
+        // info.current_positions == the TARGET positions the strategy produced, and
+        // MeanReversionStrategy::get_target_positions() sets
+        // `pos.average_price = inst_data.current_price` -- a MARK, not a basis.
+        //
+        // BaseStrategy::on_execution() is the sole legitimate writer of a volume-weighted
+        // basis and keeps it in positions_, which get_target_positions() deliberately does
+        // NOT read. on_execution has already run for this bar by the time we get here
+        // (executions are applied above), so positions_ carries the post-fill basis.
+        //
+        // This is the backtest half of docs/AVERAGE_PRICE_LIFECYCLE.md -- the live path
+        // closes the same gap in LiveDailyCycle::resolve_and_apply_basis (its "step 8").
+        //
+        // Futures are unaffected: TrendFollowingStrategy::on_execution only bumps a counter
+        // and never populates positions_, so the lookup misses and the basis is untouched --
+        // and under REALIZED_ONLY the basis is not consulted at all.
+        std::unordered_map<std::string, const std::unordered_map<std::string, Position>*>
+            fill_positions_by_strategy;
+        for (const auto& s : portfolio->get_strategies()) {
+            if (auto bs = std::dynamic_pointer_cast<BaseStrategy>(s)) {
+                pnl_method_by_strategy[bs->get_metadata().id] = bs->get_pnl_accounting().method;
+                fill_positions_by_strategy[bs->get_metadata().id] = &bs->get_positions();
+            }
+        }
+
         for (const auto& [strategy_id, positions_map] : strategy_positions) {
+            // The accounting method decides whether this strategy's rows carry a
+            // realized FLOW at all. The flow paths below are gated on it; futures
+            // (REALIZED_ONLY) carry none.
+            auto strategy_method_it = pnl_method_by_strategy.find(strategy_id);
+            const PnLAccountingMethod strategy_method =
+                (strategy_method_it != pnl_method_by_strategy.end())
+                    ? strategy_method_it->second
+                    : PnLAccountingMethod::REALIZED_ONLY;
+
             for (const auto& [symbol, pos] : positions_map) {
                 double qty = static_cast<double>(pos.quantity);
 
-                // Skip zero quantity positions
-                if (std::abs(qty) < 1e-8)
+                // The cumulative comes from the strategy's FILL-maintained
+                // record, not the target snapshot this loop iterates. `pos` was copied
+                // before on_execution ran (above), so `pos.realized_pnl` is
+                // realized through YESTERDAY's fills -- reading it here puts a sale on the
+                // next bar.
+                //
+                // The ledger is advanced ONLY where the row is actually written.
+                // Three paths below return without writing (no close for this symbol, no
+                // previous close, invalid P&L); advancing before them does not defer the
+                // realized, it loses it. Hence peek here, commit at each write site.
+                const std::string flow_key = strategy_id + "|" + symbol;
+                auto fill_cumulative = [&]() {
+                    double cumulative = static_cast<double>(pos.realized_pnl);
+                    auto flow_it = fill_positions_by_strategy.find(strategy_id);
+                    if (flow_it != fill_positions_by_strategy.end() && flow_it->second) {
+                        auto held = flow_it->second->find(symbol);
+                        if (held != flow_it->second->end()) {
+                            cumulative = static_cast<double>(held->second.realized_pnl);
+                        }
+                    }
+                    return cumulative;
+                };
+
+                // Skip zero quantity positions -- unless this is the close-day row and it
+                // realized something (the live is_dead_row rule). Under REALIZED_ONLY
+                // (futures) the skip is unconditional.
+                if (std::abs(qty) < 1e-8) {
+                    if (strategy_method == PnLAccountingMethod::REALIZED_ONLY) continue;
+                    // The exit's P&L needs somewhere to live. AVERAGE_PRICE_LIFECYCLE
+                    // rule 5: a closed row carries no basis and no mark.
+                    //
+                    // The flow is written back on EVERY flat bar, not only the closing one,
+                    // and it is 0 on the bars after the close. That is not redundant:
+                    // update_strategy_position writes into current_positions, and
+                    // save_daily_positions persists that whole map once per bar. Skipping
+                    // the write on a later flat bar leaves the CLOSING bar's realized
+                    // sitting in the map, and it is then re-persisted every day for the
+                    // rest of the backtest, multiplying the column's sum. Writing the zero
+                    // lets the persist layer's dead-row filter drop the row instead.
+                    const double closed_cumulative = fill_cumulative();
+                    const auto closed_flow = BacktestPnLManager::realized_row_peek(
+                        qty, closed_cumulative, last_cumulative_realized_[flow_key]);
+                    Position closed_row = pos;
+                    closed_row.quantity = Decimal(0.0);
+                    closed_row.average_price = Decimal(0.0);
+                    closed_row.unrealized_pnl = Decimal(0.0);
+                    closed_row.realized_pnl =
+                        Decimal(closed_flow.keep ? closed_flow.flow : 0.0);
+                    auto closed_update =
+                        portfolio->update_strategy_position(strategy_id, symbol, closed_row);
+                    if (closed_update.is_error()) {
+                        WARN("Failed to write close-day row for " + symbol + ": " +
+                             std::string(closed_update.error()->what()));
+                    }
+                    // The row was written (or deliberately zeroed): the ledger may advance.
+                    BacktestPnLManager::commit_realized_row(closed_cumulative,
+                                                            last_cumulative_realized_[flow_key]);
                     continue;
+                }
+
+                // A futures row (REALIZED_ONLY) the day has no P&L for books nothing that day: its
+                // realized P&L is 0, quantity and average price kept. Without this write the row
+                // the PortfolioManager rebuilt this cycle keeps the sleeve's own figure (its
+                // unrounded position times its last bar's move), on a day the symbol printed no
+                // bar. The other accounting methods defer their realized flow to the next written
+                // row and are not written here.
+                auto write_unbooked_row = [&]() {
+                    if (strategy_method != PnLAccountingMethod::REALIZED_ONLY) return false;
+                    Position unbooked = pos;
+                    unbooked.realized_pnl = Decimal(0.0);
+                    auto unbooked_update =
+                        portfolio->update_strategy_position(strategy_id, symbol, unbooked);
+                    if (unbooked_update.is_error()) {
+                        WARN("Failed to write the no-bar row for " + symbol + ": " +
+                             std::string(unbooked_update.error()->what()));
+                    }
+                    return true;
+                };
 
                 // Get current close price
                 auto curr_it = current_close_prices.find(symbol);
                 if (curr_it == current_close_prices.end()) {
+                    // The symbol printed no bar in this group: held, marked at its last close.
+                    // Migration 038: the stored row says so (row_mark = 'NO_BAR').
+                    if (write_unbooked_row()) row_no_bar_[strategy_id].insert(symbol);
+                    held_no_bar_[strategy_id].insert(symbol);
                     continue;
                 }
                 double current_close = curr_it->second;
 
-                // Check if we have previous close
+                // Check if we have previous close (a withheld bar never becomes one)
                 if (!pnl_manager_->has_previous_close(symbol)) {
-                    pnl_manager_->set_previous_close(symbol, current_close);
+                    if (!mark_withheld_.count(symbol)) pnl_manager_->set_previous_close(symbol, current_close);
+                    write_unbooked_row();
                     continue;
                 }
 
                 double prev_close = pnl_manager_->get_previous_close(symbol);
+                // A roll bar's move is to the old contract's close on it; the bar
+                // that confirms a vendor switch moves from the target's close on the switch bar.
+                double move_to = current_close;
+                if (auto m = mark_close_.find(symbol); m != mark_close_.end()) move_to = m->second;
+                if (auto m = mark_previous_close_.find(symbol); m != mark_previous_close_.end()) {
+                    prev_close = m->second;
+                }
 
                 // Calculate PnL using BacktestPnLManager
                 auto pnl_result =
-                    pnl_manager_->calculate_position_pnl(symbol, qty, prev_close, current_close);
+                    pnl_manager_->calculate_position_pnl(symbol, qty, prev_close, move_to);
+                // No P&L on a withheld bar (never consumed) or on a
+                // change bar (the splice's gap).
+                if (pnl_result.valid &&
+                    (mark_withheld_.count(symbol) || mark_change_.count(symbol))) {
+                    pnl_result.daily_pnl = 0.0;
+                }
 
                 if (pnl_result.valid) {
                     // Update this strategy's position with calculated PnL
                     Position updated_pos = pos;
-                    updated_pos.realized_pnl = Decimal(pnl_result.daily_pnl);
-                    updated_pos.unrealized_pnl = Decimal(0.0);
+                    // Only stamp realized_pnl with daily MTM
+                    // when the strategy uses REALIZED_ONLY accounting
+                    // (futures). For equities (MIXED / UNREALIZED_ONLY),
+                    // leave realized_pnl untouched -- on_execution writes
+                    // realized when positions actually close. total_portfolio_pnl
+                    // below still aggregates daily_pnl independently so equity
+                    // curve totals are unchanged.
+                    auto pnl_method_it = pnl_method_by_strategy.find(strategy_id);
+                    PnLAccountingMethod method = (pnl_method_it != pnl_method_by_strategy.end())
+                                                     ? pnl_method_it->second
+                                                     : PnLAccountingMethod::REALIZED_ONLY;
+                    // The branch itself lives in BacktestPnLManager::realized_for_row
+                    // so it can be asserted.
+                    if (method == PnLAccountingMethod::REALIZED_ONLY) {
+                        updated_pos.realized_pnl = Decimal(BacktestPnLManager::realized_for_row(
+                            method, pnl_result.daily_pnl, 0.0));
+                    } else {
+                        // A per-bar FLOW, taken from the
+                        // fill-maintained record and computed HERE -- on the path that
+                        // actually writes the row -- so a bar the symbol had no close for
+                        // defers its realized to the next written row instead of losing it.
+                        const double held_cumulative = fill_cumulative();
+                        const auto held_flow = BacktestPnLManager::realized_row_peek(
+                            qty, held_cumulative, last_cumulative_realized_[flow_key]);
+                        updated_pos.realized_pnl = Decimal(BacktestPnLManager::realized_for_row(
+                            method, pnl_result.daily_pnl, held_flow.flow));
+                        BacktestPnLManager::commit_realized_row(
+                            held_cumulative, last_cumulative_realized_[flow_key]);
+                    }
+                    // Prefer the strategy's fill-maintained basis over the target
+                    // position's average_price, which for mean reversion is the day's close
+                    // (a mark) rather than what the position cost. A basis of 0 means "no
+                    // basis known" and is left as such -- it must never be replaced by a
+                    // mark.
+                    double cost_basis = static_cast<double>(pos.average_price);
+                    if (method != PnLAccountingMethod::REALIZED_ONLY) {
+                        auto fp_it = fill_positions_by_strategy.find(strategy_id);
+                        if (fp_it != fill_positions_by_strategy.end() && fp_it->second) {
+                            auto held = fp_it->second->find(symbol);
+                            if (held != fp_it->second->end()) {
+                                cost_basis = static_cast<double>(held->second.average_price);
+                            }
+                        }
+                        // DELIBERATELY NOT WRITTEN BACK: `updated_pos.average_price` keeps
+                        // whatever the target position carried. The basis is used ONLY to
+                        // measure unrealized, just above.
+                        //
+                        // Writing the basis into average_price looks right -- it would make
+                        // the stored row self-consistent, so a reader recomputing
+                        // qty * (close - average_price) would reproduce unrealized_pnl. It is
+                        // wrong, and measurably so. This position goes to
+                        // PortfolioManager::update_strategy_position() -> current_positions,
+                        // and RiskManager reads average_price off those as a MARK to size
+                        // notional and leverage. On a book
+                        // holding gains the basis sits below the mark, so leverage is
+                        // understated, less risk scaling is applied, and positions come out
+                        // bigger.
+                        //
+                        // This is exactly the ambiguity docs/AVERAGE_PRICE_LIFECYCLE.md maps:
+                        // the field carries THREE meanings and risk wants the mark while P&L
+                        // wants the basis. Consuming the basis locally is safe; storing it is
+                        // not. If the stored row must ever be made self-consistent, the basis
+                        // needs its OWN column -- do not reuse this one.
+                    }
+
+                    // Unrealized is gated on the SAME accounting method as
+                    // realized, and dollarised with point_value. The rule and the full
+                    // rationale live in BacktestPnLManager::unrealized_for_accounting --
+                    // read it before changing this line.
+                    updated_pos.unrealized_pnl =
+                        Decimal(BacktestPnLManager::unrealized_for_accounting(
+                            method, qty, cost_basis, current_close, pnl_result.point_value));
 
                     auto update_result =
                         portfolio->update_strategy_position(strategy_id, symbol, updated_pos);
@@ -679,8 +1677,58 @@ Result<void> BacktestCoordinator::process_portfolio_day(
             }
         }
 
-        // Update previous closes for next iteration
-        pnl_manager_->update_previous_closes(current_close_prices);
+        // Update previous closes for next iteration (not from a withheld bar)
+        {
+            std::unordered_map<std::string, double> consumed_closes = current_close_prices;
+            for (const auto& symbol : mark_withheld_) consumed_closes.erase(symbol);
+            pnl_manager_->update_previous_closes(consumed_closes);
+        }
+
+        // Accrue overnight borrow fees on open short equity
+        // positions. Per-strategy attribution: iterate strategy_positions,
+        // compute each strategy's borrow fee on its own shorts, both add to
+        // today's transaction costs (equity curve) AND emit a synthetic
+        // zero-quantity ExecutionReport so the DB / CSV / metrics audit
+        // trail stays in sync with the equity-curve drop.
+        // No-op when no shorts are open (the common case for long-only).
+        if (execution_manager_ && registry_) {
+            auto& tcm = execution_manager_->get_transaction_cost_manager();
+            auto strategy_positions_for_borrow = portfolio->get_strategy_positions();
+            for (const auto& [strategy_id, strat_positions] : strategy_positions_for_borrow) {
+                auto strat_borrow_fees = tcm.calculate_overnight_borrow_fees(
+                    strat_positions, current_close_prices, *registry_);
+                for (const auto& [sym, fee] : strat_borrow_fees) {
+                    if (fee <= 0.0) continue;
+                    total_transaction_costs += fee;
+
+                    // Synthesize a zero-quantity exec so per-strategy and
+                    // per-symbol metrics (profit_factor, win_rate, symbol
+                    // PnL) include the borrow drag instead of silently
+                    // excluding it.
+                    ExecutionReport borrow_exec;
+                    borrow_exec.execution_type = ExecutionType::BORROW;  // migration 015
+                    borrow_exec.exec_id = "BORROW_" + strategy_id + "_" + sym;
+                    borrow_exec.order_id = borrow_exec.exec_id;
+                    borrow_exec.symbol = sym;
+                    borrow_exec.side = Side::SELL;
+                    borrow_exec.filled_quantity = Quantity(0.0);
+                    auto price_it = current_close_prices.find(sym);
+                    borrow_exec.fill_price = Price(
+                        price_it != current_close_prices.end() ? price_it->second : 0.0);
+                    borrow_exec.fill_time = timestamp;
+                    borrow_exec.commissions_fees = Decimal(fee);
+                    borrow_exec.implicit_price_impact = Decimal(0.0);
+                    borrow_exec.slippage_market_impact = Decimal(0.0);
+                    borrow_exec.total_transaction_costs = Decimal(fee);
+                    borrow_exec.is_partial = false;
+                    portfolio->append_synthetic_execution(strategy_id, borrow_exec);
+                    // The row reaches the run's executions too (the period's fills were
+                    // collected before this block), so 018's transaction_costs and the metrics
+                    // carry the borrow cost the equity curve charged.
+                    executions.push_back(borrow_exec);
+                }
+            }
+        }
 
         // Calculate portfolio value: previous value + daily PnL - transaction costs
         double portfolio_value =
@@ -689,6 +1737,22 @@ Result<void> BacktestCoordinator::process_portfolio_day(
 
         // Add to equity curve
         equity_curve.emplace_back(timestamp, portfolio_value);
+        // Section 7.3: the row of a sized rebalance carries the loop's record of it. An all-JUNK
+        // cycle ran no rebalance and a refused one stores none: both rows stay NULL.
+        if (!signal_feed->empty()) {
+            const OnePassDay one_pass = portfolio->last_one_pass();
+            if (one_pass.stores_detail()) {
+                equity_risk_detail_[equity_curve.size() - 1] =
+                    risk_detail_json(one_pass, cycle_account_value_).dump();
+                // Migration 037: beside it, the overlay's readings of the book this row's date
+                // stores (the sleeves' positions as they stand now: nothing after this point
+                // changes a quantity before the daily save).
+                bool equal_to_pass = false;
+                equity_overlay_[equity_curve.size() - 1] =
+                    stored_book_overlay_columns(*portfolio, one_pass, &equal_to_pass);
+                if (equal_to_pass) ++overlay_rows_equal_to_pass_;
+            }
+        }
 
         // Build the portfolio-level positions map by simple per-strategy sum
         // (Σ qᵢ). get_portfolio_positions() applies allocation a second time,
@@ -731,8 +1795,10 @@ Result<void> BacktestCoordinator::process_portfolio_day(
                 auto price_it = market_prices.find(symbol);
                 double price = (price_it != market_prices.end()) ? price_it->second : 0.0;
                 auto instrument = csv_registry.get_instrument(symbol);
+                // get_notional_value is a magnitude (futures.cpp): carry the position's sign so
+                // a short adds to the net notional with its sign, not as a long.
                 double notional = instrument
-                    ? instrument->get_notional_value(qty, price)
+                    ? std::copysign(instrument->get_notional_value(qty, price), qty)
                     : qty * price;
                 gross_notional += std::abs(notional);
                 net_notional += notional;
@@ -740,34 +1806,35 @@ Result<void> BacktestCoordinator::process_portfolio_day(
 
             csv_exporter_->append_equity_curve(timestamp, portfolio_value);
 
-            csv_exporter_->append_daily_positions(
-                timestamp, portfolio_positions, market_prices,
-                portfolio_value, gross_notional, net_notional,
-                portfolio->get_strategies());
+            // One row per sleeve and symbol: the sleeves' own positions, as the daily save
+            // stores them.
+            csv_exporter_->append_daily_positions(timestamp, portfolio->get_strategy_positions(),
+                                                  market_prices, portfolio_value, gross_notional,
+                                                  net_notional, portfolio->get_strategies());
 
-            csv_exporter_->append_finalized_positions(
-                timestamp, portfolio_positions, portfolio_previous_positions_,
-                market_prices);
-
-            // Update previous positions for next day's finalized tracking
-            portfolio_previous_positions_ = portfolio_positions;
-        }
-
-        // Get risk metrics if enabled
-        if (config_.use_risk_management && risk_manager_) {
-            try {
-                auto portfolio_positions = build_portfolio_sum();
-                if (!portfolio_positions.empty()) {
-                    MarketData market_data = risk_manager_->create_market_data(bars);
-                    auto risk_result =
-                        risk_manager_->process_positions(portfolio_positions, market_data);
-                    if (risk_result.is_ok()) {
-                        risk_metrics.push_back(risk_result.value());
-                    }
+            // The rows whose sleeve quantity changed today, with the price the day's fills
+            // traded at (the reports this cycle added, as the cost total above reads them)
+            // and the realized P&L of the row the daily save stores.
+            std::unordered_map<std::string, std::vector<ExecutionReport>> day_fills;
+            for (const auto& [strategy_id, execs] : portfolio->get_strategy_executions()) {
+                const size_t before = strategy_exec_counts_before.count(strategy_id) > 0
+                                          ? strategy_exec_counts_before.at(strategy_id)
+                                          : 0;
+                if (had_previous_bars && before < execs.size()) {
+                    day_fills[strategy_id].assign(execs.begin() + before, execs.end());
                 }
-            } catch (const std::exception& e) {
-                WARN("Exception calculating risk metrics: " + std::string(e.what()));
             }
+            const SleevePositions sleeve_positions = portfolio->get_strategy_positions();
+            csv_exporter_->append_position_changes(
+                timestamp, BacktestCSVExporter::position_changes(
+                               sleeve_positions, sleeve_previous_positions_,
+                               BacktestCSVExporter::fill_prices(day_fills),
+                               [&](const std::string& strategy_id) {
+                                   return keeps_closed_rows(portfolio, strategy_id);
+                               }));
+
+            // Update previous positions for next day's change tracking
+            sleeve_previous_positions_ = sleeve_positions;
         }
 
         // Update previous_bars for next day
@@ -776,11 +1843,93 @@ Result<void> BacktestCoordinator::process_portfolio_day(
 
         return Result<void>();
 
+    } catch (const transaction_cost::NettingRefused& e) {
+        // A ROLL or BORROW row carrying a netting adjustment reached the day's sum: a HARD STOP on
+        // this day, as a ROLL_LEG STOP is. The run loop fails the run on netting_refused_stop_.
+        netting_refused_stop_ = true;
+        return make_error<void>(ErrorCode::INVALID_DATA,
+                                std::string("NETTING STOP on ") + core::format_utc_date(timestamp) +
+                                    ": " + e.what() + ". Failing the run",
+                                "BacktestCoordinator");
     } catch (const std::exception& e) {
+        // An exception while a roll is owed is a STOP, as the
+        // PortfolioManager's error return is; the run loop fails the run on roll_leg_stop_.
+        if (auto stop = roll_owed_stop(e.what()); stop.is_error()) return stop;
         return make_error<void>(ErrorCode::UNKNOWN_ERROR,
                                 std::string("Error processing portfolio data: ") + e.what(),
                                 "BacktestCoordinator");
     }
+}
+
+Result<void> BacktestCoordinator::seed_estimator_history(
+    std::shared_ptr<PortfolioManager> portfolio, const std::vector<std::string>& symbols,
+    const Timestamp& start_date, AssetClass asset_class, DataFrequency data_freq) {
+    // Every bar dated before the window's first instant, back to the history start.
+    DataLoadConfig load_config;
+    load_config.symbols = symbols;
+    load_config.start_date = estimator_history_start(start_date);
+    load_config.end_date = start_date - std::chrono::seconds(1);
+    load_config.asset_class = asset_class;
+    load_config.data_freq = data_freq;
+    MarketDataBus::instance().set_publish_enabled(false);
+    auto loaded = data_loader_->load_market_data(load_config);
+    MarketDataBus::instance().set_publish_enabled(true);
+    if (loaded.is_error()) {
+        // No bar before the window is not an error: the symbols start at their first bar. (The
+        // loader reports an empty load as an error; any other failure refuses the run.)
+        const std::string what = loaded.error()->what();
+        if (what.find("No market data loaded") != std::string::npos ||
+            what.find("returned an empty table") != std::string::npos) {
+            INFO("ESTIMATOR_HISTORY empty: no bar before the window, every symbol's estimators "
+                 "start at its first bar in the window");
+            return Result<void>();
+        }
+        return make_error<void>(loaded.error()->code(),
+                                "the bars before the backtest's window could not be loaded: " +
+                                    std::string(loaded.error()->what()),
+                                "BacktestCoordinator");
+    }
+    // A bar's withholding verdict reads the classifier's trailing
+    // history, the same in every engine. The window's classifier is given the prefix the live
+    // runners give theirs (live/live_roll_legs.hpp: the bars of kK01ClassifierHistoryDays
+    // calendar days before the window), from the history loaded here, so the window's first bars
+    // are judged on a warm norm: a thin first print of the window is withheld by a 2-year run as
+    // it is by a longer run and by live. The prefix's bars are not cycles and are consumed by
+    // nothing else; the window's roll status still starts at the window.
+    session_classifier_.add_bars(k01_classifier_history(loaded.value(), start_date));
+    // Without a database the window's first feed saw only the window's bars: the prefix's ids
+    // come from the prefix's bars (with a database that feed's query already covered them).
+    if (!std::dynamic_pointer_cast<PostgresDatabase>(db_)) {
+        const auto prefix_ids = with_predecessor_ids(
+            symbols, instrument_ids_from_bars(k01_classifier_history(loaded.value(), start_date)));
+        if (prefix_ids.is_ok()) session_classifier_.add_instrument_ids(prefix_ids.value());
+    }
+    // The same rule as the live runners' (live/live_estimator_history.hpp): the history's bars are
+    // judged in date order by their own classifier, with their vendor ids, each against the bars
+    // before it; the withheld ones are never consumed.
+    auto pg = std::dynamic_pointer_cast<PostgresDatabase>(db_);
+    std::vector<SymbolDayVerdict> withheld;
+    const std::vector<Bar> history = estimator_history_consumed(
+        loaded.value(), start_date,
+        pg ? with_predecessor_ids(symbols,
+                                  pg->get_futures_instrument_ids(
+                                      symbols, estimator_history_start(start_date), start_date))
+           : with_predecessor_ids(symbols, instrument_ids_from_bars(loaded.value())),
+        &withheld);
+    consumed_record_.add_history(withheld, history);
+    return portfolio->seed_strategy_history(history);
+}
+
+Result<void> BacktestCoordinator::roll_owed_stop(const std::string& what) {
+    if (cycle_rolls_owed_.empty()) return Result<void>();
+    std::string owed;
+    for (const auto& roll : cycle_rolls_owed_) owed += (owed.empty() ? "" : "; ") + roll;
+    cycle_rolls_owed_.clear();
+    roll_leg_stop_ = true;
+    return make_error<void>(ErrorCode::INVALID_DATA,
+                            "ROLL_LEG STOP " + owed + ": the cycle failed (" + what +
+                                ") and the roll would not be legged. Failing the run",
+                            "BacktestCoordinator");
 }
 
 void BacktestCoordinator::reset() {
@@ -797,9 +1946,6 @@ void BacktestCoordinator::reset() {
     }
     if (execution_manager_) {
         execution_manager_->reset();
-    }
-    if (constraints_manager_) {
-        constraints_manager_->reset();
     }
 }
 
@@ -850,18 +1996,10 @@ int BacktestCoordinator::calculate_warmup_days(
             continue;
         }
 
-        // Try to cast to TrendFollowingStrategy
+        // A trend sleeve (TREND or FAST: one class, two configurations)
         auto trend_following = std::dynamic_pointer_cast<TrendFollowingStrategy>(strat);
         if (trend_following) {
             int strat_lookback = trend_following->get_max_required_lookback();
-            max_lookback = std::max(max_lookback, strat_lookback);
-            continue;
-        }
-
-        // Try to cast to TrendFollowingFastStrategy
-        auto trend_following_fast = std::dynamic_pointer_cast<TrendFollowingFastStrategy>(strat);
-        if (trend_following_fast) {
-            int strat_lookback = trend_following_fast->get_max_required_lookback();
             max_lookback = std::max(max_lookback, strat_lookback);
             continue;
         }
@@ -875,9 +2013,123 @@ int BacktestCoordinator::calculate_warmup_days(
 void BacktestCoordinator::reset_portfolio_state() {
     portfolio_has_previous_bars_ = false;
     portfolio_previous_bars_.clear();
+    session_classifier_ = SessionClassifier();
+    session_hold_enabled_ = false;
+    roll_trackers_.clear();
+    signal_roll_status_.clear();
+    roll_leg_seq_.clear();
+    roll_leg_stop_ = false;
+    netting_refused_stop_ = false;
+    cycle_rolls_owed_.clear();
+    mark_withheld_.clear();
+    mark_change_.clear();
+    row_held_id_.clear();
+    row_no_bar_.clear();
+    held_no_bar_.clear();
+    stat_quality_.clear();
+    risk_scale_report_enabled_ = false;
+    equity_risk_detail_.clear();
+    equity_overlay_.clear();
+    overlay_rows_equal_to_pass_ = 0;
+    symbol_day_pnl_.clear();
+    symbol_day_pnl_date_.clear();
+    cycle_account_value_ = 0.0;
+    size_on_equity_enabled_ = false;
+    equity_cost_retier_enabled_ = false;
+    equity_cost_retier_.reset();
+    equity_cost_retier_cycles_ = 0;
+    equity_cost_retier_changes_ = 0;
+    own_day_cost_feed_enabled_ = false;
+    execution_cost_carry_ = FuturesCostFeedCarry{};
+    portfolio_cost_carry_ = FuturesCostFeedCarry{};
+    cost_feed_previous_group_.clear();
     current_run_id_.clear();
-    portfolio_previous_positions_.clear();
+    sleeve_previous_positions_.clear();
+    // Without this, a second portfolio backtest in the same process opens with
+    // the previous book's cumulative realized and reports its first bar as a difference.
+    last_cumulative_realized_.clear();
     csv_exporter_.reset();
+}
+
+void BacktestCoordinator::load_equity_cost_retier(const std::vector<std::string>& symbols,
+                                                  const Timestamp& start_date,
+                                                  const Timestamp& end_date) {
+    equity_cost_retier_.reset();
+    equity_cost_retier_cycles_ = 0;
+    equity_cost_retier_changes_ = 0;
+    // The first window is the cost warm-up's (equity_cost_warmup.hpp): the 30 calendar
+    // days before start_date, ending strictly before it, so the first cycle's tier is set from
+    // bars that existed when the backtest starts.
+    const auto window = equity_cost_warmup_window(start_date);
+    const std::string from = core::format_utc_date(window.start);
+    const std::string to = core::format_utc_date(end_date);
+
+    // The split events that put a bar's volume in the window-end share unit: every ex-date from
+    // the first window's first day to end_date (the adjusted prices' frame).
+    if (!db_) {
+        WARN("EQUITY_COST_RETIER needs the database for the split events and the earlier bars; "
+             "this run has none, so no tier is changed");
+        return;
+    }
+    auto actions = db_->get_per_bar_corporate_actions(symbols, from, to);
+    if (actions.is_error()) {
+        WARN("EQUITY_COST_RETIER the split events " + from + ".." + to +
+             " could not be read (" + std::string(actions.error()->what()) +
+             "): every volume stays in raw shares, so a bar before a split is tiered in its own "
+             "share unit");
+    } else {
+        for (const auto& row : actions.value()) {
+            if (row.action != "split") continue;
+            equity_cost_retier_.add_split(row.ticker, row.date_str, row.value);
+            INFO("EQUITY_COST_RETIER split symbol=" + row.ticker + " ex=" + row.date_str +
+                 " factor=" + std::to_string(row.value) +
+                 ": the volume of every earlier bar is multiplied by it");
+        }
+    }
+
+    // The bars before start_date, read with MarketDataBus publishing off (as run_portfolio reads
+    // its own window), so they reach the trailing windows and nothing else.
+    const bool publishing = MarketDataBus::instance().is_publish_enabled();
+    MarketDataBus::instance().set_publish_enabled(false);
+    Result<std::shared_ptr<arrow::Table>> seed = [&]() {
+        try {
+            return db_->get_market_data(symbols, window.start, window.end, AssetClass::EQUITIES,
+                                        DataFrequency::DAILY, "ohlcv");
+        } catch (...) {
+            MarketDataBus::instance().set_publish_enabled(publishing);
+            throw;
+        }
+    }();
+    MarketDataBus::instance().set_publish_enabled(publishing);
+
+    size_t seed_bars = 0;
+    std::set<std::string> seeded;
+    if (seed.is_error()) {
+        WARN("EQUITY_COST_RETIER the bars before start_date could not be read (" +
+             std::string(seed.error()->what()) +
+             "): the first cycles re-tier from the in-window bars only");
+    } else {
+        auto converted = DataConversionUtils::arrow_table_to_bars(seed.value());
+        if (converted.is_error()) {
+            WARN("EQUITY_COST_RETIER the bars before start_date could not be converted (" +
+                 std::string(converted.error()->what()) +
+                 "): the first cycles re-tier from the in-window bars only");
+        } else {
+            auto bars = converted.value();
+            std::stable_sort(bars.begin(), bars.end(), [](const Bar& a, const Bar& b) {
+                return a.timestamp < b.timestamp;
+            });
+            equity_cost_retier_.append(bars);
+            seed_bars = bars.size();
+            for (const auto& b : bars) seeded.insert(b.symbol);
+        }
+    }
+    INFO("EQUITY_COST_RETIER window=[" + core::format_utc_datetime(window.start) + "Z, " +
+         core::format_utc_datetime(window.end) + "Z] bars=" + std::to_string(seed_bars) +
+         " symbols=" + std::to_string(seeded.size()) + "/" + std::to_string(symbols.size()) +
+         " splits=" + std::to_string(equity_cost_retier_.split_count()) +
+         ": the first tier window; every cycle re-tiers both cost managers from the 20 bars ending "
+         "at its signal bar, in window-end share units, and feeds the impact ADV in that unit");
 }
 
 std::string BacktestCoordinator::generate_portfolio_run_id(
@@ -906,20 +2158,24 @@ Result<void> BacktestCoordinator::save_daily_positions(std::shared_ptr<Portfolio
         for (const auto& [symbol, pos] : positions_map) {
             Position pos_with_date = pos;
             pos_with_date.last_update = timestamp;
-            positions_vec.push_back(pos_with_date);
-
-            // STICKY_DEBUG: Trace average_price at DB save point
-            if (symbol == "MBT.v.0" || symbol == "NQ.v.0") {
-                INFO("STICKY_DEBUG_SAVE: strategy=" + strategy_id + " symbol=" + symbol +
-                     " avg_price=" + std::to_string(static_cast<double>(pos.average_price)) +
-                     " qty=" + std::to_string(static_cast<double>(pos.quantity)));
+            // Migration 016: the contract held after this cycle's bar.
+            if (const auto held = row_held_id_.find(symbol); held != row_held_id_.end()) {
+                pos_with_date.instrument_id = held->second;
             }
+            positions_vec.push_back(pos_with_date);
         }
+
+        // A cash book keeps the close-day row so the exit's realized flow has a
+        // date to live on. Futures (REALIZED_ONLY) drop every zero-quantity row.
+        const bool keep_closed_rows = keeps_closed_rows(portfolio, strategy_id);
 
         if (!positions_vec.empty()) {
             std::string composite_run_id = run_id + "|" + strategy_id;
+            static const std::unordered_set<std::string> no_symbol;
+            const auto no_bar = row_no_bar_.find(strategy_id);
             auto save_result = db_->store_backtest_positions(
-                positions_vec, composite_run_id, config_.portfolio_id, "backtest.final_positions");
+                positions_vec, composite_run_id, config_.portfolio_id, "backtest.final_positions",
+                keep_closed_rows, no_bar != row_no_bar_.end() ? no_bar->second : no_symbol);
 
             if (save_result.is_error()) {
                 WARN("Failed to save daily positions for strategy " + strategy_id +
@@ -939,6 +2195,173 @@ Result<void> BacktestCoordinator::save_daily_positions(std::shared_ptr<Portfolio
     return Result<void>();
 }
 
+bool BacktestCoordinator::keeps_closed_rows(const std::shared_ptr<PortfolioManager>& portfolio,
+                                            const std::string& strategy_id) {
+    for (const auto& s : portfolio->get_strategies()) {
+        if (auto bs = std::dynamic_pointer_cast<BaseStrategy>(s)) {
+            if (bs->get_metadata().id == strategy_id) {
+                return bs->get_pnl_accounting().method != PnLAccountingMethod::REALIZED_ONLY;
+            }
+        }
+    }
+    return false;
+}
+
+OverlayColumns BacktestCoordinator::stored_book_overlay_columns(const PortfolioManager& portfolio,
+                                                                const OnePassDay& day,
+                                                                bool* equal_to_pass) {
+    if (equal_to_pass) *equal_to_pass = false;
+    if (!day.stores_detail()) return OverlayColumns();
+    const overlay::Readings stored =
+        portfolio.overlay_readings_for_book(account_book_of(portfolio.get_strategy_positions()))
+            .readings;
+    if (equal_to_pass) {
+        *equal_to_pass = stored.covariance_readings == day.covariance_readings &&
+                         stored.risk == day.overlay_risk && stored.jump == day.overlay_risk_jump &&
+                         stored.shock == day.overlay_risk_shock &&
+                         stored.gross == day.overlay_gross_leverage &&
+                         stored.net == day.overlay_net_leverage;
+    }
+    return overlay_columns_of(true, stored, day.window_bars_per_year, day.sizing_capital);
+}
+
+std::vector<SymbolDayPnl> BacktestCoordinator::stored_symbol_day_pnl(
+    const std::unordered_map<std::string, std::unordered_map<std::string, Position>>&
+        strategy_positions,
+    const std::function<bool(const std::string&)>& keeps_closed_rows, const std::string& date) {
+    std::map<std::string, SymbolDayPnl> by_symbol;  // symbol order
+    for (const auto& [strategy_id, positions] : strategy_positions) {
+        const bool keep_closed = keeps_closed_rows ? keeps_closed_rows(strategy_id) : false;
+        for (const auto& [symbol, pos] : positions) {
+            const double realized = static_cast<double>(pos.realized_pnl);
+            if (!backtest_position_row_is_stored(static_cast<double>(pos.quantity), realized,
+                                                 keep_closed)) {
+                continue;
+            }
+            SymbolDayPnl& cell = by_symbol[symbol];
+            cell.date = date;
+            cell.symbol = symbol;
+            cell.realized += realized;
+            cell.unrealized_level += static_cast<double>(pos.unrealized_pnl);
+        }
+    }
+    std::vector<SymbolDayPnl> cells;
+    cells.reserve(by_symbol.size());
+    for (auto& [symbol, cell] : by_symbol) {
+        (void)symbol;
+        cells.push_back(std::move(cell));
+    }
+    return cells;
+}
+
+std::vector<std::string> BacktestCoordinator::equity_risk_detail_rows(size_t rows) const {
+    std::vector<std::string> detail;
+    if (equity_risk_detail_.empty()) return detail;
+    detail.assign(rows, std::string());
+    for (const auto& [index, text] : equity_risk_detail_) {
+        if (index < detail.size()) detail[index] = text;
+    }
+    return detail;
+}
+
+BacktestStatisticsGrid BacktestCoordinator::statistics_grid(
+    const std::map<Timestamp, std::vector<Bar>>& grouped_bars, AssetClass asset_class,
+    double sessions_per_year) {
+    if (asset_class != AssetClass::FUTURES) {
+        return BacktestStatisticsGrid::of_own_rows(sessions_per_year);
+    }
+    // The distinct stored symbols printing on each UTC date. A predecessor's bars are copies of
+    // its listed contract's rows (ListingDates::add_predecessor_bars): counted once, under the
+    // listed contract.
+    const auto& listing = ListingDates::instance();
+    std::unordered_map<std::string, bool> is_predecessor;
+    std::map<std::string, std::set<std::string>> printed;
+    for (const auto& [timestamp, bars] : grouped_bars) {
+        auto& symbols = printed[core::format_utc_date(timestamp)];
+        for (const auto& bar : bars) {
+            auto known = is_predecessor.find(bar.symbol);
+            if (known == is_predecessor.end()) {
+                known = is_predecessor.emplace(bar.symbol, listing.is_predecessor(bar.symbol)).first;
+            }
+            if (!known->second) symbols.insert(bar.symbol);
+        }
+    }
+    std::map<std::string, int> counts;
+    for (const auto& [date, symbols] : printed) counts[date] = static_cast<int>(symbols.size());
+    return BacktestStatisticsGrid::of_dates(sessions_per_year, futures_statistics_grid_dates(counts));
+}
+
+void BacktestCoordinator::note_stat_quality_day(
+    const std::unordered_map<std::string, std::unordered_map<std::string, Position>>&
+        strategy_positions,
+    const std::string& date) {
+    std::set<std::string> held, no_bar;
+    size_t no_bar_rows = 0;
+    for (const auto& [strategy_id, positions_map] : strategy_positions) {
+        const auto sleeve_no_bar = held_no_bar_.find(strategy_id);
+        for (const auto& [symbol, pos] : positions_map) {
+            if (std::abs(static_cast<double>(pos.quantity)) < 1e-8) continue;
+            held.insert(symbol);
+            if (sleeve_no_bar != held_no_bar_.end() && sleeve_no_bar->second.count(symbol)) {
+                no_bar.insert(symbol);
+                ++no_bar_rows;
+            }
+        }
+    }
+    stat_quality_.note_day(date, held.size(), std::move(no_bar), no_bar_rows);
+}
+
+std::vector<std::string> BacktestCoordinator::stat_quality_lines(
+    const BacktestStatisticsGrid& grid) const {
+    const std::set<std::string> grid_dates(grid.dates.begin(), grid.dates.end());
+    return stat_quality_.lines([&](const std::string& date) {
+        return grid.own_rows || grid_dates.count(date) > 0;
+    });
+}
+
+Result<void> BacktestCoordinator::require_statistics_sessions_per_year() const {
+    if (config_.statistics_sessions_per_year > 0.0) return Result<void>();
+    return make_error<void>(
+        ErrorCode::INVALID_ARGUMENT,
+        "STATISTICS STOP: the run was handed no sessions a year for its statistics "
+        "(BacktestCoordinatorConfig::statistics_sessions_per_year, from the configured "
+        "statistics.sessions_per_year of the run's series). Failing the run",
+        "BacktestCoordinator");
+}
+
+void BacktestCoordinator::log_statistics_convention(const BacktestStatisticsGrid& grid,
+                                                    AssetClass asset_class,
+                                                    const BacktestResults& results,
+                                                    size_t curve_rows) const {
+    const bool futures = asset_class == AssetClass::FUTURES;
+    std::string line = std::string("STATISTICS_CONVENTION series=") +
+                       (futures ? "futures" : "equities") +
+                       " K=" + std::to_string(results.statistics_sessions_per_year) + " grid=" +
+                       (grid.own_rows
+                            ? std::string("the run's own rows")
+                            : "Sunday to Friday with at least " +
+                                  std::to_string(kStatisticsGridMinSymbols) +
+                                  " stored symbols printing (" + std::to_string(grid.dates.size()) +
+                                  " dates of the window)") +
+                       " n=" + std::to_string(results.statistics_days) + " curve_rows=" +
+                       std::to_string(curve_rows) + " warmup_days=" +
+                       std::to_string(results.warmup_days) + " annualized_return=" +
+                       std::to_string(results.annualized_return);
+    if (results.statistics_days > 0) {
+        INFO(line);
+    } else {
+        WARN(line + ": no return on the statistics grid, the grid statistics are 0");
+    }
+}
+
+BacktestMetricsCalculator::PointValueSource BacktestCoordinator::trade_point_value_source() const {
+    // The source the equity curve reads (BacktestPnLManager::get_point_value), so a trade's dollars and the
+    // booked dollars are one figure.
+    return [this](const std::string& symbol) {
+        return pnl_manager_ ? pnl_manager_->get_point_value(symbol) : 1.0;
+    };
+}
+
 double BacktestCoordinator::calculate_period_transaction_costs(
     std::shared_ptr<PortfolioManager> portfolio,
     const std::unordered_map<std::string, size_t>& exec_counts_before) {
@@ -950,10 +2373,11 @@ double BacktestCoordinator::calculate_period_transaction_costs(
         size_t count_before =
             exec_counts_before.count(strategy_id) > 0 ? exec_counts_before.at(strategy_id) : 0;
 
-        // Get only the new executions (those added after count_before)
-        for (size_t i = count_before; i < execs.size(); ++i) {
-            total_transaction_costs += static_cast<double>(execs[i].total_transaction_costs);
-        }
+        // Only the new executions (those added after count_before), each at its cost after
+        // netting: the PortfolioManager set every fill's netting_adjustment inside the
+        // process_market_data call of this cycle, before these rows were read.
+        total_transaction_costs =
+            transaction_cost::add_net_costs(total_transaction_costs, execs, count_before);
     }
 
     return total_transaction_costs;
@@ -969,11 +2393,28 @@ std::optional<Bar> BacktestCoordinator::find_bar_for_symbol(const std::vector<Ba
     return std::nullopt;
 }
 
+Timestamp BacktestCoordinator::data_boundary(
+    const std::vector<std::pair<Timestamp, double>>& equity_curve, const Timestamp& start_date) {
+    if (equity_curve.empty()) {
+        return start_date;
+    }
+    Timestamp boundary = equity_curve.front().first;
+    for (const auto& point : equity_curve) {
+        boundary = std::max(boundary, point.first);
+    }
+    return boundary;
+}
+
 Result<void> BacktestCoordinator::save_portfolio_results_to_db(
     const BacktestResults& results, const std::vector<std::string>& strategy_names,
     const std::unordered_map<std::string, double>& strategy_allocations,
     std::shared_ptr<PortfolioManager> portfolio, const nlohmann::json& portfolio_config) const {
     if (!config_.store_trade_details) {
+        return Result<void>();
+    }
+
+    if (!db_) {
+        INFO("No database connection configured; skipping portfolio results storage");
         return Result<void>();
     }
 
@@ -1005,13 +2446,14 @@ Result<void> BacktestCoordinator::save_portfolio_results_to_db(
     // Set metadata with portfolio configuration
     nlohmann::json hyperparameters;
     hyperparameters["initial_capital"] = config_.initial_capital;
-    hyperparameters["use_risk_management"] = config_.use_risk_management;
     hyperparameters["use_optimization"] = config_.use_optimization;
     hyperparameters["portfolio_config"] = portfolio_config;
 
-    // Use the actual backtest start/end dates that were stored in run_portfolio()
-    results_manager->set_metadata(backtest_start_date_, backtest_end_date_, hyperparameters,
-                                  "Portfolio Backtest Run: " + portfolio_run_id,
+    // The start is the one run_portfolio() was given; the end is the run's data boundary, the
+    // last bar it consumed, not the end it was asked for.
+    results_manager->set_metadata(backtest_start_date_,
+                                  data_boundary(results.equity_curve, backtest_start_date_),
+                                  hyperparameters, "Portfolio Backtest Run: " + portfolio_run_id,
                                   "Multi-strategy portfolio backtest");
 
     // Set performance metrics (portfolio-level)
@@ -1034,8 +2476,17 @@ Result<void> BacktestCoordinator::save_portfolio_results_to_db(
         {"cvar_95", results.cvar_95},
         {"beta", results.beta},
         {"correlation", results.correlation},
-        {"downside_volatility", results.downside_volatility}};
+        {"downside_volatility", results.downside_volatility},
+        {"transaction_costs", results.transaction_costs},  // migration 018
+        {"roll_costs", results.roll_costs},
+        {"total_roll_fills", static_cast<double>(results.total_roll_fills)}};
     results_manager->set_performance_metrics(metrics);
+    // Migration 037: the statistics that are no plain double (a date, a symbol, the years
+    // object, a count, a number that may have no value) travel as typed cells, at ten
+    // significant digits.
+    // Migration 040: the roll split's totals, named only with the switch on.
+    results_manager->set_summary_cells(
+        backtest_summary_cells(results.statistics_columns, results.roll_bar_moves, results.roll_gap_values));
 
     // Set portfolio-level equity curve
     std::vector<std::pair<Timestamp, double>> equity_points;
@@ -1043,6 +2494,15 @@ Result<void> BacktestCoordinator::save_portfolio_results_to_db(
         equity_points.push_back({timestamp, equity});
     }
     results_manager->set_equity_curve(equity_points);
+    results_manager->set_equity_risk_detail(results.equity_risk_detail);
+    // Migration 037: the six overlay cells of each row, as round-trip text; a row with
+    // no reading writes NULL in all six. A book that stores none names no such column.
+    BacktestCurveCells curve_cells;
+    curve_cells.reserve(results.equity_overlay.size());
+    for (const auto& columns : results.equity_overlay) {
+        curve_cells.push_back(overlay_cells(columns, live_results_number));
+    }
+    results_manager->set_equity_curve_cells(curve_cells);
 
     // Collect per-strategy executions from PortfolioManager
     if (portfolio) {

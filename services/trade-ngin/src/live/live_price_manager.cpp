@@ -5,66 +5,9 @@
 
 namespace trade_ngin {
 
-Result<std::unordered_map<std::string, double>> LivePriceManager::load_close_prices(
-    const std::vector<std::string>& symbols,
-    const Timestamp& date) const {
-
-    (void)date;
-    if (symbols.empty()) {
-        return Result<std::unordered_map<std::string, double>>({});
-    }
-
-    // TODO: Implement Arrow Table parsing
-    // For now, this is a placeholder that will be integrated with existing database patterns
-    std::unordered_map<std::string, double> prices;
-
-    INFO("LivePriceManager::load_close_prices called for " + std::to_string(symbols.size()) +
-         " symbols");  // TODO: Add date formatting
-
-    return Result<std::unordered_map<std::string, double>>(prices);
-}
-
-Result<void> LivePriceManager::load_previous_day_prices(
-    const std::vector<std::string>& symbols,
-    const Timestamp& current_date) {
-
-    // Calculate T-1 date
-    auto previous_date = current_date - std::chrono::hours(24);
-
-    auto result = load_close_prices(symbols, previous_date);
-    if (!result.is_ok()) {
-        return make_error<void>(ErrorCode::DATABASE_ERROR, "Failed to load T-1 prices");
-    }
-
-    previous_day_prices_ = result.value();
-
-    INFO("Loaded " + std::to_string(previous_day_prices_.size()) +
-         " previous day (T-1) close prices");
-
-    return Result<void>();
-}
-
-Result<void> LivePriceManager::load_two_days_ago_prices(
-    const std::vector<std::string>& symbols,
-    const Timestamp& current_date) {
-
-    // Calculate T-2 date
-    auto two_days_ago = current_date - std::chrono::hours(48);
-
-    auto result = load_close_prices(symbols, two_days_ago);
-    if (!result.is_ok()) {
-        return make_error<void>(ErrorCode::DATABASE_ERROR, "Failed to load T-2 prices");
-    }
-
-    two_days_ago_prices_ = result.value();
-
-    INFO("Loaded " + std::to_string(two_days_ago_prices_.size()) +
-         " two days ago (T-2) close prices");
-
-    return Result<void>();
-}
-
-Result<void> LivePriceManager::update_from_bars(const std::vector<Bar>& bars, const Timestamp& reference_date) {
+Result<void> LivePriceManager::update_from_bars(const std::vector<Bar>& bars,
+                                                const Timestamp& reference_date,
+                                                std::optional<Timestamp> t1_date) {
     // Group bars by symbol and sort by timestamp to extract T-1 and T-2 prices
     std::unordered_map<std::string, std::vector<Bar>> bars_by_symbol;
     for (const auto& bar : bars) {
@@ -76,8 +19,17 @@ Result<void> LivePriceManager::update_from_bars(const std::vector<Bar>& bars, co
     two_days_ago_prices_.clear();
     latest_prices_.clear();
 
-    // Calculate expected T-1 date (should be yesterday relative to reference_date)
-    auto expected_t1_date = reference_date - std::chrono::hours(24);
+    // Calculate expected T-1 date.
+    //
+    // When the caller supplies t1_date it is authoritative -- it is the SAME
+    // resolved trading day the caller used to load the position book, so the price lookup
+    // and the book cannot name different days. Omitted, this is `reference_date - 24h`,
+    // which is what both futures runners compute for their own book
+    // (live_portfolio.cpp, live_portfolio_conservative.cpp), so the futures path reads the
+    // same day as its book. See the header for why a fallback here would instead
+    // double-count futures.
+    auto expected_t1_date = t1_date.has_value() ? *t1_date
+                                                : reference_date - std::chrono::hours(24);
     auto expected_t1_date_only = std::chrono::floor<std::chrono::days>(expected_t1_date);
 
     for (auto& [symbol, symbol_bars] : bars_by_symbol) {
@@ -86,6 +38,48 @@ Result<void> LivePriceManager::update_from_bars(const std::vector<Bar>& bars, co
             std::sort(symbol_bars.begin(), symbol_bars.end(),
                      [](const Bar& a, const Bar& b) { return a.timestamp < b.timestamp; });
 
+            if (t1_date.has_value()) {
+                // ---- Caller-resolved T-1 (equities) -------------------------------
+                // SEARCH for the bar on the resolved trading day rather than testing
+                // back() alone. On a live run the vendor may already have posted today's
+                // bar, and a back()-only test would then reject a perfectly good Friday.
+                // T-2 is the bar immediately preceding the T-1 bar, so the pair is always
+                // two consecutive sessions of THIS symbol.
+                std::size_t t1_idx = symbol_bars.size();
+                for (std::size_t i = symbol_bars.size(); i-- > 0;) {
+                    auto d = std::chrono::floor<std::chrono::days>(symbol_bars[i].timestamp);
+                    if (d == expected_t1_date_only) { t1_idx = i; break; }
+                    if (d < expected_t1_date_only) break;  // sorted ascending: gone past it
+                }
+
+                if (t1_idx < symbol_bars.size()) {
+                    double yesterday_close = static_cast<double>(symbol_bars[t1_idx].close);
+                    previous_day_prices_[symbol] = yesterday_close;
+                    latest_prices_[symbol] = yesterday_close;
+                    DEBUG("Day T-1 close for " + symbol + ": " + std::to_string(yesterday_close) +
+                          " (caller-resolved trading day)");
+
+                    if (t1_idx >= 1) {
+                        two_days_ago_prices_[symbol] =
+                            static_cast<double>(symbol_bars[t1_idx - 1].close);
+                    } else {
+                        WARN("No T-2 bar available for " + symbol +
+                             " - T-1 is the earliest bar in the window");
+                    }
+                } else {
+                    // A genuine data gap on a real trading day, not a weekend artifact.
+                    WARN("No bar for " + symbol +
+                         " on the resolved Day T-1 trading date - finalization will skip it");
+                    latest_prices_[symbol] = static_cast<double>(symbol_bars.back().close);
+                    if (symbol_bars.size() >= 2) {
+                        two_days_ago_prices_[symbol] =
+                            static_cast<double>(symbol_bars[symbol_bars.size() - 2].close);
+                    }
+                }
+                continue;  // futures block below is deliberately not shared
+            }
+
+            // ---- Default path (futures): UNCHANGED -------------------------------
             // CRITICAL FIX: Only use last bar as T-1 if it's ACTUALLY from Day T-1
             // Do NOT fall back to older data - if no T-1 data exists, symbol should be skipped in finalization
             auto last_bar_date_only = std::chrono::floor<std::chrono::days>(symbol_bars.back().timestamp);
@@ -132,25 +126,6 @@ Result<void> LivePriceManager::update_from_bars(const std::vector<Bar>& bars, co
     INFO("Note: T-1 prices REQUIRE actual Day T-1 data (no fallback). T-2 prices can fall back for weekend/holiday gaps.");
 
     return Result<void>();
-}
-
-Result<double> LivePriceManager::get_settlement_price(
-    const std::string& symbol,
-    const Timestamp& date) const {
-
-    (void)date;
-    // Check cache first
-    // TODO: Create proper date string formatting
-    // std::string cache_key = symbol + "_" + date_string;
-    auto it = settlement_prices_.find(symbol);
-    if (it != settlement_prices_.end()) {
-        return Result<double>(it->second);
-    }
-
-    // TODO: Implement Arrow Table parsing for database query
-    // For now, return error to indicate not found
-    return make_error<double>(ErrorCode::DATA_NOT_FOUND,
-        "Settlement price lookup not yet integrated with Arrow Table");
 }
 
 Result<double> LivePriceManager::get_latest_price(const std::string& symbol) const {
