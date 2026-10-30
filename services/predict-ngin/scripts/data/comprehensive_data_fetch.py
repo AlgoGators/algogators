@@ -111,7 +111,7 @@ async def fetch_all_markets(session: aiohttp.ClientSession) -> pd.DataFrame:
                 if col in ["volumeNum", "liquidityNum", "volume24hr"]:
                     try:
                         df[col] = pd.to_numeric(df[col])
-                    except:
+                    except Exception:
                         pass
 
         output_file = MARKETS_ROOT / "all_markets.parquet"
@@ -241,7 +241,7 @@ async def fetch_ohlcv_for_market(
                     return df
             elif resp.status == 404:
                 return None
-    except:
+    except Exception:
         pass
 
     return None

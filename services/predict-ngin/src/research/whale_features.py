@@ -130,7 +130,7 @@ def load_market_metadata(db_path: str) -> pd.DataFrame:
             SELECT id, volume, liquidity, volume_24hr
             FROM polymarket_markets
         """, conn)
-    except:
+    except Exception:
         df = pd.DataFrame(columns=["id", "volume", "liquidity", "volume_24hr"])
 
     conn.close()
