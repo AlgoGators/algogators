@@ -84,47 +84,32 @@ class RecordingCursor:
         return False
 
 
-def test_positions_sql_filters_book_and_latest_date_then_drops_zero_outside():
+def test_positions_sql_filters_book_and_latest_date_then_nets_and_drops_zero():
     cursor = RecordingCursor()
-    PostgresPortfolioRepository()._fetch_current_positions(
-        cursor, "LIVE_TREND_FOLLOWING", "P1", "qt", has_portfolio_type=True
-    )
+    PostgresPortfolioRepository()._portfolio_positions(cursor, "P1", "qt", True)
 
     ((sql, params),) = cursor.calls
-    assert params == ("LIVE_TREND_FOLLOWING", "P1", "qt") * 2
-
-    inner, _, outer = sql.partition(") AS latest_positions")
-    assert outer, "expected a derived table named latest_positions"
+    # Issue #59: the book by its portfolio id; the strategy id is never a key.
+    assert params == ("P1", "qt") * 2
+    assert "strategy_id" not in sql
     # Book predicate on both the row select and the max(date) subquery.
-    assert inner.count("portfolio_type = %s") == 2
-    assert re.search(r"date = \( SELECT max\(date\) FROM trading\.positions", inner, re.I)
-    # The zero-quantity filter must NOT run before DISTINCT ON ...
-    assert "quantity" not in inner.split("FROM trading.positions", 1)[1].split("ORDER BY")[0]
-    # ... it runs on the outer query, after the latest row per symbol is chosen.
-    assert re.search(r"WHERE quantity <> 0", outer)
+    assert sql.count("portfolio_type = %s") == 2
+    assert re.search(r"date = \( SELECT max\(date\) FROM trading\.positions", sql, re.I)
+    # The sleeves are netted per symbol on the latest date, and a flatten (net zero) is
+    # dropped after netting, so a closed position never resurrects an older row.
+    assert "GROUP BY symbol" in sql
+    assert "HAVING SUM(quantity) <> 0" in sql
 
 
-def test_positions_for_unknown_book_on_unmigrated_db_reads_nothing():
+def test_positions_on_unmigrated_db_drop_book_predicate():
     cursor = RecordingCursor()
-    rows = PostgresPortfolioRepository()._fetch_current_positions(
-        cursor, "S", "P1", "qt", has_portfolio_type=False
-    )
-    assert rows == []
-    assert cursor.calls == []
-
-
-def test_positions_for_system_on_unmigrated_db_drops_book_predicate():
-    cursor = RecordingCursor()
-    PostgresPortfolioRepository()._fetch_current_positions(
-        cursor, "S", "P1", "system", has_portfolio_type=False
-    )
+    PostgresPortfolioRepository()._portfolio_positions(cursor, "P1", "system", False)
     ((sql, params),) = cursor.calls
     assert "portfolio_type" not in sql
-    assert params == ("S", "P1") * 2
-    assert "WHERE quantity <> 0" in sql.partition(") AS latest_positions")[2]
+    assert params == ("P1",) * 2
 
 
-# --- served-book resolution in fetch_detail_rows -----------------------------
+# --- served-book resolution in fetch_portfolio_rows -----------------------------
 
 
 @pytest.fixture(autouse=True)
@@ -153,14 +138,14 @@ def _db(books_with_positions, has_column=True):
         if "FROM trading.live_results" in sql:
             return [{"date": date(2026, 10, 7)}]
         if sql.startswith("SELECT 1 FROM trading.positions"):
-            return [{"?column?": 1}] if params[2] in books_with_positions else []
-        if "FROM trading.positions" in sql and "max(date)" in sql:
-            book = params[2] if has_column else "system"
+            return [{"?column?": 1}] if params[1] in books_with_positions else []
+        if "FROM trading.positions" in sql and "GROUP BY symbol" in sql:
+            book = params[1] if has_column else "system"
             if book in books_with_positions:
                 return [{"symbol": f"{book}-SYM", "quantity": 1}]
             return []
         if "FROM trading.equity_curve" in sql and "portfolio_type = %s" in sql:
-            book = params[2]
+            book = params[1]
             return [{"timestamp": book, "equity": 1}] if book in books_with_positions else []
         return []
 
@@ -177,7 +162,7 @@ def _book_params(cursor, needle):
 
 def test_default_qt_falls_back_to_system_when_qt_has_no_rows():
     cursor = RecordingCursor(_db({"system"}))
-    rows = _repo(cursor).fetch_detail_rows("S", "P1", book="qt", allow_fallback=True)
+    rows = _repo(cursor).fetch_portfolio_rows("P1", book="qt", allow_fallback=True)
 
     assert rows.book == "system"
     assert rows.fell_back is True
@@ -188,7 +173,7 @@ def test_default_qt_falls_back_to_system_when_qt_has_no_rows():
 
 def test_default_qt_is_served_when_qt_rows_exist():
     cursor = RecordingCursor(_db({"system", "qt"}))
-    rows = _repo(cursor).fetch_detail_rows("S", "P1", book="qt", allow_fallback=True)
+    rows = _repo(cursor).fetch_portfolio_rows("P1", book="qt", allow_fallback=True)
 
     assert (rows.book, rows.fell_back) == ("qt", False)
     assert [p["symbol"] for p in rows.positions] == ["qt-SYM"]
@@ -199,16 +184,17 @@ def test_default_qt_is_served_when_qt_rows_exist():
 
 def test_explicit_qt_never_falls_back():
     cursor = RecordingCursor(_db({"system"}))
-    rows = _repo(cursor).fetch_detail_rows("S", "P1", book="qt", allow_fallback=False)
+    rows = _repo(cursor).fetch_portfolio_rows("P1", book="qt", allow_fallback=False)
 
-    assert (rows.book, rows.fell_back) == ("qt", False)
+    # D-37: a named book with no rows is reported missing, never served as another book.
+    assert (rows.book, rows.fell_back, rows.book_missing) == ("qt", False, True)
     assert rows.positions == []
     assert rows.equity_curve == []
 
 
 def test_unmigrated_db_default_serves_system_as_fallback():
     cursor = RecordingCursor(_db({"system"}, has_column=False))
-    rows = _repo(cursor).fetch_detail_rows("S", "P1", book="qt", allow_fallback=True)
+    rows = _repo(cursor).fetch_portfolio_rows("P1", book="qt", allow_fallback=True)
 
     assert (rows.book, rows.fell_back) == ("system", True)
     assert [p["symbol"] for p in rows.positions] == ["system-SYM"]
@@ -258,8 +244,8 @@ class FakeReader:
         self.fell_back = fell_back
         self.calls = []
 
-    def fetch_detail_rows(self, strategy_type, portfolio_id, book, allow_fallback):
-        self.calls.append((strategy_type, portfolio_id, book, allow_fallback))
+    def fetch_portfolio_rows(self, portfolio_id, book, allow_fallback):
+        self.calls.append((portfolio_id, book, allow_fallback))
         return PortfolioDetailRows(
             latest=LATEST,
             equity_curve=[],
@@ -276,7 +262,7 @@ def test_use_case_defaults_to_qt_with_fallback_and_reports_served_book():
     reader = FakeReader("system", True)
     detail = GetStrategyDetail(FakeRegistry(), reader).execute("trendfollowing")
 
-    assert reader.calls == [("LIVE_TREND_FOLLOWING", "P1", "qt", True)]
+    assert reader.calls == [("P1", "qt", True)]
     assert detail["book"] == "system"
     assert detail["fellBack"] is True
     # Existing fields are untouched.
@@ -287,7 +273,7 @@ def test_use_case_defaults_to_qt_with_fallback_and_reports_served_book():
 def test_use_case_explicit_book_disables_fallback():
     reader = FakeReader("qt_proposal", False)
     detail = GetStrategyDetail(FakeRegistry(), reader).execute("trendfollowing", book="qt_proposal")
-    assert reader.calls == [("LIVE_TREND_FOLLOWING", "P1", "qt_proposal", False)]
+    assert reader.calls == [("P1", "qt_proposal", False)]
     assert (detail["book"], detail["fellBack"]) == ("qt_proposal", False)
 
 
@@ -338,11 +324,11 @@ def test_http_default_request_reports_fallback(http):
     assert response.status_code == 200
     data = response.get_json()
     assert (data["book"], data["fellBack"]) == ("system", True)
-    assert reader.calls == [("LIVE_TREND_FOLLOWING", "P1", "qt", True)]
+    assert reader.calls == [("P1", "qt", True)]
 
 
 def test_http_explicit_book_is_passed_without_fallback(http):
     client, reader = http
     response = client.get("/portfolio/strategy/trendfollowing?book=system")
     assert response.status_code == 200
-    assert reader.calls == [("LIVE_TREND_FOLLOWING", "P1", "system", False)]
+    assert reader.calls == [("P1", "system", False)]

@@ -14,6 +14,7 @@ its column in the same PR or straight after. A blank cell means "not recorded", 
 | 005 | `005_investor_portfolio_links.sql` | `investor.portfolio_links`: the portfolio and book (QT or model) each investor follows (D-25, decision 13), with an append-only log | `005_investor_portfolio_links_rollback.sql` (every investor back to the QT book) | |
 | 006 | `006_report_queue.sql` | `reports.report_queue`: the queue of the retired AlgoLens report worker (the book e-mail is the engine's); nothing reads it, the rollback drops it | `006_report_queue_rollback.sql` (destructive: unsent reports are lost) | |
 | 007 | `007_book_sent_grant.sql` | Lets `svc_algolens` set `trading.live_run_metadata.sent_at` (the retired report worker). Take it back on every database it was applied to | `007_book_sent_grant_rollback.sql` (revokes the grant; the engine alone writes `sent_at`) | |
+| 008 | `008_one_registry_entry_per_book.sql` | One registry entry per book (issue #59): retires `inc_tf_base` (BASE_PORTFOLIO's older entry, kept as history and logged), a unique index on `portfolio_id` for entries not retired, `strategy_type` documented as display only. Refuses to run while another book has two entries | `008_one_registry_entry_per_book_rollback.sql` (drops the index, returns `inc_tf_base` to its logged state) | |
 
 The QT tables AlgoLens reads and writes (`trading.position_overrides`, `trading.strategy_config`,
 the `portfolio_group` and `desk_editable` registry columns) are trade-ngin's migrations 021 to 029.

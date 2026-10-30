@@ -1,7 +1,6 @@
 """Compatibility facade for the portfolio application/infrastructure layers."""
 
 import logging
-from typing import Any
 
 from research_api.application.portfolio.use_cases import (
     build_strategy_detail,
@@ -31,57 +30,25 @@ def _repository():
     return PostgresPortfolioRepository()
 
 
-def _fetch_latest_live_results(cursor, strategy_type, portfolio_id):
-    return _repository()._fetch_latest_live_results(cursor, strategy_type, portfolio_id)
-
-
-def _fetch_summary_row(cursor, strategy_type, portfolio_id):
-    return _repository()._fetch_summary_row(cursor, strategy_type, portfolio_id)
-
-
 def _has_portfolio_type(cursor):
     return _repository()._has_portfolio_type(cursor)
 
 
-def _fetch_equity_curve(cursor, strategy_type, portfolio_id, portfolio_type=None):
-    return _repository()._fetch_equity_curve(cursor, strategy_type, portfolio_id, portfolio_type)
-
-
-def _fetch_equity_by_stream(cursor, strategy_type, portfolio_id):
-    by_stream: dict[str, Any] = {}
-    if not _has_portfolio_type(cursor):
-        return by_stream
-
-    for stream in PORTFOLIO_STREAMS:
-        rows = _fetch_equity_curve(cursor, strategy_type, portfolio_id, stream)
-        if rows:
-            by_stream[stream] = _build_historical_data(rows)
-    return by_stream
-
-
-def _fetch_current_positions(cursor, strategy_type, portfolio_id, book):
-    return _repository()._fetch_current_positions(cursor, strategy_type, portfolio_id, book)
-
-
-def _fetch_recent_executions(cursor, strategy_type, portfolio_id):
-    return _repository()._fetch_recent_executions(cursor, strategy_type, portfolio_id)
-
-
-def _fetch_yesterday_positions(cursor, strategy_type, portfolio_id, book):
-    return _repository()._fetch_yesterday_positions(cursor, strategy_type, portfolio_id, book)
+# Issue #59: the strategy-type readers this facade once wrapped are gone; a book is read by
+# its portfolio id only.
 
 
 def get_strategy_detail(cfg):
-    rows = _repository().fetch_detail_rows(cfg["strategy_type"], cfg["portfolio_id"])
+    rows = _repository().fetch_portfolio_rows(cfg["portfolio_id"])
     detail = build_strategy_detail(cfg, rows)
     if detail is None:
-        logger.warning("[PORTFOLIO] No live_results for %s", cfg["strategy_type"])
+        logger.warning("[PORTFOLIO] No live_results for %s", cfg["portfolio_id"])
     return detail
 
 
 def get_strategy_summary(cfg):
-    latest = _repository().fetch_summary_row(cfg["strategy_type"], cfg["portfolio_id"])
+    latest = _repository().fetch_summary_row(cfg["portfolio_id"])
     summary = build_strategy_summary(cfg, latest)
     if summary is None:
-        logger.warning("[PORTFOLIO] No summary live_results for %s", cfg["strategy_type"])
+        logger.warning("[PORTFOLIO] No summary live_results for %s", cfg["portfolio_id"])
     return summary

@@ -15,31 +15,30 @@ portfolios. It does not error -- it just renders a picture of nothing real. That
 is exactly how the portfolio_id blending (AlgoGators/AlgoLens#29) went unnoticed,
 and it would arrive silently the moment the migration ran.
 
-`_fetch_equity_curve` takes portfolio_type as an OPTIONAL argument so it still
-works against an unmigrated database, which means the SQL alone cannot be
-checked. This asserts the call sites pass it.
+`_portfolio_equity_curve` drops the book predicate only on an unmigrated
+database (has_portfolio_type False), which means the SQL alone cannot be
+checked. This asserts every call site passes the book and the probe result.
 """
 
 import ast
 import os
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SERVICE = os.path.join(BACKEND_DIR, "services", "portfolio_service.py")
+REPOSITORY = os.path.join(
+    BACKEND_DIR, "src", "research_api", "infrastructure", "portfolio", "repositories.py"
+)
 
-# cursor, strategy_type, portfolio_id, portfolio_type
+# cursor, portfolio_id, book, has_portfolio_type
 EXPECTED_ARGC = 4
 
 
 def _call_sites():
-    """Every call to _fetch_equity_curve, as (lineno, arg_count) pairs.
+    """Every call to _portfolio_equity_curve, as (lineno, arg_count) pairs.
 
     Parsed with ast rather than regex so nested parentheses and multi-line calls
     cannot fool it.
     """
-    if not os.path.exists(SERVICE):
-        return None  # service layer not present on this branch
-
-    with open(SERVICE, encoding="utf-8") as fh:
+    with open(REPOSITORY, encoding="utf-8") as fh:
         tree = ast.parse(fh.read())
 
     sites = []
@@ -48,32 +47,24 @@ def _call_sites():
             continue
         func = node.func
         name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-        if name == "_fetch_equity_curve":
+        if name == "_portfolio_equity_curve":
             sites.append((node.lineno, len(node.args) + len(node.keywords)))
     return sites
 
 
 def test_there_are_call_sites_to_check():
     """Guard the guard: a scan that finds nothing must not silently pass."""
-    sites = _call_sites()
-    if sites is None:
-        return
-    assert sites, (
-        "No calls to _fetch_equity_curve were found. Either it was renamed or the "
+    assert _call_sites(), (
+        "No calls to _portfolio_equity_curve were found. Either it was renamed or the "
         "scan is broken -- do not treat this as a pass."
     )
 
 
 def test_every_equity_curve_read_names_its_stream():
-    sites = _call_sites()
-    if sites is None:
-        return
-
-    unscoped = [lineno for lineno, argc in sites if argc < EXPECTED_ARGC]
+    unscoped = [lineno for lineno, argc in _call_sites() if argc < EXPECTED_ARGC]
 
     assert not unscoped, (
-        "_fetch_equity_curve is called without a portfolio_type at "
-        "portfolio_service.py line(s) "
+        "_portfolio_equity_curve is called without a book at repositories.py line(s) "
         + ", ".join(str(n) for n in unscoped)
         + ". Those reads will blend qt, system and benchmark into a single line."
     )
