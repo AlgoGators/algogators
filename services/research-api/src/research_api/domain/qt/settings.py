@@ -339,7 +339,8 @@ def check_value(path: list[str], new: Any, old: Any) -> Any:
             raise SettingsRuleError(
                 f"{name} runs as null, so only a plain value (number, text, true/false) can be set"
             )
-        logger.info("[SETTINGS] %s runs as null; setting it to a %s", name, value_type(new))
+        safe_name = name.replace("\r", "\\r").replace("\n", "\\n")
+        logger.info("[SETTINGS] %s runs as null; setting it to a %s", safe_name, value_type(new))
     elif not _types_match(new, old):
         raise SettingsRuleError(f"{name} must stay a {value_type(old)} (got {value_type(new)})")
     if _is_int(old) and value_type(new) == "number" and not _is_int(new):

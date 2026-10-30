@@ -243,7 +243,7 @@ int main(int argc, char* argv[]) {
         // Get current date for daily processing (or use override date)
         auto now = use_override_date ? target_date : std::chrono::system_clock::now();
         auto now_time_t = std::chrono::system_clock::to_time_t(now);
-        std::tm* now_tm = std::localtime(&now_time_t);
+        std::tm* now_tm = trade_ngin::core::safe_localtime(&now_time_t);
 
         // Set start date based on configured historical window
         auto start_date = now - std::chrono::hours(24 * app_config.live.historical_days);
@@ -738,7 +738,7 @@ int main(int argc, char* argv[]) {
         HolidayChecker holiday_checker("include/trade_ngin/core/holidays.json");
         auto yesterday_for_check = now - std::chrono::hours(24);
         auto yesterday_time_t_check = std::chrono::system_clock::to_time_t(yesterday_for_check);
-        std::tm yesterday_tm_check = *std::gmtime(&yesterday_time_t_check);
+        std::tm yesterday_tm_check = *trade_ngin::core::safe_gmtime(&yesterday_time_t_check);
         std::ostringstream yesterday_oss_check;
         yesterday_oss_check << std::put_time(&yesterday_tm_check, "%Y-%m-%d");
         std::string yesterday_date_str_check = yesterday_oss_check.str();
@@ -1835,7 +1835,7 @@ int main(int argc, char* argv[]) {
 
             std::stringstream yesterday_date_ss;
             auto yesterday_time_t = std::chrono::system_clock::to_time_t(previous_date);
-            yesterday_date_ss << std::put_time(std::gmtime(&yesterday_time_t), "%Y-%m-%d");
+            yesterday_date_ss << std::put_time(trade_ngin::core::safe_gmtime(&yesterday_time_t), "%Y-%m-%d");
 
             // Use LiveDataLoader to get yesterday's metrics
             try {
@@ -2174,7 +2174,7 @@ int main(int argc, char* argv[]) {
                             auto prev_time_t = std::chrono::system_clock::to_time_t(previous_date);
                             std::stringstream prev_ts_ss;
                             prev_ts_ss
-                                << std::put_time(std::gmtime(&prev_time_t), "%Y-%m-%d %H:%M:%S");
+                                << std::put_time(trade_ngin::core::safe_gmtime(&prev_time_t), "%Y-%m-%d %H:%M:%S");
                             INFO("DEBUG: previous_date timestamp for equity curve update: " +
                                  prev_ts_ss.str());
 
@@ -2515,7 +2515,7 @@ int main(int argc, char* argv[]) {
             // Format today's date for SQL query
             auto now_time_t_for_query = std::chrono::system_clock::to_time_t(now);
             std::stringstream now_date_ss;
-            now_date_ss << std::put_time(std::gmtime(&now_time_t_for_query), "%Y-%m-%d");
+            now_date_ss << std::put_time(trade_ngin::core::safe_gmtime(&now_time_t_for_query), "%Y-%m-%d");
 
             // Call PostgreSQL function to calculate trading days
             std::string trading_days_query = "SELECT trading.get_trading_days('" +
@@ -2681,7 +2681,7 @@ int main(int argc, char* argv[]) {
             // Create SQL insert for live_results table with correct schema
             std::stringstream date_ss;
             auto time_t = std::chrono::system_clock::to_time_t(current_date);
-            date_ss << std::put_time(std::gmtime(&time_t), "%Y-%m-%d %H:%M:%S");
+            date_ss << std::put_time(trade_ngin::core::safe_gmtime(&time_t), "%Y-%m-%d %H:%M:%S");
 
             // Use calculated metrics from position analysis
             double portfolio_var = 0.0;
@@ -2984,7 +2984,7 @@ int main(int argc, char* argv[]) {
                     // Load finalized positions from database for email
                     std::string yesterday_date_for_email;
                     std::ostringstream yss_email;
-                    yss_email << std::put_time(std::gmtime(&yesterday_time_t_email), "%Y-%m-%d");
+                    yss_email << std::put_time(trade_ngin::core::safe_gmtime(&yesterday_time_t_email), "%Y-%m-%d");
                     yesterday_date_for_email = yss_email.str();
 
                     INFO("Loading yesterday's finalized positions for email: " +

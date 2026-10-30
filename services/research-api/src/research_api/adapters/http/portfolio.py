@@ -89,6 +89,22 @@ def _incubation_error_status(exc):
     return 404 if "not found" in str(exc).lower() else 400
 
 
+def _public_incubation_error_message(exc: IncubationError) -> str:
+    """Expose known lifecycle errors without returning database exception text."""
+    message = str(exc).lower()
+    if "not found" in message:
+        return "Strategy not found"
+    if "already incubating" in message:
+        return "Strategy is already incubating"
+    if "not currently incubating" in message or "not incubating" in message:
+        return "Strategy is not incubating"
+    if "mock_capital must be positive" in message:
+        return "mock_capital must be positive"
+    if "reason must be non-empty" in message:
+        return "reason must be non-empty"
+    return "Unable to complete incubation request"
+
+
 @portfolio_bp.route("/strategy/<strategy_id>", methods=["GET"])
 @jwt_required()
 @requires_screen(*PORTFOLIO_SCREENS)
@@ -107,8 +123,8 @@ def get_strategy(strategy_id):
             elapsed_ms,
         )
         return jsonify(serialize_strategy_detail(strategy)), 200
-    except InvalidBookError as exc:
-        return jsonify({"error": str(exc)}), 400
+    except InvalidBookError:
+        return jsonify({"error": "Invalid book"}), 400
     except StrategyNotFoundError:
         return jsonify({"error": "Strategy not found"}), 404
     except StrategyDataNotFoundError:
@@ -170,12 +186,14 @@ def get_portfolio(portfolio_id):
             portfolio_id, book=request.args.get("book")
         )
         return jsonify(serialize_strategy_detail(detail)), 200
-    except InvalidBookError as exc:
-        return jsonify({"error": str(exc)}), 400
+    except InvalidBookError:
+        return jsonify({"error": "Invalid book"}), 400
     except PortfolioNotFoundError:
         return jsonify({"error": "Portfolio not found"}), 404
     except BookNotWrittenError as exc:
-        return jsonify({"error": str(exc), "missingBook": exc.book}), 404
+        return jsonify(
+            {"error": "Portfolio has no rows in the requested book", "missingBook": exc.book}
+        ), 404
     except StrategyDataNotFoundError:
         return jsonify({"error": "No data found for portfolio"}), 404
     except Exception as exc:
@@ -248,7 +266,9 @@ def start_strategy_incubation(strategy_id):
         current_app.logger.info("Started incubation for strategy %s", strategy_id)
         return jsonify({"message": "Incubation started"}), 201
     except IncubationError as exc:
-        return jsonify({"error": str(exc)}), _incubation_error_status(exc)
+        return jsonify({"error": _public_incubation_error_message(exc)}), _incubation_error_status(
+            exc
+        )
     except Exception as exc:
         current_app.logger.error(
             "Failed to start incubation for %s: %s",
@@ -281,7 +301,9 @@ def promote_strategy_to_live(strategy_id):
         current_app.logger.info("Promoted strategy %s to live", strategy_id)
         return jsonify({"message": "Strategy promoted to live"}), 200
     except IncubationError as exc:
-        return jsonify({"error": str(exc)}), _incubation_error_status(exc)
+        return jsonify({"error": _public_incubation_error_message(exc)}), _incubation_error_status(
+            exc
+        )
     except Exception as exc:
         current_app.logger.error("Failed to promote %s: %s", strategy_id, str(exc), exc_info=True)
         return jsonify({"error": "Failed to promote strategy"}), 500
@@ -309,7 +331,9 @@ def retire_strategy(strategy_id):
         current_app.logger.info("Retired strategy %s", strategy_id)
         return jsonify({"message": "Strategy retired"}), 200
     except IncubationError as exc:
-        return jsonify({"error": str(exc)}), _incubation_error_status(exc)
+        return jsonify({"error": _public_incubation_error_message(exc)}), _incubation_error_status(
+            exc
+        )
     except Exception as exc:
         current_app.logger.error("Failed to retire %s: %s", strategy_id, str(exc), exc_info=True)
         return jsonify({"error": "Failed to retire strategy"}), 500
