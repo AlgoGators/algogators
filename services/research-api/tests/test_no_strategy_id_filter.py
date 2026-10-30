@@ -6,8 +6,11 @@ live_results.config's strategy_type) is a description of the book and is never m
 on. A filter on it hides a book whose id is relabelled and splits a book whose sleeves
 changed, without an error.
 
-This scans every string literal in the backend source (SQL included, however it is
-built), so it needs no database.
+This scans the backend source rather than executing SQL, so it needs no database. It
+reads every string that is SQL or a piece of one: a literal or f-string with a SQL
+keyword, and a filter fragment built on its own (`"AND ... = %s"`, spliced into a query
+as `{book_filter}` is). An f-string is read whole, its placeholders as `{}`, so a filter
+after a placeholder is still seen.
 """
 
 import ast
@@ -16,15 +19,23 @@ import re
 
 SRC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 
-# A predicate on the strategy id: `strategy_id = %s`, `strategy_id IN (...)`,
-# `strategy_id = ANY(...)`, `strategy_id <> ...`; or on the stored strategy_type,
-# `config::jsonb->>'strategy_type'`, `strategy_type = %s`.
+_ID = r"""(?:\b|")strategy_id"?"""
+_TYPE = r"""(?:\b|")strategy_type"?"""
+_COMPARE = r"\s*(?:=|<>|!=|\bIN\b|\bLIKE\b|\bIS\b)"
+# A predicate on the strategy id or on the stored strategy_type, however it is spelled.
 FORBIDDEN = (
-    re.compile(r"\bstrategy_id\s*(?:=|<>|!=|\bIN\b|\bLIKE\b)", re.I),
-    re.compile(r"->>\s*'strategy_type'", re.I),
-    re.compile(r"\bstrategy_type\s*(?:=|<>|!=|\bIN\b|\bLIKE\b)", re.I),
+    re.compile(_ID + _COMPARE, re.I),
+    re.compile(_TYPE + _COMPARE, re.I),
+    re.compile(r"->>?\s*'strategy_type'", re.I),
+    re.compile(r"""@>\s*'\{\s*"strategy_type\"""", re.I),
+)
+# Not a filter: an upsert's `col = EXCLUDED.col`, and an assignment in an UPDATE's SET list.
+ALLOWED = (
+    re.compile(r"strategy_(?:id|type)\s*=\s*EXCLUDED\.", re.I),
+    re.compile(r"\bSET\s+(?:[\w\"]+\s*=\s*[^,]+,\s*)*strategy_(?:id|type)\s*=", re.I),
 )
 SQL_HINT = re.compile(r"\b(?:SELECT|UPDATE|DELETE|WHERE)\b", re.I)
+FRAGMENT = re.compile(r"^\s*(?:AND|OR)\b", re.I)
 
 
 def _python_sources():
@@ -35,36 +46,74 @@ def _python_sources():
                 yield os.path.join(root, fname)
 
 
-def _sql_literals():
-    """(path, line, text) for every string literal that reads like SQL."""
+def _text(node):
+    """A string literal's text, or an f-string's with each placeholder as `{}`."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value if isinstance(part, ast.Constant) else "{}" for part in node.values
+        )
+    return None
+
+
+def _sql_strings():
+    """(path, line, text) for every string that is SQL or a filter fragment of SQL."""
     for path in _python_sources():
         with open(path, encoding="utf-8") as fh:
             tree = ast.parse(fh.read())
         for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Constant)
-                and isinstance(node.value, str)
-                and SQL_HINT.search(node.value)
-            ):
-                yield path, node.lineno, node.value
+            text = _text(node)
+            if text and (SQL_HINT.search(text) or FRAGMENT.search(text)):
+                yield path, node.lineno, text
+
+
+def _offences(text):
+    found = []
+    for pattern in FORBIDDEN:
+        for match in pattern.finditer(text):
+            context = text[max(0, match.start() - 200) : match.end() + 40]
+            if not any(allowed.search(context) for allowed in ALLOWED):
+                found.append(match.group(0))
+    return found
 
 
 def test_there_are_queries_to_check():
     """Guard the guard: a scan that finds no SQL must not silently pass."""
-    found = [text for _, _, text in _sql_literals() if re.search(r"FROM trading\.positions", text)]
+    found = [text for _, _, text in _sql_strings() if "FROM trading.positions" in text]
     assert found, "No queries on trading.positions were found; the scan is broken."
 
 
 def test_no_query_filters_on_the_strategy_id_or_strategy_type():
     offenders = []
-    for path, line, text in _sql_literals():
-        for pattern in FORBIDDEN:
-            match = pattern.search(text)
-            if match:
-                rel = os.path.relpath(path, SRC_DIR)
-                offenders.append(f"{rel}:{line}: {match.group(0)!r}")
+    for path, line, text in _sql_strings():
+        for found in _offences(text):
+            offenders.append(f"{os.path.relpath(path, SRC_DIR)}:{line}: {found!r}")
     assert not offenders, (
         "These queries find a book by the strategy id or strategy_type; read it by "
         "portfolio_id (and strategy_name for a sleeve) instead (issue #59):\n"
         + "\n".join(offenders)
     )
+
+
+def test_the_scan_sees_the_ways_a_filter_is_written():
+    caught = [
+        "SELECT * FROM trading.positions WHERE strategy_id = %s",
+        "AND strategy_id = %s",  # a fragment spliced in like {book_filter}
+        "SELECT 1 FROM t WHERE portfolio_id = %s {} AND strategy_id = %s",  # after a placeholder
+        'SELECT 1 FROM t WHERE "strategy_id" = %s',
+        "SELECT 1 FROM trading.live_results WHERE config::jsonb->>'strategy_type' = %s",
+        "SELECT 1 FROM trading.live_results WHERE config -> 'strategy_type' = %s",
+        """SELECT 1 FROM trading.live_results WHERE config @> '{"strategy_type": "X"}'""",
+        "SELECT 1 FROM t WHERE strategy_type IN (%s)",
+    ]
+    for sql in caught:
+        assert _offences(sql), sql
+    passed = [
+        "INSERT INTO t (strategy_id, x) VALUES (%s, %s) "
+        "ON CONFLICT (k) DO UPDATE SET strategy_id = EXCLUDED.strategy_id",
+        "UPDATE trading.positions SET quantity = %s, strategy_id = %s WHERE portfolio_id = %s",
+        "SELECT symbol, strategy_id, strategy_name FROM trading.positions WHERE portfolio_id = %s",
+    ]
+    for sql in passed:
+        assert not _offences(sql), sql
