@@ -29,11 +29,10 @@ FORBIDDEN = (
     re.compile(r"->>?\s*'strategy_type'", re.I),
     re.compile(r"""@>\s*'\{\s*"strategy_type\"""", re.I),
 )
-# Not a filter: an upsert's `col = EXCLUDED.col`, and an assignment in an UPDATE's SET list.
-ALLOWED = (
-    re.compile(r"strategy_(?:id|type)\s*=\s*EXCLUDED\.", re.I),
-    re.compile(r"\bSET\s+(?:[\w\"]+\s*=\s*[^,]+,\s*)*strategy_(?:id|type)\s*=", re.I),
-)
+# Not a filter: an upsert's `col = EXCLUDED.col`, and an assignment in an UPDATE's SET list
+# (the nearest clause keyword before it is SET).
+EXCLUDED_ASSIGNMENT = re.compile(r"strategy_(?:id|type)\s*=\s*EXCLUDED\.", re.I)
+CLAUSE = re.compile(r"\b(SET|WHERE|AND|OR|ON|HAVING|WHEN)\b", re.I)
 SQL_HINT = re.compile(r"\b(?:SELECT|UPDATE|DELETE|WHERE)\b", re.I)
 FRAGMENT = re.compile(r"^\s*(?:AND|OR)\b", re.I)
 
@@ -72,9 +71,12 @@ def _offences(text):
     found = []
     for pattern in FORBIDDEN:
         for match in pattern.finditer(text):
-            context = text[max(0, match.start() - 200) : match.end() + 40]
-            if not any(allowed.search(context) for allowed in ALLOWED):
-                found.append(match.group(0))
+            if EXCLUDED_ASSIGNMENT.match(text, match.start()):
+                continue
+            clauses = CLAUSE.findall(text, 0, match.start())
+            if clauses and clauses[-1].upper() == "SET":
+                continue
+            found.append(match.group(0))
     return found
 
 
@@ -110,10 +112,15 @@ def test_the_scan_sees_the_ways_a_filter_is_written():
     for sql in caught:
         assert _offences(sql), sql
     passed = [
-        "INSERT INTO t (strategy_id, x) VALUES (%s, %s) "
-        "ON CONFLICT (k) DO UPDATE SET strategy_id = EXCLUDED.strategy_id",
+        (
+            "INSERT INTO t (strategy_id, x) VALUES (%s, %s) "
+            + "ON CONFLICT (k) DO UPDATE SET strategy_id = EXCLUDED.strategy_id"
+        ),
         "UPDATE trading.positions SET quantity = %s, strategy_id = %s WHERE portfolio_id = %s",
         "SELECT symbol, strategy_id, strategy_name FROM trading.positions WHERE portfolio_id = %s",
     ]
+    passed.append("UPDATE t SET strategy_id = %s WHERE portfolio_id = %s")
+    caught_after_set = "UPDATE t SET quantity = %s WHERE strategy_id = %s"
+    assert _offences(caught_after_set), caught_after_set
     for sql in passed:
         assert not _offences(sql), sql
