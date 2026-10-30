@@ -63,6 +63,7 @@ CONTRACT_ROOTS: tuple[str, ...] = (
     "M2K",
     "MBT",
     "MES",
+    "MGC",
     "MNQ",
     "MYM",
     "NG",
@@ -71,6 +72,7 @@ CONTRACT_ROOTS: tuple[str, ...] = (
     "RB",
     "RTY",
     "SI",
+    "SIL",
     "UB",
     "YM",
     "ZC",
@@ -86,8 +88,16 @@ CONTRACT_ROOTS: tuple[str, ...] = (
 
 
 # A per-contract root trades on the calendar of the contract-CSV row that shares its
-# exchange hours: the micros and their full-size contracts are one CSV row each.
-CONTRACT_CSV_SYMBOL = {"MES": "ES", "MNQ": "NQ", "MYM": "YM", "M2K": "RTY"}
+# exchange hours: the micros and their full-size contracts are one CSV row each. Micro gold
+# and micro silver (MGC, SIL) trade COMEX's hours, as GC and SI.
+CONTRACT_CSV_SYMBOL = {
+    "MES": "ES",
+    "MNQ": "NQ",
+    "MYM": "YM",
+    "M2K": "RTY",
+    "MGC": "GC",
+    "SIL": "SI",
+}
 
 
 def expected_contract_roots(
