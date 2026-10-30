@@ -40,7 +40,9 @@ HEALTH_SLEEP="${HEALTH_SLEEP:-5}"
 PREFLIGHT_TIMEOUT="${PREFLIGHT_TIMEOUT:-60}"
 CURRENT_FILE="$STATE_DIR/algolens.current-images"
 PREVIOUS_FILE="$STATE_DIR/algolens.previous-images"
-# AlgoLens' own containers, stopped before the new ones start.
+# AlgoLens' own containers, stopped before the new ones start. algolens-report-worker is gone
+# from the stack (the book e-mail is the engine's); it is listed so a box that still runs it stops
+# it, and `compose up --remove-orphans` removes it.
 CONTAINERS=(algolens-edge algolens-frontend algolens-report-worker algolens-backend)
 
 log() { echo "[$(date -Is)] $*"; }
