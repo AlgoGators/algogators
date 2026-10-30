@@ -123,22 +123,24 @@ class TestDBModels(unittest.TestCase):
             col["name"]: col["type"]
             for col in inspector.get_columns("ohlcv_1d", schema="futures_data")
         }
-        expected_columns: dict[str, str] = {
-            "time": "TIMESTAMP",
-            "symbol": "TEXT",
-            "open": "DOUBLE_PRECISION",
-            "high": "DOUBLE_PRECISION",
-            "low": "DOUBLE_PRECISION",
-            "close": "DOUBLE_PRECISION",
-            "volume": "INTEGER",
+        # symbol is TEXT where the table was made by SQL, and VARCHAR where
+        # create_all made it from the model's String column.
+        expected_columns: dict[str, set[str]] = {
+            "time": {"TIMESTAMP"},
+            "symbol": {"TEXT", "VARCHAR"},
+            "open": {"DOUBLE PRECISION"},
+            "high": {"DOUBLE PRECISION"},
+            "low": {"DOUBLE PRECISION"},
+            "close": {"DOUBLE PRECISION"},
+            "volume": {"INTEGER"},
         }
 
-        for column, col_type in expected_columns.items():
+        for column, col_types in expected_columns.items():
             self.assertIn(column, columns, f"Column `{column}` is missing.")
-            self.assertEqual(str(columns[column]), col_type, f"Type mismatch for `{column}`.")
+            self.assertIn(str(columns[column]), col_types, f"Type mismatch for `{column}`.")
 
-    @patch("data.modules.db_models.Session.add")
-    @patch("data.modules.db_models.Session.commit")
+    @patch("data_ngin.infrastructure.db_models.Session.add")
+    @patch("data_ngin.infrastructure.db_models.Session.commit")
     def test_insert_ohlcv(self, mock_commit: MagicMock, mock_add: MagicMock) -> None:
         """
         Test inserting a record into the `ohlcv_1d` table.
@@ -158,7 +160,7 @@ class TestDBModels(unittest.TestCase):
         mock_add.assert_called_once_with(record)
         mock_commit.assert_called_once()
 
-    @patch("data.modules.db_models.Session.commit")
+    @patch("data_ngin.infrastructure.db_models.Session.commit")
     def test_insert_duplicate_ohlcv(self, mock_commit: MagicMock) -> None:
         """
         Test inserting duplicate records and expecting an IntegrityError.
@@ -182,7 +184,7 @@ class TestDBModels(unittest.TestCase):
         ):
             self.session.commit()
 
-    @patch("data.modules.db_models.Session.query")
+    @patch("data_ngin.infrastructure.db_models.Session.query")
     def test_query_ohlcv(self, mock_query: MagicMock) -> None:
         """
         Test querying the `ohlcv_1d` table.
@@ -203,8 +205,8 @@ class TestDBModels(unittest.TestCase):
         self.assertIsNotNone(result, "The queried record was not found.")
         self.assertEqual(result.close, 200.5, "The `close` field did not match the inserted value.")
 
-    @patch("data.modules.db_models.Session.delete")
-    @patch("data.modules.db_models.Session.commit")
+    @patch("data_ngin.infrastructure.db_models.Session.delete")
+    @patch("data_ngin.infrastructure.db_models.Session.commit")
     def test_delete_ohlcv(self, mock_commit: MagicMock, mock_delete: MagicMock) -> None:
         """
         Test deleting a record from the `ohlcv_1d` table.
