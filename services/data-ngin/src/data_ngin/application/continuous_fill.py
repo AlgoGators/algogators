@@ -44,7 +44,7 @@ from bisect import bisect_left
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -193,8 +193,7 @@ def find_fills(
             if r.instrument_id is not None and (r.instrument_id, r.day) in by_key
         }
         candidates = sorted(
-            {d for root in roots_seen for d in by_root[root] if start <= d <= end}
-            - have
+            {d for root in roots_seen for d in by_root[root] if start <= d <= end} - have
         )
         for day in candidates:
             if day.isoweekday() == 6:
@@ -244,7 +243,7 @@ def find_fills(
 
 
 def _utc_midnight(day: date) -> datetime:
-    return datetime.combine(day, time.min, tzinfo=timezone.utc)
+    return datetime.combine(day, time.min, tzinfo=UTC)
 
 
 READ_VENDOR_ROWS = """
