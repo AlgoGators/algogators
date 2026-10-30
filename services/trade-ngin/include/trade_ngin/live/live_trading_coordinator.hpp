@@ -27,6 +27,12 @@ class InstrumentRegistry;
  */
 struct LiveTradingConfig {
     std::string strategy_id = "LIVE_TREND_FOLLOWING";
+    // Storage strategy_name. EMPTY means "same as strategy_id", which is what the
+    // futures runners have always relied on -- their rows are keyed
+    // (strategy_id, strategy_id, portfolio_id). Set it only when the read key uses a
+    // distinct name, as the equity runner does (reads EQUITY_MEAN_REVERSION, writes
+    // under LIVE_EQUITY_MEAN_REVERSION unless this is populated).
+    std::string strategy_name;
     std::string portfolio_id = "BASE_PORTFOLIO";
     std::string schema = "trading";
     double initial_capital = 500000.0;
@@ -91,7 +97,6 @@ private:
     std::unique_ptr<LivePnLManager> pnl_manager_;
 
     // Current state
-    TradingMetrics current_metrics_;
     bool is_initialized_ = false;
 
 public:
@@ -170,46 +175,6 @@ public:
     Result<void> initialize();
 
     /**
-     * @brief Load previous day's data for calculations
-     * @param date Current date
-     * @return Result with previous portfolio value and metrics
-     */
-    Result<std::pair<double, TradingMetrics>> load_previous_day_data(const Timestamp& date) const;
-
-    /**
-     * @brief Calculate all metrics for current day
-     * @param daily_pnl Daily PnL
-     * @param previous_portfolio_value Previous day's portfolio value
-     * @param current_portfolio_value Current portfolio value
-     * @param gross_notional Gross notional value
-     * @param margin_posted Margin posted
-     * @param trading_days Number of trading days
-     * @param daily_transaction_costs Daily transaction costs
-     * @return Result with calculated metrics
-     */
-    Result<TradingMetrics> calculate_daily_metrics(double daily_pnl,
-                                                   double previous_portfolio_value,
-                                                   double current_portfolio_value,
-                                                   double gross_notional, double margin_posted,
-                                                   int trading_days,
-                                                   double daily_transaction_costs = 0.0);
-
-    /**
-     * @brief Calculate metrics for previous day finalization
-     * @param realized_pnl Realized PnL for the day
-     * @param day_before_portfolio Previous day's portfolio value
-     * @param current_portfolio Current portfolio value
-     * @param gross_notional Gross notional value
-     * @param margin_posted Margin posted
-     * @param trading_days Number of trading days
-     * @param commissions Commissions
-     * @return Result with finalized metrics
-     */
-    Result<TradingMetrics> calculate_finalization_metrics(
-        double realized_pnl, double day_before_portfolio, double current_portfolio,
-        double gross_notional, double margin_posted, int trading_days, double commissions = 0.0);
-
-    /**
      * @brief Store all results to database
      * @param metrics Metrics to store
      * @param positions Positions to store
@@ -220,13 +185,6 @@ public:
                                const std::vector<Position>& positions, const Timestamp& date);
 
     /**
-     * @brief Get current metrics
-     */
-    const TradingMetrics& get_current_metrics() const {
-        return current_metrics_;
-    }
-
-    /**
      * @brief Check if coordinator is initialized
      */
     bool is_initialized() const {
@@ -235,8 +193,10 @@ public:
 
     // ========== Convenience Methods ==========
 
-    // Note: load_commissions_by_symbol was deleted - dead code wrapper around the
-    // deleted LiveDataLoader equivalent. See LiveDataLoader header for rationale.
+    // Note: this coordinator's load_commissions_by_symbol wrapper was deleted as dead code.
+    // LiveDataLoader::load_commissions_by_symbol itself was NOT deleted -- it is live and
+    // called by the equity runner every session (drift-D: the previous wording said "the
+    // deleted LiveDataLoader equivalent", which is false).
 
     /**
      * @brief Load positions for export
@@ -245,23 +205,12 @@ public:
      */
     Result<std::vector<Position>> load_positions_for_export(const Timestamp& date) const;
 
-    /**
-     * @brief Get trading days count
-     * @return Result with number of trading days
-     */
-    Result<int> get_trading_days_count() const;
-
 private:
     /**
      * @brief Validate database connection
      * @return Result indicating if connection is valid
      */
     Result<void> validate_connection() const;
-
-    /**
-     * @brief Convert CalculatedMetrics to TradingMetrics
-     */
-    TradingMetrics convert_calculated_metrics(const struct CalculatedMetrics& calc_metrics) const;
 };
 
 }  // namespace trade_ngin

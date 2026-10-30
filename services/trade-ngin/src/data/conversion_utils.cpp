@@ -1,8 +1,93 @@
 // src/data/conversion_utils.cpp
 #include "trade_ngin/data/conversion_utils.hpp"
+
+#include <cctype>
+#include <cstdint>
+#include <ctime>
+#include <stdexcept>
+#include <string>
+
 #include <arrow/type_traits.h>
 
+#include "trade_ngin/core/logger.hpp"
+
 namespace trade_ngin {
+
+namespace {
+
+// Parse "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS" (also accepting the 'T'
+// separator) as MICROSECONDS since the Unix epoch. UTC by construction --
+// timegm, never mktime, because a stored timestamptz is already a UTC instant
+// and mktime would re-interpret it in the host zone.
+//
+// Returns false on anything else, so a caller can distinguish "not a datetime"
+// from a datetime at the epoch.
+bool parse_ymd_hms_to_micros(const std::string& text, int64_t& out_micros) {
+    if (text.size() < 10) return false;
+    if (text[4] != '-' || text[7] != '-') return false;
+
+    auto digits = [&](std::size_t at, std::size_t n, int& out) -> bool {
+        if (at + n > text.size()) return false;
+        int v = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            const char c = text[at + i];
+            if (c < '0' || c > '9') return false;
+            v = v * 10 + (c - '0');
+        }
+        out = v;
+        return true;
+    };
+
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    if (!digits(0, 4, year) || !digits(5, 2, month) || !digits(8, 2, day)) return false;
+    if (month < 1 || month > 12 || day < 1 || day > 31) return false;
+
+    if (text.size() >= 19) {
+        const char sep = text[10];
+        if (sep != ' ' && sep != 'T') return false;
+        if (text[13] != ':' || text[16] != ':') return false;
+        if (!digits(11, 2, hour) || !digits(14, 2, minute) || !digits(17, 2, second)) {
+            return false;
+        }
+        if (hour > 23 || minute > 59 || second > 60) return false;
+    } else if (text.size() != 10) {
+        return false;  // a partial time is not a datetime
+    }
+
+    std::tm tm{};
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    tm.tm_sec = second;
+    const std::time_t seconds = timegm(&tm);
+    if (seconds == static_cast<std::time_t>(-1)) return false;
+    out_micros = static_cast<int64_t>(seconds) * 1000000;
+    return true;
+}
+
+// Resolve a logical row index into a ChunkedArray to (chunk pointer,
+// offset within that chunk). Returns nullptr on out-of-range so the
+// caller can produce a typed error Result.
+const arrow::Array* resolve_chunk(const std::shared_ptr<arrow::ChunkedArray>& col,
+                                  int64_t logical_row, int64_t& out_offset) {
+    if (!col) return nullptr;
+    int64_t remaining = logical_row;
+    for (int i = 0; i < col->num_chunks(); ++i) {
+        const auto& chunk = col->chunk(i);
+        const int64_t len = chunk->length();
+        if (remaining < len) {
+            out_offset = remaining;
+            return chunk.get();
+        }
+        remaining -= len;
+    }
+    return nullptr;
+}
+
+}  // namespace
+
 
 Result<std::vector<Bar>> DataConversionUtils::arrow_table_to_bars(
     const std::shared_ptr<arrow::Table>& table) {
@@ -22,6 +107,12 @@ Result<std::vector<Bar>> DataConversionUtils::arrow_table_to_bars(
         }
     }
 
+    // An empty result is an empty set of bars: a table with no
+    // row need not carry a chunk in any column, and chunk(0) of such a column is past the end.
+    if (table->num_rows() == 0) {
+        return Result<std::vector<Bar>>(std::vector<Bar>{});
+    }
+
     try {
         // Get column arrays
         auto time_array = table->GetColumnByName("time")->chunk(0);
@@ -31,6 +122,64 @@ Result<std::vector<Bar>> DataConversionUtils::arrow_table_to_bars(
         auto low_array = table->GetColumnByName("low")->chunk(0);
         auto close_array = table->GetColumnByName("close")->chunk(0);
         auto volume_array = table->GetColumnByName("volume")->chunk(0);
+        // The futures loader's eighth column, the kept print's vendor instrument id;
+        // absent on an equity table, NULL where the raw table has no such print (both: empty).
+        std::shared_ptr<arrow::Array> instrument_id_array;
+        if (auto id_column = table->GetColumnByName("instrument_id"); id_column != nullptr) {
+            instrument_id_array = id_column->chunk(0);
+        }
+        // The per-contract source's roll field (Bar::roll_from): roll_from_close, roll_from_id and
+        // roll_from_kind, and where present roll_from_date and roll_from_volume (RollFrom::volume),
+        // columns that only its table carries, NULL where the field is absent.
+        std::shared_ptr<arrow::Array> roll_close_array, roll_id_array, roll_kind_array,
+            roll_date_array, roll_volume_array;
+        if (auto c = table->GetColumnByName("roll_from_close"); c != nullptr) {
+            roll_close_array = c->chunk(0);
+            auto i = table->GetColumnByName("roll_from_id");
+            auto k = table->GetColumnByName("roll_from_kind");
+            if (i == nullptr || k == nullptr) {
+                return make_error<std::vector<Bar>>(
+                    ErrorCode::INVALID_DATA,
+                    "roll_from_close without roll_from_id and roll_from_kind",
+                    "DataConversionUtils");
+            }
+            roll_id_array = i->chunk(0);
+            roll_kind_array = k->chunk(0);
+            if (auto dc = table->GetColumnByName("roll_from_date"); dc != nullptr) {
+                roll_date_array = dc->chunk(0);
+            }
+            if (auto vc = table->GetColumnByName("roll_from_volume"); vc != nullptr) {
+                roll_volume_array = vc->chunk(0);
+            }
+        }
+        // Carry: the per-contract source's carry quote (Bar::carry), five
+        // columns that only its table with carry on carries, NULL where the day has no quote.
+        std::shared_ptr<arrow::Array> carry_held_close_array, carry_other_close_array,
+            carry_months_array, carry_held_symbol_array, carry_other_symbol_array;
+        if (auto c = table->GetColumnByName("carry_held_close"); c != nullptr) {
+            auto oc = table->GetColumnByName("carry_other_close");
+            auto mc = table->GetColumnByName("carry_months");
+            auto hs = table->GetColumnByName("carry_held_symbol");
+            auto os = table->GetColumnByName("carry_other_symbol");
+            if (oc == nullptr || mc == nullptr || hs == nullptr || os == nullptr) {
+                return make_error<std::vector<Bar>>(
+                    ErrorCode::INVALID_DATA,
+                    "carry_held_close without carry_other_close, carry_months, carry_held_symbol "
+                    "and carry_other_symbol",
+                    "DataConversionUtils");
+            }
+            carry_held_close_array = c->chunk(0);
+            carry_other_close_array = oc->chunk(0);
+            carry_months_array = mc->chunk(0);
+            carry_held_symbol_array = hs->chunk(0);
+            carry_other_symbol_array = os->chunk(0);
+        }
+
+        // The per-contract source's own_contract_volume (Bar::own_contract_volume)
+        std::shared_ptr<arrow::Array> own_volume_array;
+        if (auto c = table->GetColumnByName("own_contract_volume"); c != nullptr) {
+            own_volume_array = c->chunk(0);
+        }
 
         // Prepare result vector
         std::vector<Bar> bars;
@@ -72,6 +221,83 @@ Result<std::vector<Bar>> DataConversionUtils::arrow_table_to_bars(
             // Create and add bar
             Bar bar(ts_result.value(), open_result.value(), high_result.value(), low_result.value(),
                     close_result.value(), volume_result.value(), symbol_result.value());
+            if (instrument_id_array && !instrument_id_array->IsNull(i)) {
+                auto id_result = extract_string(instrument_id_array, i);
+                if (id_result.is_error()) {
+                    return make_error<std::vector<Bar>>(id_result.error()->code(),
+                                                        id_result.error()->what(),
+                                                        "DataConversionUtils");
+                }
+                bar.instrument_id = id_result.value();
+            }
+            if (roll_close_array && !roll_close_array->IsNull(i)) {
+                auto close_from = extract_double(roll_close_array, i);
+                auto id_from = extract_string(roll_id_array, i);
+                if (close_from.is_error() || id_from.is_error() || roll_kind_array->IsNull(i)) {
+                    return make_error<std::vector<Bar>>(
+                        ErrorCode::CONVERSION_ERROR,
+                        "Error extracting the roll field at row " + std::to_string(i),
+                        "DataConversionUtils");
+                }
+                const int8_t kind = std::static_pointer_cast<arrow::Int8Array>(roll_kind_array)->Value(i);
+                if (kind < 0 || kind > static_cast<int8_t>(RollFromKind::AFTER_SOURCE_CHANGE)) {
+                    return make_error<std::vector<Bar>>(
+                        ErrorCode::CONVERSION_ERROR,
+                        "Unknown roll_from_kind " + std::to_string(kind) + " at row " +
+                            std::to_string(i),
+                        "DataConversionUtils");
+                }
+                bar.roll_from = RollFrom{
+                    close_from.value(), id_from.value(), static_cast<RollFromKind>(kind), {}};
+                if (roll_date_array && !roll_date_array->IsNull(i)) {
+                    auto date_from = extract_string(roll_date_array, i);
+                    if (date_from.is_error()) {
+                        return make_error<std::vector<Bar>>(
+                            ErrorCode::CONVERSION_ERROR,
+                            "Error extracting the roll field's date at row " + std::to_string(i),
+                            "DataConversionUtils");
+                    }
+                    bar.roll_from->date = date_from.value();
+                }
+                if (roll_volume_array && !roll_volume_array->IsNull(i)) {
+                    auto volume_from = extract_double(roll_volume_array, i);
+                    if (volume_from.is_error()) {
+                        return make_error<std::vector<Bar>>(
+                            ErrorCode::CONVERSION_ERROR,
+                            "Error extracting the roll field's volume at row " + std::to_string(i),
+                            "DataConversionUtils");
+                    }
+                    bar.roll_from->volume = volume_from.value();
+                }
+            }
+            if (carry_held_close_array && !carry_held_close_array->IsNull(i)) {
+                auto held_close = extract_double(carry_held_close_array, i);
+                auto other_close = extract_double(carry_other_close_array, i);
+                auto held_symbol = extract_string(carry_held_symbol_array, i);
+                auto other_symbol = extract_string(carry_other_symbol_array, i);
+                if (held_close.is_error() || other_close.is_error() || held_symbol.is_error() ||
+                    other_symbol.is_error() || carry_months_array->IsNull(i) ||
+                    carry_months_array->type_id() != arrow::Type::INT32) {
+                    return make_error<std::vector<Bar>>(
+                        ErrorCode::CONVERSION_ERROR,
+                        "Error extracting the carry quote at row " + std::to_string(i),
+                        "DataConversionUtils");
+                }
+                bar.carry = CarryQuote{
+                    held_close.value(), other_close.value(),
+                    std::static_pointer_cast<arrow::Int32Array>(carry_months_array)->Value(i),
+                    held_symbol.value(), other_symbol.value()};
+            }
+            if (own_volume_array && !own_volume_array->IsNull(i)) {
+                auto own = extract_double(own_volume_array, i);
+                if (own.is_error()) {
+                    return make_error<std::vector<Bar>>(
+                        ErrorCode::CONVERSION_ERROR,
+                        "Error extracting own_contract_volume at row " + std::to_string(i),
+                        "DataConversionUtils");
+                }
+                bar.own_contract_volume = own.value();
+            }
 
             bars.push_back(bar);
         }
@@ -172,6 +398,242 @@ Result<std::string> DataConversionUtils::extract_string(const std::shared_ptr<ar
     } catch (const std::exception& e) {
         return make_error<std::string>(ErrorCode::CONVERSION_ERROR,
                                        std::string("Error extracting string: ") + e.what(),
+                                       "DataConversionUtils");
+    }
+}
+
+// ----------------------------------------------------------------------------
+// safe_get_* -- type-aware chunked accessors. See the
+// header for the dispatch contract.
+// ----------------------------------------------------------------------------
+
+Result<double> DataConversionUtils::safe_get_double(
+    const std::shared_ptr<arrow::ChunkedArray>& col, int64_t row,
+    const std::string& column_name) {
+    if (!col) {
+        return make_error<double>(ErrorCode::INVALID_ARGUMENT,
+                                  "safe_get_double: null column (" + column_name + ")",
+                                  "DataConversionUtils");
+    }
+    int64_t off = 0;
+    const arrow::Array* chunk = resolve_chunk(col, row, off);
+    if (!chunk) {
+        return make_error<double>(ErrorCode::INVALID_ARGUMENT,
+                                  "safe_get_double: row " + std::to_string(row) +
+                                      " out of range in column " + column_name,
+                                  "DataConversionUtils");
+    }
+    if (chunk->IsNull(off)) {
+        return make_error<double>(ErrorCode::INVALID_DATA,
+                                  "safe_get_double: null at row " + std::to_string(row) +
+                                      " in column " + column_name,
+                                  "DataConversionUtils");
+    }
+    try {
+        switch (chunk->type_id()) {
+            case arrow::Type::DOUBLE:
+                return Result<double>(
+                    static_cast<const arrow::DoubleArray*>(chunk)->Value(off));
+            case arrow::Type::FLOAT:
+                return Result<double>(static_cast<double>(
+                    static_cast<const arrow::FloatArray*>(chunk)->Value(off)));
+            case arrow::Type::INT64:
+                return Result<double>(static_cast<double>(
+                    static_cast<const arrow::Int64Array*>(chunk)->Value(off)));
+            case arrow::Type::INT32:
+                return Result<double>(static_cast<double>(
+                    static_cast<const arrow::Int32Array*>(chunk)->Value(off)));
+            case arrow::Type::STRING:
+            case arrow::Type::LARGE_STRING: {
+                std::string s;
+                if (chunk->type_id() == arrow::Type::STRING) {
+                    s = static_cast<const arrow::StringArray*>(chunk)->GetString(off);
+                } else {
+                    s = static_cast<const arrow::LargeStringArray*>(chunk)->GetString(off);
+                }
+                try {
+                    return Result<double>(std::stod(s));
+                } catch (const std::exception& e) {
+                    WARN("safe_get_double: bad value '" + s + "' in column " + column_name +
+                         " at row " + std::to_string(row) + " (" + e.what() + ")");
+                    return make_error<double>(ErrorCode::CONVERSION_ERROR,
+                                              "safe_get_double parse failure", "DataConversionUtils");
+                }
+            }
+            default: {
+                const std::string actual = chunk->type()->ToString();
+                ERROR("safe_get_double: unsupported Arrow type '" + actual + "' in column " +
+                      column_name + " at row " + std::to_string(row));
+                return make_error<double>(ErrorCode::CONVERSION_ERROR,
+                                          "safe_get_double unsupported type",
+                                          "DataConversionUtils");
+            }
+        }
+    } catch (const std::exception& e) {
+        return make_error<double>(ErrorCode::CONVERSION_ERROR,
+                                  std::string("safe_get_double exception: ") + e.what(),
+                                  "DataConversionUtils");
+    }
+}
+
+Result<int64_t> DataConversionUtils::safe_get_int64(
+    const std::shared_ptr<arrow::ChunkedArray>& col, int64_t row,
+    const std::string& column_name) {
+    if (!col) {
+        return make_error<int64_t>(ErrorCode::INVALID_ARGUMENT,
+                                   "safe_get_int64: null column (" + column_name + ")",
+                                   "DataConversionUtils");
+    }
+    int64_t off = 0;
+    const arrow::Array* chunk = resolve_chunk(col, row, off);
+    if (!chunk) {
+        return make_error<int64_t>(ErrorCode::INVALID_ARGUMENT,
+                                   "safe_get_int64: row " + std::to_string(row) +
+                                       " out of range in column " + column_name,
+                                   "DataConversionUtils");
+    }
+    if (chunk->IsNull(off)) {
+        return make_error<int64_t>(ErrorCode::INVALID_DATA,
+                                   "safe_get_int64: null at row " + std::to_string(row) +
+                                       " in column " + column_name,
+                                   "DataConversionUtils");
+    }
+    try {
+        switch (chunk->type_id()) {
+            case arrow::Type::INT64:
+                return Result<int64_t>(
+                    static_cast<const arrow::Int64Array*>(chunk)->Value(off));
+            case arrow::Type::INT32:
+                return Result<int64_t>(static_cast<int64_t>(
+                    static_cast<const arrow::Int32Array*>(chunk)->Value(off)));
+            case arrow::Type::DOUBLE: {
+                const double d = static_cast<const arrow::DoubleArray*>(chunk)->Value(off);
+                WARN("safe_get_int64: truncating double " + std::to_string(d) + " in column " +
+                     column_name + " at row " + std::to_string(row));
+                return Result<int64_t>(static_cast<int64_t>(d));
+            }
+            // Temporal columns. The canonical schema stores dates as
+            // TimestampArray; without these cases such a column would fall through to
+            // `default` and error. The value is returned in the column's OWN unit
+            // (the canonical schema is microseconds, which is what
+            // LiveDataLoader::load_previous_day_data reads) -- see the header.
+            case arrow::Type::TIMESTAMP:
+                return Result<int64_t>(
+                    static_cast<const arrow::TimestampArray*>(chunk)->Value(off));
+            case arrow::Type::DATE32:  // days since epoch
+                return Result<int64_t>(static_cast<int64_t>(
+                    static_cast<const arrow::Date32Array*>(chunk)->Value(off)));
+            case arrow::Type::DATE64:  // milliseconds since epoch
+                return Result<int64_t>(
+                    static_cast<const arrow::Date64Array*>(chunk)->Value(off));
+            case arrow::Type::STRING:
+            case arrow::Type::LARGE_STRING: {
+                std::string s;
+                if (chunk->type_id() == arrow::Type::STRING) {
+                    s = static_cast<const arrow::StringArray*>(chunk)->GetString(off);
+                } else {
+                    s = static_cast<const arrow::LargeStringArray*>(chunk)->GetString(off);
+                }
+                // A FULLY integral string is an integer. `std::stoll` stops at the
+                // first non-digit, so "2026-09-02 00:00:00" would come back as
+                // 2026 -- a silent, plausible integer that is not a timestamp in any
+                // unit. Require the whole string to be consumed before believing it.
+                try {
+                    std::size_t consumed = 0;
+                    const long long v = std::stoll(s, &consumed);
+                    while (consumed < s.size() &&
+                           std::isspace(static_cast<unsigned char>(s[consumed]))) {
+                        ++consumed;
+                    }
+                    if (consumed == s.size()) {
+                        return Result<int64_t>(static_cast<int64_t>(v));
+                    }
+                } catch (const std::exception&) {
+                    // fall through to the datetime attempt
+                }
+
+                // Not an integer. The one shape a temporal column legitimately takes
+                // as text: YYYY-MM-DD, optionally with a time. Returned as
+                // MICROSECONDS since the epoch, the canonical timestamp unit.
+                int64_t micros = 0;
+                if (parse_ymd_hms_to_micros(s, micros)) {
+                    return Result<int64_t>(micros);
+                }
+
+                WARN("safe_get_int64: bad value '" + s + "' in column " + column_name +
+                     " at row " + std::to_string(row) +
+                     " (neither an integer nor YYYY-MM-DD[ HH:MM:SS])");
+                return make_error<int64_t>(ErrorCode::CONVERSION_ERROR,
+                                           "safe_get_int64 parse failure",
+                                           "DataConversionUtils");
+            }
+            default: {
+                const std::string actual = chunk->type()->ToString();
+                ERROR("safe_get_int64: unsupported Arrow type '" + actual + "' in column " +
+                      column_name + " at row " + std::to_string(row));
+                return make_error<int64_t>(ErrorCode::CONVERSION_ERROR,
+                                           "safe_get_int64 unsupported type",
+                                           "DataConversionUtils");
+            }
+        }
+    } catch (const std::exception& e) {
+        return make_error<int64_t>(ErrorCode::CONVERSION_ERROR,
+                                   std::string("safe_get_int64 exception: ") + e.what(),
+                                   "DataConversionUtils");
+    }
+}
+
+Result<std::string> DataConversionUtils::safe_get_string(
+    const std::shared_ptr<arrow::ChunkedArray>& col, int64_t row,
+    const std::string& column_name) {
+    if (!col) {
+        return make_error<std::string>(ErrorCode::INVALID_ARGUMENT,
+                                       "safe_get_string: null column (" + column_name + ")",
+                                       "DataConversionUtils");
+    }
+    int64_t off = 0;
+    const arrow::Array* chunk = resolve_chunk(col, row, off);
+    if (!chunk) {
+        return make_error<std::string>(ErrorCode::INVALID_ARGUMENT,
+                                       "safe_get_string: row " + std::to_string(row) +
+                                           " out of range in column " + column_name,
+                                       "DataConversionUtils");
+    }
+    if (chunk->IsNull(off)) {
+        return make_error<std::string>(ErrorCode::INVALID_DATA,
+                                       "safe_get_string: null at row " + std::to_string(row) +
+                                           " in column " + column_name,
+                                       "DataConversionUtils");
+    }
+    try {
+        switch (chunk->type_id()) {
+            case arrow::Type::STRING:
+                return Result<std::string>(
+                    static_cast<const arrow::StringArray*>(chunk)->GetString(off));
+            case arrow::Type::LARGE_STRING:
+                return Result<std::string>(
+                    static_cast<const arrow::LargeStringArray*>(chunk)->GetString(off));
+            case arrow::Type::DOUBLE:
+                return Result<std::string>(std::to_string(
+                    static_cast<const arrow::DoubleArray*>(chunk)->Value(off)));
+            case arrow::Type::INT64:
+                return Result<std::string>(std::to_string(
+                    static_cast<const arrow::Int64Array*>(chunk)->Value(off)));
+            case arrow::Type::INT32:
+                return Result<std::string>(std::to_string(
+                    static_cast<const arrow::Int32Array*>(chunk)->Value(off)));
+            default: {
+                const std::string actual = chunk->type()->ToString();
+                ERROR("safe_get_string: unsupported Arrow type '" + actual + "' in column " +
+                      column_name + " at row " + std::to_string(row));
+                return make_error<std::string>(ErrorCode::CONVERSION_ERROR,
+                                               "safe_get_string unsupported type",
+                                               "DataConversionUtils");
+            }
+        }
+    } catch (const std::exception& e) {
+        return make_error<std::string>(ErrorCode::CONVERSION_ERROR,
+                                       std::string("safe_get_string exception: ") + e.what(),
                                        "DataConversionUtils");
     }
 }

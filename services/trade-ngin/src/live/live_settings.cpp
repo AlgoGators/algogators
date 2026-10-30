@@ -1,0 +1,177 @@
+// src/live/live_settings.cpp
+//
+// QT plan E2: a live run's settings are its config files with the portfolio's active
+// trading.strategy_config row merged in, and a record of exactly what was used.
+
+#include "trade_ngin/live/live_settings.hpp"
+
+#include "trade_ngin/core/logger.hpp"
+#include "trade_ngin/live/qt_desk.hpp"
+#include "trade_ngin/strategy/sleeve_config.hpp"
+#include "trade_ngin/strategy/trend_following.hpp"
+
+namespace trade_ngin {
+
+std::string live_settings_refusal_line(const std::string& portfolio_id, const std::string& why) {
+    return "STRATEGY_CONFIG refused for " + portfolio_id + ": " + why +
+           ". Refusing to run: a saved settings change that cannot be applied is never replaced "
+           "by the file values (ruling 24).";
+}
+
+Result<LiveSettings> resolve_live_settings(
+    const std::filesystem::path& config_base_path, const std::string& portfolio_name,
+    const std::string& portfolio_id,
+    const Result<std::optional<StrategyConfigRow>>& active_row) {
+    if (active_row.is_error()) {
+        return make_error<LiveSettings>(
+            ErrorCode::DATABASE_ERROR,
+            "the active strategy_config row could not be read: " +
+                std::string(active_row.error()->what()),
+            "LiveSettings");
+    }
+    const std::optional<StrategyConfigRow>& row = active_row.value();
+    if (row && !row->portfolio_id.empty() && row->portfolio_id != portfolio_id) {
+        return make_error<LiveSettings>(ErrorCode::INVALID_DATA,
+                                        "the strategy_config row read is for " +
+                                            row->portfolio_id + ", not " + portfolio_id,
+                                        "LiveSettings");
+    }
+    // Rejoin R-6: a settings row applies to a desk-editable portfolio only (portfolio.json
+    // qt.desk_editable, the flag the runner reads). Any other book trades on its files, as its
+    // backtests do (ruling 4), so a row for it is refused: never applied and never dropped.
+    if (row) {
+        auto editable = qt::read_desk_editable(
+            (config_base_path / "portfolios" / portfolio_name / "portfolio.json").string());
+        if (editable.is_error()) {
+            return make_error<LiveSettings>(editable.error()->code(), editable.error()->what(),
+                                            "LiveSettings");
+        }
+        if (!editable.value()) {
+            return make_error<LiveSettings>(
+                ErrorCode::INVALID_DATA,
+                "strategy_config version " + std::to_string(row->version) + ": " + portfolio_id +
+                    " is not desk-editable (its portfolio.json has no qt.desk_editable true), and "
+                    "settings rows apply to the desk's portfolios only; this book runs on its "
+                    "config files, as its backtests do. Deactivate the row",
+                "LiveSettings");
+        }
+    }
+
+    nlohmann::json snapshot;
+    auto loaded = ConfigLoader::load(config_base_path, portfolio_name,
+                                     row ? &row->overrides : nullptr, &snapshot);
+    if (loaded.is_error()) {
+        return make_error<LiveSettings>(
+            loaded.error()->code(),
+            (row ? "strategy_config version " + std::to_string(row->version) + ": " : std::string()) +
+                loaded.error()->what(),
+            "LiveSettings");
+    }
+    if (loaded.value().portfolio_id != portfolio_id) {
+        return make_error<LiveSettings>(ErrorCode::INVALID_DATA,
+                                        "the config files now name portfolio " +
+                                            loaded.value().portfolio_id + ", not " + portfolio_id,
+                                        "LiveSettings");
+    }
+
+    LiveSettings out;
+    out.config = loaded.value();
+    if (row) out.strategy_config_version = row->version;
+    out.settings_used = {
+        {"strategy_config_version",
+         row ? nlohmann::json(row->version) : nlohmann::json(nullptr)},
+        {"config", std::move(snapshot)}};
+    if (row) {
+        INFO("STRATEGY_CONFIG: " + portfolio_id + " runs on its config files with strategy_config "
+             "version " + std::to_string(row->version) + " (by " + row->created_by + ": " +
+             row->reason + ") merged in");
+    } else {
+        INFO("STRATEGY_CONFIG: " + portfolio_id +
+             " has no active strategy_config row; it runs on its config files unchanged");
+    }
+    return out;
+}
+
+Result<void> check_live_settings_overlay(const std::filesystem::path& config_base_path,
+                                         const std::string& portfolio_name,
+                                         const nlohmann::json& overrides) {
+    auto files = ConfigLoader::load(config_base_path, portfolio_name);
+    if (files.is_error()) {
+        return make_error<void>(files.error()->code(),
+                                std::string("the config files do not load: ") +
+                                    files.error()->what(),
+                                "LiveSettings");
+    }
+    const std::string portfolio_id = files.value().portfolio_id;
+    StrategyConfigRow row;
+    row.portfolio_id = portfolio_id;
+    row.version = 0;
+    row.overrides = overrides;
+    row.reason = "checked before saving (D-17)";
+    row.created_by = "qt_settings_check";
+    const Result<std::optional<StrategyConfigRow>> active(
+        std::optional<StrategyConfigRow>(std::move(row)));
+    auto resolved = resolve_live_settings(config_base_path, portfolio_name, portfolio_id, active);
+    if (resolved.is_error()) {
+        std::string why = resolved.error()->what();
+        const std::string prefix = "strategy_config version 0: ";
+        if (why.rfind(prefix, 0) == 0) why = why.substr(prefix.size());
+        return make_error<void>(resolved.error()->code(), why, "LiveSettings");
+    }
+    const AppConfig& config = resolved.value().config;
+    if (auto loop_keys = ConfigLoader::require_loop_keys(config); loop_keys.is_error()) {
+        return make_error<void>(loop_keys.error()->code(), loop_keys.error()->what(),
+                                "LiveSettings");
+    }
+    // The trend sleeves' own checks, run when a live run builds them (trend_following.cpp): each
+    // sleeve enabled for live, its config read as the runner reads it (the required keys, the
+    // EMA pairs; the equity slow rule on the first sleeve). Without them a change such as a
+    // risk_target of 1.5 passes the config checks and stops the run at strategy start-up.
+    if (config.strategies_config.is_object()) {
+        bool first = true;
+        for (const auto& [name, def] : config.strategies_config.items()) {
+            if (!def.is_object() || !def.value("enabled_live", false)) continue;
+            const std::string type = def.value("type", "TrendFollowingStrategy");
+            if (type != "TrendFollowingStrategy" && type != "TrendFollowingFastStrategy") {
+                first = false;
+                continue;
+            }
+            TrendFollowingConfig trend = type == "TrendFollowingFastStrategy"
+                                             ? fast_trend_following_config()
+                                             : TrendFollowingConfig{};
+            if (auto keys = read_required_sleeve_keys(name, def, trend); keys.is_error()) {
+                return make_error<void>(keys.error()->code(), keys.error()->what(), "LiveSettings");
+            }
+            if (def.contains("config") && def["config"].is_object() &&
+                def["config"].contains("ema_windows")) {
+                trend.ema_windows.clear();
+                for (const auto& window : def["config"]["ema_windows"]) {
+                    if (!window.is_array() || window.size() != 2 ||
+                        !window[0].is_number_integer() ||
+                        !window[1].is_number_integer()) {
+                        return make_error<void>(ErrorCode::INVALID_ARGUMENT,
+                                                "strategies." + name +
+                                                    ".config.ema_windows must hold [fast, slow] "
+                                                    "pairs of whole numbers",
+                                                "LiveSettings");
+                    }
+                    trend.ema_windows.push_back({window[0].get<int>(), window[1].get<int>()});
+                }
+            }
+            if (first) {
+                trend.equity_slow_symbols = config.equity_slow_rule.symbols;
+                trend.equity_slow_pairs = config.equity_slow_rule.pairs;
+            }
+            first = false;
+            if (auto valid = TrendFollowingStrategy::validate_trend_config(trend);
+                valid.is_error()) {
+                return make_error<void>(valid.error()->code(),
+                                        "strategies." + name + ": " + valid.error()->what(),
+                                        "LiveSettings");
+            }
+        }
+    }
+    return Result<void>();
+}
+
+}  // namespace trade_ngin

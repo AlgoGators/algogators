@@ -2,6 +2,8 @@
 #pragma once
 
 #include <chrono>
+#include <cmath>
+#include <optional>
 #include <string>
 #include "trade_ngin/instruments/instrument.hpp"
 
@@ -15,7 +17,7 @@ struct FuturesSpec {
     std::string exchange;                   // Exchange code
     std::string currency;                   // Trading currency
     double multiplier;                      // Contract multiplier
-    double tick_size;                       // Minimum price increment
+    double tick_size;                       // One tick in PRICE units (metadata "Tick Size")
     double commission_per_contract;         // Commission per contract
     double initial_margin;                  // Initial margin requirement
     double maintenance_margin;              // Maintenance margin requirement
@@ -23,6 +25,13 @@ struct FuturesSpec {
     std::string trading_hours;              // Trading hours specification
     std::optional<Timestamp> expiry;        // Contract expiration
     std::optional<std::string> underlying;  // Underlying instrument
+    // One tick in DOLLARS per contract (metadata "Minimum Price Fluctuation", the tick value):
+    // tick_size x multiplier on a consistent metadata row. 0 = not given.
+    double tick_value{0.0};
+    // The metadata's "Fee Per Contract" (dollars per contract per side, all-in), when the table
+    // has that column (migration 014); empty when it does not, and the cost model then charges
+    // its configured fee.
+    std::optional<double> fee_per_contract;
 };
 
 /**
@@ -62,10 +71,31 @@ public:
     double get_point_value() const override {
         return spec_.tick_size * spec_.multiplier;
     }
+    /**
+     * @brief One tick in dollars per contract as the metadata states it ("Minimum Price
+     *        Fluctuation"); 0 when not given
+     */
+    double get_tick_value() const {
+        return spec_.tick_value;
+    }
+    /**
+     * @brief The metadata's per-contract fee, when the metadata carries one
+     */
+    const std::optional<double>& get_fee_per_contract() const {
+        return spec_.fee_per_contract;
+    }
 
     bool is_tradeable() const override;
     double get_margin_requirement() const override {
         return spec_.initial_margin;
+    }
+    // Override the price/qty overload so the base-class default (which forwards
+    // to the no-arg version returning per-contract margin) doesn't strip the
+    // contract-count multiplication. MarginManager calls this overload and
+    // expects total dollars, not per-contract.
+    double get_margin_requirement(double price, double quantity) const override {
+        (void)price;  // Futures margin is a fixed dollar amount per contract.
+        return std::abs(quantity) * spec_.initial_margin;
     }
     std::string get_trading_hours() const override {
         return spec_.trading_hours;

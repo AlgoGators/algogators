@@ -6,33 +6,69 @@
 #include <iomanip>
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
 #include <sstream>
 #include "trade_ngin/core/config_loader.hpp"
-#include "trade_ngin/core/email_sender.hpp"
+#include "trade_ngin/portfolio/loop_config.hpp"
 #include "trade_ngin/core/holiday_checker.hpp"
 #include "trade_ngin/core/logger.hpp"
+#include "trade_ngin/core/report_leverage_console.hpp"
+#include "trade_ngin/core/report_risk_lines.hpp"
+#include "trade_ngin/core/report_settled_marks.hpp"
+#include "trade_ngin/core/resolved_sleeves.hpp"
 #include "trade_ngin/core/time_utils.hpp"
 #include "trade_ngin/data/conversion_utils.hpp"
 #include "trade_ngin/data/database_pooling.hpp"
 #include "trade_ngin/data/market_data_bus.hpp"
 #include "trade_ngin/data/postgres_database.hpp"
+#include "trade_ngin/data/roll_series.hpp"
+#include "trade_ngin/data/session_classifier.hpp"
 #include "trade_ngin/instruments/futures.hpp"
 #include "trade_ngin/instruments/instrument_registry.hpp"
+#include "trade_ngin/live/carried_day.hpp"
+#include "trade_ngin/live/console_labels.hpp"
 #include "trade_ngin/live/csv_exporter.hpp"
+#include "trade_ngin/live/python_mail.hpp"
+#include "trade_ngin/live/report_rolls_json.hpp"
+#include "trade_ngin/live/data_freshness.hpp"
+#include "trade_ngin/live/run_args.hpp"
 #include "trade_ngin/live/execution_manager.hpp"
+#include "trade_ngin/live/live_settings.hpp"
+#include "trade_ngin/live/qt_desk.hpp"
+#include "trade_ngin/live/finalized_books_read.hpp"
+#include "trade_ngin/live/late_bar_warning.hpp"
+#include "trade_ngin/live/live_listing_guard.hpp"
+#include "trade_ngin/live/futures_cost_feed.hpp"
 #include "trade_ngin/live/live_data_loader.hpp"
 #include "trade_ngin/live/live_historical_metrics.hpp"
 #include "trade_ngin/live/live_metrics_calculator.hpp"
 #include "trade_ngin/live/live_pnl_manager.hpp"
 #include "trade_ngin/live/live_price_manager.hpp"
+#include "trade_ngin/live/live_estimator_history.hpp"
+#include "trade_ngin/live/live_roll_legs.hpp"
+#include "trade_ngin/live/report_roll_query.hpp"
+#include "trade_ngin/live/live_sizing_read.hpp"
+#include "trade_ngin/live/settled_stamp.hpp"
 #include "trade_ngin/live/live_trading_coordinator.hpp"
+#include "trade_ngin/live/book_exposure.hpp"
+#include "trade_ngin/live/margin_columns.hpp"
 #include "trade_ngin/live/margin_manager.hpp"
+#include "trade_ngin/live/risk_module_failure.hpp"
+#include "trade_ngin/live/run_metadata_marks.hpp"
+#include "trade_ngin/live/session_book_gate.hpp"
+#include "trade_ngin/live/sleeve_seeding.hpp"
+#include "trade_ngin/live/trading_days_anchor.hpp"
 #include "trade_ngin/portfolio/portfolio_manager.hpp"
+#include "trade_ngin/portfolio/sizing_capital.hpp"
+#include "trade_ngin/risk/risk_scale_report.hpp"
 #include "trade_ngin/storage/live_results_manager.hpp"
+#include "trade_ngin/transaction_cost/netting.hpp"
+#include "trade_ngin/live/stored_book_ownership.hpp"
+#include "trade_ngin/strategy/carry_log.hpp"
+#include "trade_ngin/strategy/short_window_log.hpp"
+#include "trade_ngin/strategy/sleeve_config.hpp"
 #include "trade_ngin/strategy/trend_following.hpp"
-#include "trade_ngin/strategy/trend_following_fast.hpp"
-#include "trade_ngin/strategy/trend_following_slow.hpp"
 
 using namespace trade_ngin;
 
@@ -43,6 +79,23 @@ int main(int argc, char* argv[]) {
         bool use_override_date = false;
         bool send_email = false;  // Default to false for historical runs
 
+        // QT platform (docs/design/qt-contract.md section 6): the runner's modes. With none of
+        // --desk, --override or --publish this is the model run, exactly as before.
+        //   --portfolio-config <dir>  the directory under config/portfolios (default conservative)
+        //   --date YYYY-MM-DD         the run date (the positional date still works)
+        //   --desk | --override | --publish --audit-id N   a command row of
+        //                             trading.position_overrides (the desk-agent passes it)
+        //   --fallback --audit-id N   the scheduler's fallback row: qt reset to the model's book,
+        //                             then published (contract C7)
+        //   --send                    e-mail a published day from its stored rows, once (C7)
+        //   --send-now                with --publish or --fallback: send the e-mail in the same
+        //                             run (an approval from 09:30 to 10:00, the 10:00 fallback)
+        qt::Mode qt_mode = qt::Mode::MODEL;
+        bool qt_send_now = false;
+        std::string qt_portfolio_dir = "conservative";
+        long qt_audit_id = 0;
+        std::string run_date_arg;  // the positional date and --date name the same run
+
         // Parse command-line arguments
         for (int i = 1; i < argc; i++) {
             std::string arg = argv[i];
@@ -52,13 +105,100 @@ int main(int argc, char* argv[]) {
                 send_email = true;
                 continue;
             }
+            if (arg == "--send-now") {
+                qt_send_now = true;
+                continue;
+            }
+            if (arg == "--desk" || arg == "--override" || arg == "--publish" ||
+                arg == "--finalize-system" || arg == "--fallback" || arg == "--send") {
+                if (qt_mode != qt::Mode::MODEL) {
+                    std::cerr << "Only one of --desk, --override, --publish, --fallback, --send "
+                                 "and --finalize-system"
+                              << std::endl;
+                    return 1;
+                }
+                qt_mode = arg == "--desk"       ? qt::Mode::DESK
+                          : arg == "--override" ? qt::Mode::OVERRIDE
+                          : arg == "--publish"  ? qt::Mode::PUBLISH
+                          : arg == "--fallback" ? qt::Mode::FALLBACK
+                          : arg == "--send"     ? qt::Mode::SEND
+                                                : qt::Mode::FINALIZE_SYSTEM;
+                continue;
+            }
+            if (arg == "--portfolio-config" || arg == "--audit-id" || arg == "--date") {
+                if (i + 1 >= argc) {
+                    std::cerr << arg << " needs a value" << std::endl;
+                    return 1;
+                }
+                const std::string value = argv[++i];
+                if (arg == "--portfolio-config") {
+                    const bool safe = !value.empty() &&
+                                      std::all_of(value.begin(), value.end(), [](unsigned char c) {
+                                          return std::isalnum(c) || c == '_' || c == '-';
+                                      });
+                    if (!safe) {
+                        std::cerr << "--portfolio-config takes a directory name under "
+                                     "config/portfolios" << std::endl;
+                        return 1;
+                    }
+                    qt_portfolio_dir = value;
+                    continue;
+                }
+                if (arg == "--audit-id") {
+                    try {
+                        qt_audit_id = std::stol(value);
+                    } catch (const std::exception&) {
+                        qt_audit_id = 0;
+                    }
+                    if (qt_audit_id <= 0) {
+                        std::cerr << "--audit-id takes a positive row id" << std::endl;
+                        return 1;
+                    }
+                    continue;
+                }
+                arg = value;  // --date: parsed as the positional date below
+            }
 
-            // Try to parse as date
-            std::tm tm = {};
-            std::istringstream ss(arg);
-            ss >> std::get_time(&tm, "%Y-%m-%d");
-            if (!ss.fail()) {
-                target_date = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+            // Try to parse as date.
+            //
+            // std::mktime reads the operator's date as LOCAL midnight while every consumer of
+            // target_date -- the position date, the T-1 lookup, the order-id stamp, the
+            // trading-days target -- formats it back through gmtime, so on a host at a
+            // positive UTC offset the whole run lands a day early. A New York host hides it.
+            //
+            // Parsing at UTC midnight instead (parse_utc_date here, gmtime_r for now_tm below)
+            // is not a neutral change. Moving `now` from 04:00/05:00Z to 00:00Z also moves:
+            //
+            //   * the 730-day bar window. get_market_data asks `time BETWEEN start_ts AND
+            //     end_ts` and futures bars are keyed at 00:00:00Z, so the start edge
+            //     gains exactly one extra bar per symbol. On a ten-day chain that moves
+            //     stored signal_values by up to 1.42 on a forecast that runs to about
+            //     +/-20 -- not a rounding artefact -- and on some windows it moves a
+            //     quantity across a rounding boundary.
+            //   * trading.equity_curve. Its ON CONFLICT key is (portfolio_id, strategy_id,
+            //     timestamp, portfolio_type), so the Day T-1 rewrite would not match the
+            //     existing row and would INSERT a second one, at 00:00Z beside 05:00Z, with
+            //     the same equity. Every replay boundary would double a day.
+            //   * positions.last_update and signals.timestamp, and
+            //     executions.execution_time, which embeds the instant.
+            //   * live_results.portfolio_var, max_correlation and risk_scale.
+            //
+            // So the change needs a decision on the bar-window boundary, a decision on the
+            // stored time-of-day contract, and a plan for the equity_curve key; it is not
+            // made here.
+            //
+            // The stamp is kept and this is its frame. An explicit run date
+            // is local midnight of the host in its standard time (tm_isdst stays 0): 05:00Z all
+            // year on the production frame (America/New_York), 00:00Z on a UTC host. Pinned by
+            // RunDateFrame.* in tests/live/test_session_book_gate.cpp.
+            if (const auto run_date = run_date_at_local_midnight(arg)) {
+                if (!run_date_arg.empty() && run_date_arg != arg) {
+                    std::cerr << trade_ngin::live::two_run_dates_message(run_date_arg, arg)
+                              << std::endl;
+                    return 1;
+                }
+                run_date_arg = arg;
+                target_date = *run_date;
                 use_override_date = true;
                 std::cout << "Running for historical date: " << arg << std::endl;
             } else if (arg != "--send-email") {
@@ -69,10 +209,51 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // If no date override, enable email by default for real-time runs
+        // A run names its date (live/run_args.hpp): without one nothing is run and
+        // nothing is sent.
         if (!use_override_date) {
-            send_email = true;
+            std::cerr << live::dateless_run_message(argv[0]);
+            return live::kDatelessRunExitCode;
         }
+        if (qt_mode == qt::Mode::FINALIZE_SYSTEM) {
+            // Ruling 17: the model run of a desk-editable portfolio runs this child first, so the
+            // system book's Day T-1 rows are finalised from system's own rows. It writes nothing
+            // else and never e-mails.
+            if (!use_override_date) {
+                std::cerr << "--finalize-system needs --date YYYY-MM-DD" << std::endl;
+                return 1;
+            }
+            send_email = false;
+        } else if (qt_mode == qt::Mode::SEND) {
+            // Contract C7: the 09:30 send of a published day, from its stored rows. No command row.
+            if (!use_override_date || qt_audit_id > 0) {
+                std::cerr << "--send needs --date YYYY-MM-DD and takes no --audit-id" << std::endl;
+                return 1;
+            }
+            send_email = true;
+        } else if (qt_mode != qt::Mode::MODEL) {
+            if (!use_override_date || qt_audit_id <= 0) {
+                std::cerr << "--" << qt::mode_name(qt_mode)
+                          << " needs --date YYYY-MM-DD and --audit-id N" << std::endl;
+                return 1;
+            }
+            // Ruling 15: a desk run never sends the daily e-mail. Contract C7: an approval
+            // (--publish) or the fallback sends it only with --send-now; otherwise the 09:30 send
+            // does (and a past day's fallback never does).
+            send_email =
+                (qt_mode == qt::Mode::PUBLISH || qt_mode == qt::Mode::FALLBACK) && qt_send_now;
+        }
+        if (qt_send_now && qt_mode != qt::Mode::PUBLISH && qt_mode != qt::Mode::FALLBACK) {
+            std::cerr << "--send-now goes with --publish or --fallback" << std::endl;
+            return 1;
+        }
+        // The runs that rebuild the day from its stored rows and e-mail it (contract C7).
+        const bool qt_sends =
+            qt_mode == qt::Mode::SEND ||
+            ((qt_mode == qt::Mode::PUBLISH || qt_mode == qt::Mode::FALLBACK) && qt_send_now);
+        // QT_MAIL_TEST_TO: every e-mail of this run goes to that one address and nothing is recorded
+        // (sent_at stays empty); with --send, a day already sent can be previewed again.
+        const std::string qt_mail_test_to = live::python_mail_test_to();
 
         if (send_email && use_override_date) {
             std::cout << "Email sending enabled for historical run" << std::endl;
@@ -101,8 +282,8 @@ int main(int argc, char* argv[]) {
         // ========================================
         // LOAD CONFIGURATION FROM MODULAR CONFIG FILES
         // ========================================
-        INFO("Loading configuration from config/portfolios/conservative...");
-        auto app_config_result = ConfigLoader::load("./config", "conservative");
+        INFO("Loading configuration from config/portfolios/" + qt_portfolio_dir + "...");
+        auto app_config_result = ConfigLoader::load("./config", qt_portfolio_dir);
         if (app_config_result.is_error()) {
             ERROR("Failed to load configuration: " +
                   std::string(app_config_result.error()->what()));
@@ -111,6 +292,12 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         auto app_config = app_config_result.value();
+        // The loop's keys are required on a futures book: a book without one of them does not run.
+        if (auto loop_keys = ConfigLoader::require_loop_keys(app_config); loop_keys.is_error()) {
+            ERROR("Failed to load configuration: " + std::string(loop_keys.error()->what()));
+            std::cerr << "Failed to load configuration: " << loop_keys.error()->what() << std::endl;
+            return 1;
+        }
         INFO("Configuration loaded successfully for portfolio: " + app_config.portfolio_id);
 
         // Setup database connection pool
@@ -135,6 +322,37 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         INFO("Successfully acquired database connection from pool");
+
+        // ========================================
+        // DESK SETTINGS (QT plan E2; rulings 2, 3, 4 and 24): the portfolio's active
+        // trading.strategy_config row, merged over its config files. A lookup that fails or a
+        // row that cannot be applied refuses the run here, before anything is stored, and the
+        // files are never used in its place. No active row is not a failure: the files run
+        // unchanged. The database settings cannot be overridden, so the connection stands.
+        // ========================================
+        LiveSettings live_settings;
+        {
+            auto resolved = resolve_live_settings(
+                "./config", qt_portfolio_dir, app_config.portfolio_id,
+                db->get_active_strategy_config(app_config.portfolio_id));
+            if (resolved.is_error()) {
+                const std::string line =
+                    live_settings_refusal_line(app_config.portfolio_id, resolved.error()->what());
+                ERROR(line);
+                std::cerr << line << std::endl;
+                return 1;
+            }
+            live_settings = resolved.value();
+        }
+        app_config = live_settings.config;
+        // The merged config meets the futures book's required keys too (LOOP_SPEC section 7.7).
+        if (auto loop_keys = ConfigLoader::require_loop_keys(app_config); loop_keys.is_error()) {
+            const std::string line =
+                live_settings_refusal_line(app_config.portfolio_id, loop_keys.error()->what());
+            ERROR(line);
+            std::cerr << line << std::endl;
+            return 1;
+        }
 
         // Initialize instrument registry
         INFO("Initializing instrument registry...");
@@ -224,7 +442,9 @@ int main(int argc, char* argv[]) {
         // Sort strategy names for deterministic combined ID (Tier 2)
         std::sort(strategy_names.begin(), strategy_names.end());
 
-        // Generate combined strategy_id: LIVE_<sorted_names_joined_by_&>
+        // Generate combined strategy_id: LIVE_<sorted_names_joined_by_underscore>.
+        // Rows in the DB keyed with "&" come from an out-of-tree binary; no runner can
+        // read them back because the id is matched exactly.
         std::string combined_strategy_id = "LIVE_";
         for (size_t i = 0; i < strategy_names.size(); ++i) {
             if (i > 0)
@@ -243,7 +463,12 @@ int main(int argc, char* argv[]) {
         // Get current date for daily processing (or use override date)
         auto now = use_override_date ? target_date : std::chrono::system_clock::now();
         auto now_time_t = std::chrono::system_clock::to_time_t(now);
-        std::tm* now_tm = std::localtime(&now_time_t);
+        // A COPY of the run date's local-time fields, never the pointer std::localtime returns: that
+        // points at the C library's one static struct, which every later std::gmtime or
+        // std::localtime call may overwrite before the console date and the email date read it.
+        std::tm now_tm_fields{};
+        core::safe_localtime(&now_time_t, &now_tm_fields);
+        const std::tm* now_tm = &now_tm_fields;
 
         // Set start date based on configured historical window
         auto start_date = now - std::chrono::hours(24 * app_config.live.historical_days);
@@ -260,12 +485,692 @@ int main(int argc, char* argv[]) {
         INFO("DEBUG: Target date (now): " +
              std::to_string(std::chrono::system_clock::to_time_t(now)));
 
+        // ========================================
+        // QT BOOKS (docs/design/qt-contract.md sections 3 and 6; rulings 14, 17, 27, 29)
+        // A desk-editable portfolio (portfolio.json qt.desk_editable) starts the day from
+        // yesterday's qt book; on its first desk day, when it has never had a qt book, from its
+        // own system book (ruling 27); after that a missing qt book for yesterday refuses the run.
+        // A non-editable portfolio reads and writes system only, exactly as before. The model run
+        // writes system; --desk and --override write qt; --publish writes no book.
+        // ========================================
+        const std::string qt_date = core::format_utc_date(now);
+        const std::string qt_prev_date = core::format_utc_date(now - std::chrono::hours(24));
+        bool qt_desk_editable = false;
+        {
+            auto editable = qt::read_desk_editable("./config/portfolios/" + qt_portfolio_dir +
+                                                   "/portfolio.json");
+            if (editable.is_error()) {
+                ERROR("QT: " + std::string(editable.error()->what()));
+                std::cerr << "QT: " << editable.error()->what() << std::endl;
+                return 1;
+            }
+            qt_desk_editable = editable.value();
+        }
+        std::optional<qt::AuditRow> qt_audit;
+        constexpr int kQtRefusedExitCode = 2;
+        auto qt_refuse = [&](const std::string& why) -> int {
+            ERROR("QT_REFUSED " + qt::mode_name(qt_mode) + " " + portfolio_id + " " + qt_date +
+                  ": " + why);
+            std::cerr << "QT_REFUSED " << why << std::endl;
+            if (qt_audit) {
+                auto finished = qt::finish_audit_row(
+                    *db, qt_audit->id, "refused",
+                    nlohmann::json{{"mode", qt::mode_name(qt_mode)}}, why);
+                if (finished.is_error()) {
+                    ERROR("QT: the command row could not be marked refused: " +
+                          std::string(finished.error()->what()));
+                }
+            }
+            return kQtRefusedExitCode;
+        };
+        // Item 3: a failure (a read or a store that did not happen) fails the command row.
+        auto qt_fail = [&](const std::string& why) -> int {
+            ERROR("QT_FAILED " + qt::mode_name(qt_mode) + " " + portfolio_id + " " + qt_date +
+                  ": " + why);
+            std::cerr << "QT_FAILED " << why << std::endl;
+            if (qt_audit) {
+                auto finished = qt::finish_audit_row(
+                    *db, qt_audit->id, "failed",
+                    nlohmann::json{{"mode", qt::mode_name(qt_mode)}}, why);
+                if (finished.is_error()) {
+                    ERROR("QT: the command row could not be marked failed: " +
+                          std::string(finished.error()->what()));
+                }
+            }
+            return 1;
+        };
+        if (qt_mode != qt::Mode::MODEL && qt_mode != qt::Mode::FINALIZE_SYSTEM &&
+            qt_mode != qt::Mode::SEND) {
+            auto row = qt::load_audit_row(*db, qt_audit_id);
+            if (row.is_error()) {
+                ERROR("QT: " + std::string(row.error()->what()));
+                std::cerr << "QT: " << row.error()->what() << std::endl;
+                return 1;
+            }
+            const std::string expected_kind = qt_mode == qt::Mode::DESK
+                                                  ? "save"
+                                                  : (qt_mode == qt::Mode::OVERRIDE
+                                                         ? "override_decision"
+                                                         : "publish");
+            if (row.value().status == "done" || row.value().status == "refused" ||
+                row.value().status == "failed") {
+                ERROR("QT: command row " + std::to_string(qt_audit_id) + " is already " +
+                      row.value().status + "; nothing to do");
+                return kQtRefusedExitCode;
+            }
+            qt_audit = row.value();
+            if (qt_audit->kind != expected_kind) {
+                return qt_refuse("row " + std::to_string(qt_audit_id) + " is a " + qt_audit->kind +
+                                 " row, not " + expected_kind);
+            }
+            if (qt_audit->portfolio_id != portfolio_id || qt_audit->date != qt_date) {
+                return qt_refuse("row " + std::to_string(qt_audit_id) + " is for " +
+                                 qt_audit->portfolio_id + " " + qt_audit->date + ", not " +
+                                 portfolio_id + " " + qt_date);
+            }
+            if (auto started = qt::start_audit_row(*db, qt_audit_id); started.is_error()) {
+                ERROR("QT: " + std::string(started.error()->what()));
+                return 1;
+            }
+            if (!qt_desk_editable) {
+                return qt_refuse("portfolio " + portfolio_id + " is not desk-editable "
+                                 "(portfolio.json qt.desk_editable)");
+            }
+            if (qt_mode == qt::Mode::FALLBACK &&
+                qt_audit->requested_by.rfind(qt::kFallbackRequester, 0) != 0) {
+                return qt_refuse("--fallback runs only the scheduler's fallback rows (requested_by " +
+                                 std::string(qt::kFallbackRequester) + "-...), not row " +
+                                 std::to_string(qt_audit_id) + " of " + qt_audit->requested_by);
+            }
+            // Contract C3: a published day is frozen; no desk run or override rewrites its qt.
+            if (qt_mode == qt::Mode::DESK || qt_mode == qt::Mode::OVERRIDE) {
+                auto published =
+                    qt::published_at(*db, portfolio_id, combined_strategy_id, qt_date);
+                if (published.is_error()) return qt_fail(published.error()->what());
+                if (!published.value().empty()) {
+                    return qt_refuse(qt_date + " was published at " + published.value() +
+                                     "; a published day is frozen (contract C3)");
+                }
+            }
+        }
+        std::string qt_read_book = "system";
+        // A send of a non-editable portfolio (the model twin) e-mails its system book.
+        const std::string qt_write_book =
+            qt_mode == qt::Mode::MODEL || qt_mode == qt::Mode::FINALIZE_SYSTEM ||
+                    (qt_mode == qt::Mode::SEND && !qt_desk_editable)
+                ? "system"
+                : "qt";
+        if (qt_desk_editable && qt_mode != qt::Mode::FINALIZE_SYSTEM) {
+            auto had_qt = qt::book_has_day_before(*db, portfolio_id, combined_strategy_id, "qt",
+                                                  qt_date);
+            if (had_qt.is_error()) {
+                ERROR("QT: " + std::string(had_qt.error()->what()));
+                return 1;
+            }
+            if (had_qt.value()) {
+                auto qt_yesterday = qt::book_has_day(*db, portfolio_id, combined_strategy_id,
+                                                     "qt", qt_prev_date);
+                if (qt_yesterday.is_error()) {
+                    ERROR("QT: " + std::string(qt_yesterday.error()->what()));
+                    return 1;
+                }
+                if (!qt_yesterday.value()) {
+                    const std::string why =
+                        "yesterday's (" + qt_prev_date + ") qt book is missing; the day must be "
+                        "run (and published) before " + qt_date + " (ruling 29)";
+                    if (qt_mode == qt::Mode::MODEL) {
+                        ERROR("QT_REFUSED model " + portfolio_id + " " + qt_date + ": " + why);
+                        std::cerr << "QT_REFUSED " << why << std::endl;
+                        return 1;
+                    }
+                    return qt_refuse(why);
+                }
+                if (qt_mode == qt::Mode::MODEL) {
+                    // Ruling 29 and the master document's day: tomorrow's model run starts from
+                    // the PUBLISHED book. A missed, failed or unpublished earlier day is caught up
+                    // (published) first; until then the run refuses, nothing is sent, and the
+                    // refusal is the alert (QT_ALERT, exit 1, the cron log).
+                    auto unpublished = qt::earliest_unpublished_before(*db, portfolio_id,
+                                                                       combined_strategy_id, qt_date);
+                    if (unpublished.is_error()) {
+                        ERROR("QT: " + std::string(unpublished.error()->what()));
+                        return 1;
+                    }
+                    if (!unpublished.value().empty()) {
+                        const std::string why = "QT_ALERT " + portfolio_id + ": " +
+                                                unpublished.value() +
+                                                " is not published; publish it (catch the day up) "
+                                                "before the model run of " + qt_date + " (ruling 29)";
+                        ERROR(why);
+                        std::cerr << why << std::endl;
+                        return 1;
+                    }
+                }
+                qt_read_book = "qt";
+            }
+        }
+        // What each mode writes: the model run every book row it always wrote; a desk or override
+        // run only Day T of qt (the model run finalised Day T-1); publish, fallback and send no
+        // book row at all (the fallback's reset is the model run's seed copy, below).
+        const bool qt_model_records = qt_mode == qt::Mode::MODEL;
+        const bool qt_write_t1 =
+            qt_mode == qt::Mode::MODEL || qt_mode == qt::Mode::FINALIZE_SYSTEM;
+        const bool qt_write_day =
+            qt_mode != qt::Mode::PUBLISH && qt_mode != qt::Mode::FINALIZE_SYSTEM &&
+            qt_mode != qt::Mode::FALLBACK && qt_mode != qt::Mode::SEND;
+        const bool qt_export_csv = qt_mode == qt::Mode::MODEL || qt_sends;
+        // Item 3: on a desk-editable portfolio a store that fails (positions, executions,
+        // live_results, the equity curve, the run's metadata) is never a "done" over a partial
+        // book: the run exits non-zero, a desk or override run fails its command row, and a model
+        // run does not copy a partial system day into qt. A non-editable portfolio logs as before.
+        std::vector<std::string> qt_store_failures;
+        // Every book's failed stores of the day: the book e-mail reads the stored day, so a day
+        // whose stores failed is not mailed (a desk-editable book also fails its run, below).
+        std::vector<std::string> day_store_failures;
+        auto qt_store_failed = [&](const std::string& what) {
+            day_store_failures.push_back(what);
+            if (qt_desk_editable) qt_store_failures.push_back(what);
+        };
+        auto qt_store_failure_list = [&]() {
+            std::string list;
+            for (const auto& f : qt_store_failures) list += (list.empty() ? "" : ", ") + f;
+            return list;
+        };
+        const std::string qt_read_sql = " AND portfolio_type = " + qt::sql_literal(qt_read_book);
+        INFO("QT_BOOKS mode=" + qt::mode_name(qt_mode) + " portfolio=" + portfolio_id +
+             " desk_editable=" + (qt_desk_editable ? "true" : "false") + " read=" + qt_read_book +
+             " write=" + (qt_write_day ? qt_write_book : std::string("none")));
+        // Ruling 15: on a desk-editable portfolio the daily e-mail is publish's, never the model's.
+        if (qt_desk_editable && qt_mode == qt::Mode::MODEL) send_email = false;
+        // Ruling 17: each book is finalised into its own rows. The day starts from qt, so this run
+        // finalises qt's Day T-1; the system book's Day T-1 is finalised from system's own rows by
+        // the same binary in --finalize-system (Day T-1 rows of system only), run first.
+        bool qt_finalize_failed = false;
+        if (qt_mode == qt::Mode::MODEL && qt_read_book == "qt") {
+            const int rc = qt::run_finalize_system(qt_portfolio_dir, qt_date);
+            if (rc != 0) {
+                ERROR("QT_ALERT " + portfolio_id + ": the system book's Day T-1 (" + qt_prev_date +
+                      ") could not be finalised (--finalize-system exit " + std::to_string(rc) +
+                      "); the qt day runs, and this run exits 1");
+                qt_finalize_failed = true;
+            } else {
+                INFO("QT_FINALIZE_SYSTEM " + portfolio_id + " " + qt_prev_date +
+                     ": the system book's Day T-1 rows are finalised from system's own rows");
+            }
+        }
+
+        // The desk's book for --desk / --override / --publish (ruling 14: no seeded proposal,
+        // no desk run).
+        std::map<std::string, double> qt_desk_totals;
+        SleeveQuantities qt_publish_book;
+        std::set<std::string> qt_zero_keep;  // "sleeve|symbol" kept at 0 in qt (ruling 16)
+        qt::EmailSent qt_email_sent_before;  // publish: an earlier publish row sent the e-mail
+        if (qt_mode == qt::Mode::DESK || qt_mode == qt::Mode::OVERRIDE) {
+            if (qt_mode == qt::Mode::OVERRIDE) {
+                auto approved = qt::check_override_decision(*db, *qt_audit);
+                if (approved.is_error()) return qt_refuse(approved.error()->what());
+                if (!approved.value()) {
+                    auto finished = qt::finish_audit_row(*db, qt_audit->id, "done",
+                                                         nlohmann::json{{"approved", false}},
+                                                         "override rejected: nothing booked");
+                    if (finished.is_error()) return 1;
+                    return 0;
+                }
+            }
+            auto proposal = qt::load_book(*db, portfolio_id, combined_strategy_id, "qt_proposal",
+                                          qt_date);
+            if (proposal.is_error()) {
+                ERROR("QT: " + std::string(proposal.error()->what()));
+                return 1;
+            }
+            if (proposal.value().empty()) {
+                return qt_refuse("no qt_proposal rows for " + portfolio_id + " on " + qt_date +
+                                 ": the day's model run has not seeded the desk's book (ruling 14)");
+            }
+            qt_desk_totals = qt::book_totals(proposal.value());
+            // Ruling 16: a close is stored as a zero-quantity row. Every (sleeve, symbol) of the
+            // desk's proposal or of yesterday's book keeps its qt row at 0 when the stored
+            // quantity is 0.
+            for (const auto& [sleeve, rows] : proposal.value()) {
+                for (const auto& [symbol, quantity] : rows) {
+                    (void)quantity;
+                    qt_zero_keep.insert(sleeve + "|" + symbol);
+                }
+            }
+            auto yesterday = qt::load_book(*db, portfolio_id, combined_strategy_id, qt_read_book,
+                                           qt_prev_date);
+            if (yesterday.is_ok()) {
+                for (const auto& [sleeve, rows] : yesterday.value()) {
+                    for (const auto& [symbol, quantity] : rows) {
+                        if (quantity != 0.0) qt_zero_keep.insert(sleeve + "|" + symbol);
+                    }
+                }
+            }
+        } else if (qt_mode == qt::Mode::PUBLISH || qt_mode == qt::Mode::FALLBACK) {
+            // Contract C7 (the daily cutoff, 2026-10-09). --publish is the desk's approval;
+            // --fallback is the scheduler's (10:00, or the catch-up of a past day). Both freeze
+            // the day. The e-mail goes in this run only with --send-now; otherwise an approval is
+            // e-mailed by the 09:30 send, and a past day's fallback is never e-mailed.
+            const bool fallback = qt_mode == qt::Mode::FALLBACK;
+            const std::string source = fallback ? qt::kSourceFallback : qt::kSourceDesk;
+            auto has_qt = qt::book_has_day(*db, portfolio_id, combined_strategy_id, "qt", qt_date);
+            if (has_qt.is_error()) return qt_fail(has_qt.error()->what());
+            if (!has_qt.value()) {
+                return qt_refuse("no qt book for " + portfolio_id + " on " + qt_date +
+                                 ": the day's model run has not run");
+            }
+            auto state = qt::publish_state(*db, portfolio_id, combined_strategy_id, qt_date);
+            if (state.is_error()) return qt_fail(state.error()->what());
+            // A re-run of this very row after it approved (it died before its outcome was
+            // written) goes on to the send; any other published day is frozen.
+            const bool approved_here = qt_audit->result.contains("published_at");
+            const std::string already = state.value().published_at;
+            if (!already.empty() && !approved_here) {
+                return qt_refuse(qt_date + " was already published at " + already + " by " +
+                                 state.value().published_by + "; a published day is frozen");
+            }
+            if (!approved_here) {
+                auto earlier = qt::earliest_unpublished_before(*db, portfolio_id,
+                                                               combined_strategy_id, qt_date);
+                if (earlier.is_error()) return qt_fail(earlier.error()->what());
+                if (!earlier.value().empty()) {
+                    return qt_refuse("an earlier day, " + earlier.value() +
+                                     ", is not published (no qt book, or never published): "
+                                     "publish it first (ruling 29)");
+                }
+                if (!fallback) {
+                    // Item 3: the qt day is approved only when its last writer finished it.
+                    auto blocker =
+                        qt::publish_blocker(*db, portfolio_id, combined_strategy_id, qt_date);
+                    if (blocker.is_error()) return qt_fail(blocker.error()->what());
+                    if (!blocker.value().empty()) return qt_refuse(blocker.value());
+                } else {
+                    // The fallback publishes the MODEL's book: qt (positions, executions,
+                    // live_results, equity) is copied again from system, exactly as the model run
+                    // seeds it (book_source 'model'). An unapproved desk save or override of the
+                    // day is discarded.
+                    auto reset = qt::copy_book_day(*db, portfolio_id, combined_strategy_id,
+                                                   qt_date, "system", "qt", true, "model");
+                    if (reset.is_error()) {
+                        return qt_fail("qt could not be reset to the model's book: " +
+                                       std::string(reset.error()->what()));
+                    }
+                    INFO("QT_FALLBACK " + portfolio_id + " " + qt_date +
+                         ": qt reset to the model's book (book_source model)");
+                }
+                auto approved = qt::approve_day(*db, qt_audit_id, portfolio_id,
+                                                combined_strategy_id, qt_date,
+                                                qt_audit->requested_by, source);
+                if (approved.is_error()) return qt_fail(approved.error()->what());
+                INFO("QT_APPROVE " + portfolio_id + " " + qt_date + " published at " +
+                     approved.value() + " by " + qt_audit->requested_by + " (publish_source " +
+                     source + ")");
+            }
+            if (!qt_send_now) {
+                nlohmann::json result = {
+                    {"published", true}, {"publish_source", source}, {"emailed", false}};
+                std::string message = "approved " + qt_date +
+                                      ": the day is frozen; the daily e-mail goes at 09:30 "
+                                      "New York";
+                if (fallback) {
+                    result["send_skipped"] = "past day";
+                    message = "published " + qt_date + " with the model's book (" +
+                              qt_audit->requested_by + "); a past day is not e-mailed";
+                }
+                auto finished = qt::finish_audit_row(*db, qt_audit_id, "done", result, message);
+                if (finished.is_error()) {
+                    ERROR("QT: " + std::string(finished.error()->what()));
+                    return 1;
+                }
+                INFO("QT_" + std::string(fallback ? "FALLBACK" : "APPROVE") + " done " +
+                     portfolio_id + " " + qt_date + ": " + message);
+                return 0;
+            }
+            // Item 7 and C7: the e-mail is sent at most once. A day whose send was recorded
+            // (sent_at, or a publish row's email_sent_at) is not sent again.
+            if (!state.value().sent_at.empty()) {
+                qt_email_sent_before.at = state.value().sent_at;
+            } else {
+                auto sent = qt::publish_email_sent(*db, portfolio_id, qt_date);
+                if (sent.is_error()) return qt_fail(sent.error()->what());
+                qt_email_sent_before = sent.value();
+            }
+            if (!qt_email_sent_before.at.empty()) {
+                INFO("QT_SEND the e-mail of " + qt_date + " was sent at " +
+                     qt_email_sent_before.at + "; it is not sent again");
+                send_email = false;
+            }
+            auto book = qt::load_book(*db, portfolio_id, combined_strategy_id, "qt", qt_date);
+            if (book.is_error()) return qt_fail(book.error()->what());
+            qt_publish_book = book.value();
+            qt_desk_totals = qt::book_totals(qt_publish_book);
+        } else if (qt_mode == qt::Mode::SEND) {
+            // Contract C7: the 09:30 send. Only a published day is sent, and only once.
+            auto state = qt::publish_state(*db, portfolio_id, combined_strategy_id, qt_date);
+            if (state.is_error()) return qt_fail(state.error()->what());
+            if (state.value().published_at.empty()) {
+                return qt_refuse(qt_date + " is not published: nothing is e-mailed before the "
+                                 "approval or the 10:00 fallback");
+            }
+            if (!state.value().sent_at.empty() && qt_mail_test_to.empty()) {
+                INFO("QT_SEND " + portfolio_id + " " + qt_date + " was already sent at " +
+                     state.value().sent_at + "; not sent again");
+                std::cerr << "QT_SEND already sent at " << state.value().sent_at << std::endl;
+                return 0;
+            }
+            auto legacy = qt::publish_email_sent(*db, portfolio_id, qt_date);
+            if (legacy.is_error()) return qt_fail(legacy.error()->what());
+            if (!legacy.value().at.empty() && qt_mail_test_to.empty()) {
+                // Sent by a publish row before migration 027: recorded, not sent again.
+                auto recorded =
+                    qt::record_sent(*db, 0, portfolio_id, combined_strategy_id, qt_date);
+                if (recorded.is_error()) return qt_fail(recorded.error()->what());
+                INFO("QT_SEND " + qt_date + " was sent at " + legacy.value().at +
+                     " (publish row " + std::to_string(legacy.value().row_id) +
+                     "); sent_at recorded, not sent again");
+                return 0;
+            }
+            auto has_day = qt::book_has_day(*db, portfolio_id, combined_strategy_id,
+                                            qt_write_book, qt_date);
+            if (has_day.is_error()) return qt_fail(has_day.error()->what());
+            if (!has_day.value()) {
+                return qt_refuse("no " + qt_write_book + " book for " + portfolio_id + " on " +
+                                 qt_date);
+            }
+            auto book = qt::load_book(*db, portfolio_id, combined_strategy_id, qt_write_book,
+                                      qt_date);
+            if (book.is_error()) return qt_fail(book.error()->what());
+            qt_publish_book = book.value();
+            qt_desk_totals = qt::book_totals(qt_publish_book);
+            INFO("QT_SEND " + portfolio_id + " " + qt_date + ": published at " +
+                 state.value().published_at + " by " + state.value().published_by +
+                 " (publish_source " + state.value().publish_source + "); e-mailing the stored " +
+                 qt_write_book + " book");
+        }
+
+        // A SKIPPED DAY MUST NOT OPEN THE BOOK FROM FLAT.
+        //
+        // Every position this runner writes is sized as a DELTA from the previous
+        // calendar day's book, which it reads with `load_positions_by_date(now - 24h)`
+        // -- at the seed below, at the PnL lookup, at the T-1 finalization. An empty read
+        // does not distinguish "the strategy holds nothing" from "nobody ran yesterday, so
+        // nothing was written". Without this guard the runner would seed flat, size the
+        // whole book as a fresh entry against contracts the broker still holds, store that,
+        // and exit 0: a monitor watching exit codes would see a clean run while the book is
+        // being abandoned. The equity runner has the same guard.
+        //
+        // The discriminator is NOT "are there positions" -- a flat book has none and is
+        // a perfectly valid state. It is "did a run HAPPEN for that date". Every run
+        // writes a live_results row whether or not it holds anything, so that row is the
+        // evidence, and it is what this asks for.
+        //
+        // Deliberately NOT resolved by falling back to MAX(date): that would paper over
+        // a broken invariant and could silently revive a stale book. Runs must be
+        // sequential and complete -- inherent to the T-1 lag model, where day T's P&L is
+        // finalized by day T+1's run -- so a hole means a run was missed, and the remedy
+        // is to replay the missing dates in order, which works and needs no code. This
+        // guard names the hole.
+        //
+        // Placed here, before the run-metadata write and before any bar is loaded, so a
+        // refused run writes nothing at all. On a consecutive chain the first query
+        // returns a row and this block is silent.
+        {
+            const std::string prev_date_str = core::format_utc_date(now - std::chrono::hours(24));
+            const std::string today_date_str = core::format_utc_date(now);
+
+            auto first_cell = [](const Result<std::shared_ptr<arrow::Table>>& r) -> std::string {
+                if (r.is_error() || !r.value() || r.value()->num_rows() == 0) return {};
+                auto col = std::static_pointer_cast<arrow::StringArray>(
+                    r.value()->column(0)->chunk(0));
+                if (!col || col->length() == 0 || col->IsNull(0)) return {};
+                return std::string(col->GetView(0));
+            };
+
+            auto prev_run = db->execute_query(
+                "SELECT count(*)::text FROM trading.live_results "
+                "WHERE strategy_id = '" + combined_strategy_id + "'"
+                " AND portfolio_id = '" + portfolio_id + "'"
+                " AND date = '" + prev_date_str + "'" + qt_read_sql);
+
+            long prev_run_rows = 0;
+            const std::string prev_cell = first_cell(prev_run);
+            if (!prev_cell.empty()) prev_run_rows = std::stol(prev_cell);
+
+            if (prev_run.is_error()) {
+                // Cannot establish the invariant either way. Say so rather than
+                // treating an unanswered question as a clean answer.
+                WARN("Could not check whether the previous day (" + prev_date_str +
+                     ") ran: " + std::string(prev_run.error()->what()) +
+                     ". Proceeding; verify the book by hand if this run writes "
+                     "unexpected executions.");
+            } else if (prev_run_rows == 0) {
+                // No live_results row for T-1. Before refusing, ask whether the BOOK is
+                // there anyway.
+                //
+                // The equity guard reaches its "did a run happen" question only from
+                // inside `if (previous_positions.empty())`, so a day whose positions were
+                // written but whose live_results write failed -- which the runner logs as
+                // an ERROR and then exits 0 (live_portfolio.cpp, "Failed to save live
+                // results") -- does not stop the next day there. This guard runs before
+                // the book is loaded, so without this second question it would be
+                // STRICTER than the equity guard, and it would refuse a run that has a
+                // complete book to seed from. Production holds such dates.
+                //
+                // Asking the database rather than loading the book keeps the guard where
+                // it is, ahead of every write.
+                auto prev_book = db->execute_query(
+                    "SELECT count(*)::text FROM trading.positions "
+                    "WHERE strategy_id = '" + combined_strategy_id + "'"
+                    " AND portfolio_id = '" + portfolio_id + "'"
+                    " AND date = '" + prev_date_str + "'" + qt_read_sql);
+                long prev_book_rows = 0;
+                const std::string book_cell = first_cell(prev_book);
+                if (!book_cell.empty()) prev_book_rows = std::stol(book_cell);
+
+                if (prev_book_rows > 0) {
+                    WARN("No live_results row for the previous day (" + prev_date_str +
+                         "), but " + std::to_string(prev_book_rows) +
+                         " position row(s) are stored for it, so the book is intact and this "
+                         "run can seed from it. That day's results write did not complete; "
+                         "its reported numbers are missing and should be back-filled.");
+                    // fall through and run
+                } else {
+                    auto last_run = db->execute_query(
+                        "SELECT COALESCE(MAX(date)::text, '') FROM trading.live_results "
+                        "WHERE strategy_id = '" + combined_strategy_id + "'"
+                        " AND portfolio_id = '" + portfolio_id + "'"
+                        " AND date < '" + today_date_str + "'" + qt_read_sql);
+                    const std::string last_run_date = first_cell(last_run);
+
+                    if (!last_run_date.empty()) {
+                        ERROR("No run was recorded for the previous day (" + prev_date_str +
+                              ") and no positions are stored for it either, but " +
+                              combined_strategy_id + " / " + portfolio_id + " last ran on " +
+                              last_run_date +
+                              ". A run was missed. Replay every date from " + last_run_date +
+                              " forward, in order, before running " + today_date_str +
+                              " -- continuing would seed the book flat and size every "
+                              "position as a fresh entry against contracts the broker still "
+                              "holds. Refusing to run.");
+                        return 1;
+                    }
+                    INFO("No prior run anywhere for " + combined_strategy_id + " / " +
+                         portfolio_id + " -- genuine first run.");
+                }
+            }
+        }
+
+        // Is the annualization anchor consistent with the book it annualizes?
+        //
+        // trading.get_trading_days(strategy, target, portfolio) takes its start date from
+        // trading.strategy_trading_days_metadata.live_start_date and falls back to
+        // MIN(date) over live_results only when NO row exists. A row LATER than the
+        // book's own first day is therefore strictly worse than no row at all, and the
+        // function cannot notice because it stops looking the moment it finds one: every
+        // date before the anchor gets GREATEST(1, target - start + 1) = 1 trading day, so
+        // total_annualized_return collapses onto total_cumulative_return, and just after
+        // the anchor a small cumulative return annualizes into a number with no meaning.
+        //
+        // The equity runner and the futures runners share assess_trading_days_anchor: the
+        // same comparison and the same WARN. The metadata row stays authoritative; the count
+        // is never recomputed here, and a wrong row is a data correction, never made here.
+        {
+            auto anchor_cell = [](const Result<std::shared_ptr<arrow::Table>>& r) -> std::string {
+                if (r.is_error() || !r.value() || r.value()->num_rows() == 0) return {};
+                auto col = std::static_pointer_cast<arrow::StringArray>(
+                    r.value()->column(0)->chunk(0));
+                if (!col || col->length() == 0 || col->IsNull(0)) return {};
+                return std::string(col->GetView(0));
+            };
+
+            auto anchor_q = db->execute_query(
+                "SELECT COALESCE(MIN(live_start_date)::text, '') "
+                "FROM trading.strategy_trading_days_metadata "
+                "WHERE strategy_id = '" + combined_strategy_id + "'"
+                " AND portfolio_id = '" + portfolio_id + "'");
+            auto first_q = db->execute_query(
+                "SELECT COALESCE(MIN(date)::text, '') FROM trading.live_results "
+                "WHERE strategy_id = '" + combined_strategy_id + "'"
+                " AND portfolio_id = '" + portfolio_id + "'" + qt_read_sql);
+
+            if (anchor_q.is_error() || first_q.is_error()) {
+                WARN("Could not check the annualization anchor for " + portfolio_id +
+                     "; total_annualized_return is reported as the DB function computes it.");
+            } else {
+                const auto anchor = assess_trading_days_anchor(anchor_cell(anchor_q),
+                                                               anchor_cell(first_q));
+                if (anchor.anchor_is_late) {
+                    WARN("Annualization anchor is LATER than the book it annualizes: "
+                         "strategy_trading_days_metadata.live_start_date = " +
+                         anchor.metadata_anchor + " but live_results for " +
+                         combined_strategy_id + " / " + portfolio_id + " start " +
+                         anchor.earliest_result +
+                         ". trading.get_trading_days would return 1 for every date before "
+                         "the anchor and explode total_annualized_return just after it"
+                         ". The anchor is NOT moved: the metadata row is authoritative and "
+                         "the function's count stands. Fix the data: correct the row if it is "
+                         "wrong, or remove the stray results if they are.");
+                } else {
+                    INFO("Annualization anchor " +
+                         (anchor.effective_anchor.empty() ? std::string("(none yet)")
+                                                          : anchor.effective_anchor) +
+                         " is consistent with the book for " + combined_strategy_id + " / " +
+                         portfolio_id);
+                }
+            }
+        }
+
+        // portfolio.json's per_contract_rolls turns the futures bar source onto the
+        // held contract's own bars (data/per_contract_source.hpp); off, every path is today's.
+        if (auto source = contract_rolls::configure_per_contract_source(
+                app_config.per_contract_rolls, app_config.per_contract_switch_bar,
+                app_config.carry.enabled());
+            source.is_error()) {
+            std::cerr << source.error()->what() << std::endl;
+            ERROR(source.error()->what());
+            return 1;
+        }
+        if (contract_rolls::PerContractSource::instance().enabled()) {
+            // A run consumes its T-1 bar for the first time (runs go on
+            // consecutive days), so the rule's fallbacks are logged from it, each once.
+            const std::string log_floor = core::format_utc_date(now - std::chrono::hours(24));
+            contract_rolls::PerContractSource::instance().set_log_floor(contract_rolls::parse_ymd(log_floor));
+            INFO("PER_CONTRACT_ROLLS fallbacks are logged for bars from " + log_floor +
+                 " (the bar this run consumes for the first time), each once; earlier ones were logged by "
+                 "the run that consumed them");
+        }
+
         double initial_capital = app_config.initial_capital;
 
         auto symbols_result = db->get_symbols(trade_ngin::AssetClass::FUTURES);
         auto symbols = symbols_result.value();
 
         if (symbols_result.is_ok()) {
+            // Declared instrument-id relabels and listing dates (data/listing_dates.hpp; nothing
+            // happens without portfolio.json's instrument_id_relabels and listing_dates). The
+            // relabels are installed here, before any bar or id row is loaded. With contracts
+            // declared the run reads the same tradeable windows the backtest reads, and the guard
+            // (live/live_listing_guard.hpp) judges the symbol list as the database gives it and
+            // the stored Day T-1 book: a refusal sits above the live_run_metadata upsert like the
+            // other refusals, so a refused run leaves no row.
+            // Not read with per_contract_rolls on (the rule rolls each change, trigger alias).
+            const auto relabels = relabels_read(app_config.instrument_id_relabels, app_config.per_contract_rolls);
+            if (!relabels.empty()) {
+                ListingDates::instance().set_relabels(relabels);
+                std::string line = "INSTRUMENT_ID_RELABELS in force (not rolls):";
+                for (const auto& r : relabels) {
+                    line += " " + r.symbol + " from " + r.date + " id " + r.to + " is read as " + r.from + ";";
+                }
+                INFO(line);
+            } else if (!app_config.instrument_id_relabels.empty()) {
+                INFO(relabels_not_read_line(app_config.instrument_id_relabels));
+            }
+            // A micro stored beside its full-size root with no pair declared
+            // refuses the run before its first write (ListingDates::unpaired_micro_refusals), with
+            // or without listing_dates.
+            const auto unpaired =
+                ListingDates::unpaired_micro_refusals(symbols, app_config.listing_dates);
+            if (!unpaired.empty()) {
+                for (const auto& line : unpaired) ERROR(line);
+                return 1;
+            }
+            if (!app_config.listing_dates.empty()) {
+                ListingDates::instance().set(app_config.listing_dates);
+                // Pairs the stored data or the bar source cannot carry refuse
+                // the run before its first write (ListingDates::refusals).
+                const auto listing_refused =
+                    ListingDates::instance().refusals(symbols, app_config.per_contract_rolls);
+                if (!listing_refused.empty()) {
+                    for (const auto& line : listing_refused) ERROR(line);
+                    return 1;
+                }
+                // A predecessor with stored rows of its own (GC.v.0, SI.v.0) is not in the
+                // run's universe while its listed contract is stored; the guard judges the rest.
+                std::vector<std::string> carried;
+                symbols = ListingDates::instance().run_universe(symbols, &carried);
+                if (!carried.empty()) {
+                    std::string carried_line =
+                        "LISTING_DATES stored rows not an instrument of this run (the listed contract carries them):";
+                    for (const auto& s : carried) carried_line += " " + s;
+                    INFO(carried_line);
+                }
+                // each sleeve's stored book on its own (one sleeve's zero row must not hide
+                // another's holding), every non-zero row kept
+                std::unordered_map<std::string, Position> listing_book;
+                for (const auto& sleeve : strategy_names) {
+                    auto sleeve_book = db->load_positions_by_date(
+                        combined_strategy_id, sleeve, portfolio_id, now - std::chrono::hours(24),
+                        "trading.positions", qt_read_book);
+                    if (sleeve_book.is_error()) {
+                        const std::string line =
+                            "LISTING_DATE_REFUSAL sleeve " + sleeve +
+                            "'s stored Day T-1 book is unreadable (" +
+                            std::string(sleeve_book.error()->what()) +
+                            "). Refusing to run: it cannot be checked for a predecessor contract.";
+                        ERROR(line);
+                        std::cerr << line << std::endl;
+                        return 1;
+                    }
+                    for (const auto& [symbol, position] : sleeve_book.value()) {
+                        if (position.quantity.as_double() != 0.0) listing_book[symbol] = position;
+                    }
+                }
+                const auto listing_refusals = live_listing_refusals(
+                    app_config.listing_dates, symbols, listing_book,
+                    SessionClassifier::ymd(SessionClassifier::day_of(now - std::chrono::hours(24))));
+                for (const auto& line : listing_refusals) {
+                    ERROR(line);
+                    std::cerr << line << std::endl;
+                }
+                if (!listing_refusals.empty()) {
+                    return 1;
+                }
+                std::string line = "LISTING_DATES in force:";
+                for (const auto& c : app_config.listing_dates) {
+                    line += " " + c.symbol + " from " + c.listed + " (before it " + c.before + ");";
+                }
+                INFO(line);
+            }
             // Remove continuous contract variants (.c.0) and full-size ES
             // Using remove_if to avoid undefined behavior from erase-during-iteration
             symbols.erase(
@@ -357,15 +1262,18 @@ int main(int argc, char* argv[]) {
         // Setup portfolio configuration
         trade_ngin::PortfolioConfig portfolio_config;
         portfolio_config.total_capital = initial_capital;
-        portfolio_config.reserve_capital = initial_capital * app_config.reserve_capital_pct;
         portfolio_config.max_strategy_allocation =
             app_config.strategy_defaults.max_strategy_allocation;
         portfolio_config.min_strategy_allocation =
             app_config.strategy_defaults.min_strategy_allocation;
-        portfolio_config.use_optimization = app_config.strategy_defaults.use_optimization;
-        portfolio_config.use_risk_management = app_config.strategy_defaults.use_risk_management;
+        portfolio_config.use_optimization = app_config.use_optimization;
+        portfolio_config.covariance_history_prices = app_config.covariance_history_prices;
+        portfolio_config.covariance_stale_dates = app_config.covariance_stale_dates;
+        portfolio_config.risk_modules = app_config.risk_schema.portfolio;
+        portfolio_config.sleeve_risk_modules = app_config.risk_schema.sleeves;
         portfolio_config.opt_config = opt_config;
         portfolio_config.risk_config = risk_config;
+        apply_loop_config(app_config, portfolio_config);
 
         // ========================================
         // PHASE 2: STRATEGY INSTANCE FACTORY
@@ -377,7 +1285,9 @@ int main(int argc, char* argv[]) {
         base_strategy_config.asset_classes = {trade_ngin::AssetClass::FUTURES};
         base_strategy_config.frequencies = {trade_ngin::DataFrequency::DAILY};
         base_strategy_config.max_drawdown = app_config.max_drawdown;
-        base_strategy_config.max_leverage = app_config.max_leverage;
+        // The sleeves' own leverage limit is the book's gross leverage limit L_max (risk.json's
+        // max_leverage is retired on a futures book).
+        base_strategy_config.max_leverage = loop_gross_leverage_limit(app_config);
 
         // Add position limits and costs for all symbols
         for (const auto& symbol : symbols) {
@@ -390,6 +1300,9 @@ int main(int argc, char* argv[]) {
 
         // Vector to hold all strategy instances
         std::vector<std::shared_ptr<trade_ngin::StrategyInterface>> strategies;
+        // Each sleeve's values as resolved here and handed to its strategy: logged once below and
+        // stored in every live_results.config the run writes (core/resolved_sleeves.hpp).
+        std::vector<trade_ngin::ResolvedSleeve> resolved_sleeves;
 
         INFO("Creating " + std::to_string(strategy_names.size()) + " strategies from config");
 
@@ -411,19 +1324,20 @@ int main(int argc, char* argv[]) {
             if (strategy_type == "TrendFollowingStrategy") {
                 // Create TrendFollowingStrategy (normal speed)
                 trade_ngin::TrendFollowingConfig trend_config;
+                // A futures sleeve's risk_target, idm and vol_lookback_short
+                // are required (strategy/sleeve_config.hpp): no in-code default.
+                {
+                    auto sleeve_keys =
+                        trade_ngin::read_required_sleeve_keys(strategy_name, strategy_def, trend_config);
+                    if (sleeve_keys.is_error()) {
+                        Logger::register_component("SleeveConfig");
+                        ERROR(std::string(sleeve_keys.error()->what()));
+                        std::cerr << sleeve_keys.error()->what() << std::endl;
+                        return 1;
+                    }
+                }
                 if (strategy_def.contains("config")) {
                     const auto& cfg = strategy_def["config"];
-                    trend_config.weight = cfg.value("weight", 0.03);
-                    trend_config.risk_target = cfg.value("risk_target", 0.2);
-                    trend_config.idm = cfg.value("idm", 2.5);
-                    trend_config.max_symbol_concentration =
-                        cfg.value("max_symbol_concentration", 0.15);
-                    trend_config.use_position_buffering = cfg.value("use_position_buffering", true);
-                    trend_config.carver_buffer_floor = cfg.value(
-                        "carver_buffer_floor", app_config.strategy_defaults.carver_buffer_floor);
-                    trend_config.carver_buffer_position_factor =
-                        cfg.value("carver_buffer_position_factor",
-                                  app_config.strategy_defaults.carver_buffer_position_factor);
                     if (cfg.contains("ema_windows")) {
                         trend_config.ema_windows.clear();
                         for (const auto& window : cfg["ema_windows"]) {
@@ -431,7 +1345,6 @@ int main(int argc, char* argv[]) {
                                 {window[0].get<int>(), window[1].get<int>()});
                         }
                     }
-                    trend_config.vol_lookback_short = cfg.value("vol_lookback_short", 32);
                     trend_config.vol_lookback_long = cfg.value("vol_lookback_long", 252);
                 }
                 // Set default FDM if not loaded
@@ -439,26 +1352,43 @@ int main(int argc, char* argv[]) {
                     trend_config.fdm = app_config.strategy_defaults.fdm;
                 }
 
+                // The equity slow rule acts on the book's first sleeve only; a first sleeve that
+                // does not carry the rule's pairs is refused when built.
+                if (strategy_name == strategy_names.front()) {
+                    trend_config.equity_slow_symbols = app_config.equity_slow_rule.symbols;
+                    trend_config.equity_slow_pairs = app_config.equity_slow_rule.pairs;
+                    // Trading rules removed by cost (no value changes without the block).
+                    trade_ngin::hand_over_trading_rule_removals(app_config, trend_config);
+                    // Carry (trade-ngin #185; weight 0 or the block absent: no value changes).
+                    trade_ngin::hand_over_carry(app_config, trend_config);
+                    // The first sleeve's own series and its risk target feed the risk overlay
+                    // (the three risk limits are ratios to this tau).
+                    portfolio_config.overlay_sleeve = strategy_name;
+                    portfolio_config.overlay_tau = trend_config.risk_target;
+                }
+                resolved_sleeves.push_back(
+                    {strategy_name, trend_config.idm, trend_config.risk_target, allocation});
                 strategy = std::make_shared<trade_ngin::TrendFollowingStrategy>(
                     strategy_name, strategy_config, trend_config, db, registry_ptr);
 
             } else if (strategy_type == "TrendFollowingFastStrategy") {
-                // Create TrendFollowingFastStrategy
-                trade_ngin::TrendFollowingFastConfig trend_config;
+                // The FAST sleeve: TrendFollowingStrategy on the fast configuration
+                trade_ngin::TrendFollowingConfig trend_config =
+                    trade_ngin::fast_trend_following_config();
+                // A futures sleeve's risk_target, idm and vol_lookback_short
+                // are required (strategy/sleeve_config.hpp): no in-code default.
+                {
+                    auto sleeve_keys =
+                        trade_ngin::read_required_sleeve_keys(strategy_name, strategy_def, trend_config);
+                    if (sleeve_keys.is_error()) {
+                        Logger::register_component("SleeveConfig");
+                        ERROR(std::string(sleeve_keys.error()->what()));
+                        std::cerr << sleeve_keys.error()->what() << std::endl;
+                        return 1;
+                    }
+                }
                 if (strategy_def.contains("config")) {
                     const auto& cfg = strategy_def["config"];
-                    trend_config.weight = cfg.value("weight", 0.03);
-                    trend_config.risk_target = cfg.value("risk_target", 0.25);
-                    trend_config.idm = cfg.value("idm", 2.5);
-                    trend_config.max_symbol_concentration =
-                        cfg.value("max_symbol_concentration", 0.15);
-                    trend_config.use_position_buffering =
-                        cfg.value("use_position_buffering", false);
-                    trend_config.carver_buffer_floor = cfg.value(
-                        "carver_buffer_floor", app_config.strategy_defaults.carver_buffer_floor);
-                    trend_config.carver_buffer_position_factor =
-                        cfg.value("carver_buffer_position_factor",
-                                  app_config.strategy_defaults.carver_buffer_position_factor);
                     if (cfg.contains("ema_windows")) {
                         trend_config.ema_windows.clear();
                         for (const auto& window : cfg["ema_windows"]) {
@@ -466,57 +1396,25 @@ int main(int argc, char* argv[]) {
                                 {window[0].get<int>(), window[1].get<int>()});
                         }
                     }
-                    trend_config.vol_lookback_short = cfg.value("vol_lookback_short", 16);
                     trend_config.vol_lookback_long = cfg.value("vol_lookback_long", 252);
                 }
                 if (trend_config.fdm.empty()) {
                     trend_config.fdm = app_config.strategy_defaults.fdm;
                 }
 
-                strategy = std::make_shared<trade_ngin::TrendFollowingFastStrategy>(
-                    strategy_name, strategy_config, trend_config, db, registry_ptr);
-
-            } else if (strategy_type == "TrendFollowingSlowStrategy") {
-                // Create TrendFollowingSlowStrategy (legacy support)
-                trade_ngin::TrendFollowingSlowConfig trend_config;
-                if (strategy_def.contains("config")) {
-                    const auto& cfg = strategy_def["config"];
-                    trend_config.weight = cfg.value("weight", 0.03);
-                    trend_config.risk_target = cfg.value("risk_target", 0.15);
-                    trend_config.idm = cfg.value("idm", 2.5);
-                    trend_config.max_symbol_concentration =
-                        cfg.value("max_symbol_concentration", 0.15);
-                    trend_config.use_position_buffering = cfg.value("use_position_buffering", true);
-                    trend_config.carver_buffer_floor = cfg.value(
-                        "carver_buffer_floor", app_config.strategy_defaults.carver_buffer_floor);
-                    trend_config.carver_buffer_position_factor =
-                        cfg.value("carver_buffer_position_factor",
-                                  app_config.strategy_defaults.carver_buffer_position_factor);
-                    if (cfg.contains("ema_windows")) {
-                        trend_config.ema_windows.clear();
-                        for (const auto& window : cfg["ema_windows"]) {
-                            trend_config.ema_windows.push_back(
-                                {window[0].get<int>(), window[1].get<int>()});
-                        }
-                    }
-                    trend_config.vol_lookback_short = cfg.value("vol_lookback_short", 64);
-                    trend_config.vol_lookback_long = cfg.value("vol_lookback_long", 252);
-                } else {
-                    // Use hardcoded defaults for slow strategy
-                    trend_config.weight = 0.03;
-                    trend_config.risk_target = 0.15;
-                    trend_config.idm = 2.5;
-                    trend_config.use_position_buffering = true;
-                    trend_config.ema_windows = {{4, 16},   {8, 32},   {16, 64},
-                                                {32, 128}, {64, 256}, {128, 512}};
-                    trend_config.vol_lookback_short = 64;
-                    trend_config.vol_lookback_long = 252;
+                // The equity slow rule acts on the book's first sleeve only; a first sleeve that
+                // does not carry the rule's pairs is refused when built.
+                if (strategy_name == strategy_names.front()) {
+                    trend_config.equity_slow_symbols = app_config.equity_slow_rule.symbols;
+                    trend_config.equity_slow_pairs = app_config.equity_slow_rule.pairs;
+                    // The first sleeve's own series and its risk target feed the risk overlay
+                    // (the three risk limits are ratios to this tau).
+                    portfolio_config.overlay_sleeve = strategy_name;
+                    portfolio_config.overlay_tau = trend_config.risk_target;
                 }
-                if (trend_config.fdm.empty()) {
-                    trend_config.fdm = app_config.strategy_defaults.fdm;
-                }
-
-                strategy = std::make_shared<trade_ngin::TrendFollowingSlowStrategy>(
+                resolved_sleeves.push_back(
+                    {strategy_name, trend_config.idm, trend_config.risk_target, allocation});
+                strategy = std::make_shared<trade_ngin::TrendFollowingStrategy>(
                     strategy_name, strategy_config, trend_config, db, registry_ptr);
 
             } else {
@@ -547,6 +1445,7 @@ int main(int argc, char* argv[]) {
         }
 
         INFO("Successfully created " + std::to_string(strategies.size()) + " strategies");
+        INFO(trade_ngin::resolved_sleeves_log_line(portfolio_id, resolved_sleeves));
 
         // Create map from strategy name to strategy instance for CSV export
         trade_ngin::StrategyInstancesMap strategy_instances_map;
@@ -558,15 +1457,6 @@ int main(int argc, char* argv[]) {
         }
         INFO("Created strategy instances map with " +
              std::to_string(strategy_instances_map.size()) + " entries");
-
-        // Get reference to first strategy for single-strategy compatibility (Phase 3 will fix this)
-        auto tf_strategy = strategies[0];
-
-        // Cast to TrendFollowingStrategy for methods like get_forecast/get_position (Phase 3 will
-        // iterate all) Note: This works for both TrendFollowingStrategy and its subclasses
-        // (Slow/Fast)
-        auto tf_strategy_typed =
-            std::dynamic_pointer_cast<trade_ngin::TrendFollowingStrategy>(tf_strategy);
 
         // ========================================
         // PHASE 3: PORTFOLIO MANAGER LOOP
@@ -585,8 +1475,7 @@ int main(int argc, char* argv[]) {
                  std::to_string(allocation * 100.0) + "%");
 
             auto add_result =
-                portfolio->add_strategy(strategy, allocation, portfolio_config.use_optimization,
-                                        portfolio_config.use_risk_management);
+                portfolio->add_strategy(strategy, allocation, portfolio_config.use_optimization);
 
             if (add_result.is_error()) {
                 ERROR("Failed to add strategy " + strat_name +
@@ -598,42 +1487,10 @@ int main(int argc, char* argv[]) {
 
         INFO("All " + std::to_string(strategies.size()) + " strategies added to portfolio");
 
-        // ========================================
-        // STORE LIVE RUN METADATA
-        // Save run metadata (allocations, configs) for this trading day
-        // ========================================
-        INFO("Storing live run metadata for this trading day...");
-        {
-            // Build portfolio config JSON
-            nlohmann::json portfolio_config_json;
-            portfolio_config_json["total_capital"] =
-                static_cast<double>(portfolio_config.total_capital);
-            portfolio_config_json["reserve_capital"] =
-                static_cast<double>(portfolio_config.reserve_capital);
-            portfolio_config_json["use_optimization"] = portfolio_config.use_optimization;
-            portfolio_config_json["use_risk_management"] = portfolio_config.use_risk_management;
-
-            // Convert strategy_allocations to JSON
-            nlohmann::json strategy_alloc_json(strategy_allocations);
-
-            // strategy_configs is already nlohmann::json
-            auto metadata_result = db->store_live_run_metadata(
-                now, combined_strategy_id, portfolio_id, strategy_alloc_json, portfolio_config_json,
-                strategy_configs  // already nlohmann::json
-            );
-
-            if (metadata_result.is_error()) {
-                WARN("Failed to store live run metadata: " +
-                     std::string(metadata_result.error()->what()));
-            } else {
-                INFO("Successfully stored live run metadata for date");
-            }
-        }
-
         // Create LiveTradingCoordinator to manage all live trading components
         INFO("Creating LiveTradingCoordinator for centralized component management");
         LiveTradingConfig coordinator_config;
-        coordinator_config.strategy_id = combined_strategy_id;  // From config (Phase 1)
+        coordinator_config.strategy_id = combined_strategy_id;  // From config
         coordinator_config.portfolio_id = portfolio_id;         // From loaded config
         coordinator_config.schema = "trading";
         coordinator_config.initial_capital = initial_capital;
@@ -658,15 +1515,24 @@ int main(int argc, char* argv[]) {
         auto* results_manager = coordinator->get_results_manager();
         auto* price_manager = coordinator->get_price_manager();
         auto* pnl_manager = coordinator->get_pnl_manager();
+        // QT plan E3: yesterday's book is read from the start book, today's rows are written to
+        // the run's book (both "system" on a non-editable portfolio).
+        data_loader->set_book(qt_read_book);
+        if (auto booked = results_manager->set_book(qt_write_book); booked.is_error()) {
+            ERROR("QT: " + std::string(booked.error()->what()));
+            return 1;
+        }
 
-        // Create Phase 3 managers
+        // Create the execution and margin managers
         INFO("Creating ExecutionManager and MarginManager for Phase 3");
         auto execution_manager = std::make_unique<ExecutionManager>();
         auto margin_manager = std::make_unique<MarginManager>(registry);
 
-        // Create Phase 4 CSV exporter with portfolio-specific directory
+        // Create the CSV exporter with portfolio-specific directory
         INFO("Creating CSVExporter for Phase 4");
-        std::string csv_output_dir = "apps/strategies/results/" + portfolio_id;
+        std::string csv_output_dir = "apps/strategies/results/" + portfolio_id +
+                                     (qt_sends ? (qt_desk_editable ? "/qt" : "/sent")
+                                               : "");  // the model CSV is never overwritten
         std::filesystem::create_directories(csv_output_dir);
         INFO("CSV output directory: " + csv_output_dir);
         auto csv_exporter = std::make_unique<CSVExporter>(csv_output_dir);
@@ -697,6 +1563,9 @@ int main(int argc, char* argv[]) {
         }
 
         auto all_bars = conversion_result.value();
+        // a declared vendor relabel is read on every loaded bar (a no-op with none declared)
+        for (const auto& line : ListingDates::instance().relabel_findings(all_bars)) WARN(line);
+        ListingDates::instance().apply_relabels(all_bars);
         INFO("Loaded " + std::to_string(all_bars.size()) + " total bars");
 
         // Update price manager with bars to extract T-1 and T-2 prices
@@ -722,6 +1591,49 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        // The data-freshness guard, with the equity runner's policy.
+        //
+        // The check above only asks whether ANY bar came back, so a feed that stopped
+        // three weeks ago passes it: the 730-day window still returns tens of thousands of
+        // rows, every T-1 price is a three-week-old close, and the book would be re-sized
+        // against it and stored without a word. This asks how CURRENT the bars are.
+        //
+        // Measured from the STALEST symbol, not the freshest: one symbol
+        // printing today would otherwise report the whole feed current however far
+        // behind the other thirty-five are, and a guard that cannot fail is not a
+        // guard. The universe handed to `assess_feed_freshness` is the one this run
+        // ASKED for, so a symbol that returned no rows at all is seen as absent
+        // rather than being invisible to a map built from what came back.
+        //
+        // Thresholds and severity are the equity runner's, unchanged: WARN in
+        // historical-replay mode, refuse in true-live mode, tolerance from
+        // `live.data_staleness_tolerance_days`.
+        {
+            std::unordered_map<std::string, std::string> last_bar_date;
+            for (const auto& bar : all_bars) {
+                const std::string d = core::format_utc_date(bar.timestamp);
+                auto it = last_bar_date.find(bar.symbol);
+                if (it == last_bar_date.end() || d > it->second) last_bar_date[bar.symbol] = d;
+            }
+
+            const int tolerance_days = app_config.live.data_staleness_tolerance_days;
+            const std::string as_of_ymd = core::format_utc_date(end_date);
+            const auto freshness = assess_feed_freshness(last_bar_date, as_of_ymd, symbols);
+
+            // The arms are rule_feed_freshness's (live/data_freshness.hpp): an empty feed refuses
+            // every run; a requested symbol with no bar and a feed staler than the tolerance refuse
+            // a run with no date. A dated run goes on: its book stops only for what it HOLDS, and
+            // the held-symbol check below names them.
+            const auto freshness_ruling = rule_feed_freshness(freshness, tolerance_days, as_of_ymd,
+                                                              use_override_date, "Futures");
+            for (const auto& line : freshness_ruling.warnings) WARN(line);
+            for (const auto& line : freshness_ruling.errors) ERROR(line);
+            if (!freshness_ruling.info.empty()) INFO(freshness_ruling.info);
+            if (freshness_ruling.refuse) {
+                return 1;
+            }
+        }
+
         // ========================================
         // NON-TRADING DAY DETECTION
         // Check if yesterday was a non-trading day (weekend or holiday)
@@ -735,214 +1647,770 @@ int main(int argc, char* argv[]) {
         bool is_sunday = (day_of_week == 0);
 
         // Check if yesterday was a holiday using HolidayChecker
-        HolidayChecker holiday_checker("include/trade_ngin/core/holidays.json");
+        // The path is resolved via HolidayChecker::resolve_holidays_path.
+        HolidayChecker holiday_checker(HolidayChecker::resolve_holidays_path());
+        // Fail closed on a calendar that did not load fully. is_holiday
+        // cannot distinguish "the market was open" from "the calendar is
+        // missing", so a partial load silently turns a closure into a trading
+        // day and the non-trading-day branch below never fires.
+        if (!holiday_checker.loaded()) {
+            std::cerr << "FATAL: market holiday calendar failed to load from "
+                      << HolidayChecker::resolve_holidays_path()
+                      << " - refusing to run. Every date would report as a trading day."
+                      << std::endl;
+            return 1;
+        }
         auto yesterday_for_check = now - std::chrono::hours(24);
         auto yesterday_time_t_check = std::chrono::system_clock::to_time_t(yesterday_for_check);
         std::tm yesterday_tm_check = *std::gmtime(&yesterday_time_t_check);
         std::ostringstream yesterday_oss_check;
         yesterday_oss_check << std::put_time(&yesterday_tm_check, "%Y-%m-%d");
         std::string yesterday_date_str_check = yesterday_oss_check.str();
+
+        // `loaded()` above says the FILE parsed. It says
+        // nothing about whether the calendar reaches the date being asked about, and
+        // outside the covered years `is_holiday` returns false because the answer is
+        // UNKNOWN, not because the market was open. A run past the end of the calendar
+        // would therefore treat every closure as a trading day, take the normal-day
+        // branch on a holiday, and write executions for a day the exchange was shut --
+        // with no error and no log line, because nothing here ever asked.
+        //
+        // The equity runner fails closed on this too. The same check runs here, on the two
+        // dates this runner actually asks the calendar about: the run date, which fixes the
+        // data window, and the previous calendar day, which is the argument `is_holiday`
+        // is given directly below. Both, because coverage is per YEAR and a run on
+        // 1 January asks about 31 December of the year before.
+        {
+            char cov_buf[11];
+            std::tm cov_tm{};
+            auto cov_t = std::chrono::system_clock::to_time_t(now);
+            gmtime_r(&cov_t, &cov_tm);
+            std::strftime(cov_buf, sizeof(cov_buf), "%Y-%m-%d", &cov_tm);
+            for (const std::string& cov_date : {std::string(cov_buf), yesterday_date_str_check}) {
+                if (!holiday_checker.covers_date(cov_date)) {
+                    ERROR("Holiday calendar does not cover " + cov_date + " (loaded: " +
+                          holiday_checker.coverage_description() + ", " +
+                          std::to_string(holiday_checker.coverage_years()) +
+                          " year(s)). Trading-day arithmetic would treat market closures "
+                          "as open days. Extend the calendar via "
+                          "scripts/generate_market_holidays.py before running this date.");
+                    return 1;
+                }
+            }
+        }
         bool is_yesterday_holiday = holiday_checker.is_holiday(yesterday_date_str_check);
 
-        // Yesterday was non-trading if: today is Sunday (Sat was non-trading) OR yesterday was
-        // holiday
-        bool is_non_trading_day = is_sunday || is_yesterday_holiday;
+        // ========================================
+        // T-1 SESSION CLASSIFIER
+        // Every symbol's T-1 is SESSION, JUNK, NO_BAR(closure) or NO_BAR(feed hole), judged
+        // against its own bars in this window (include/trade_ngin/data/session_classifier.hpp).
+        // T-1 is the date the price manager's T-1 test uses, so a symbol has a T-1 price exactly
+        // when its verdict is SESSION or JUNK. When no symbol printed, the whole book is carried
+        // below with the reason logged (a feed hole is an ERROR there, not an abort), so a Monday
+        // after a dead Sunday does not end the chain.
+        // ========================================
+        SessionClassifier session_classifier;
+        session_classifier.add_bars(all_bars);
+        // A bar's K-01 verdict reads the classifier's trailing
+        // history, the same in every engine. The classifier alone also reads the bars of a fixed
+        // prefix before the window (live/live_roll_legs.hpp, kK01ClassifierHistoryDays), with their
+        // ids, so a print near the window's start is judged as the backtest judges it and a bar
+        // withheld on its own run is never fed later. The strategies' window, the price manager and
+        // k01_consumed_bars below stay on the window.
+        const Timestamp k01_history_start = k01_classifier_history_start(start_date);
+        // The same load reaches back to the estimators' history start: the trend sleeves' window
+        // is W consumed bars, more than the bar window holds. The bars before the window are
+        // judged by their own classifier and the consumed ones seed the sleeves' history below
+        // (live/live_estimator_history.hpp); nothing else reads them.
+        std::vector<Bar> estimator_history_bars;
+        {
+            MarketDataBus::instance().set_publish_enabled(false);
+            auto history_result = db->get_market_data(
+                symbols, estimator_history_start(start_date), start_date,
+                trade_ngin::AssetClass::FUTURES, trade_ngin::DataFrequency::DAILY, "ohlcv");
+            MarketDataBus::instance().set_publish_enabled(true);
+            if (history_result.is_error()) {
+                ERROR("T1_CLASSIFIER history: failed to load the bars before the window: " +
+                      std::string(history_result.error()->what()) +
+                      ". Refusing to run: the window's first bars cannot be judged.");
+                return 1;
+            }
+            auto history_bars =
+                trade_ngin::DataConversionUtils::arrow_table_to_bars(history_result.value());
+            if (history_bars.is_error()) {
+                ERROR("T1_CLASSIFIER history: failed to convert the bars before the window: " +
+                      std::string(history_bars.error()->what()) +
+                      ". Refusing to run: the window's first bars cannot be judged.");
+                return 1;
+            }
+            // the bars before the window and their id rows are read as the window's are: a
+            // declared vendor relabel applied (a no-op with none declared)
+            std::vector<Bar> history = history_bars.value();
+            for (const auto& line : ListingDates::instance().relabel_findings(history)) WARN(line);
+            ListingDates::instance().apply_relabels(history);
+            session_classifier.add_bars(k01_classifier_history(history, start_date));
+            estimator_history_bars = estimator_history_consumed(
+                history, start_date,
+                ListingDates::instance().read_ids(
+                    symbols, db->get_futures_instrument_ids(
+                                 symbols, estimator_history_start(start_date), start_date)));
+        }
+        // The instrument-id continuity limb reads each kept
+        // bar's vendor id over the window the bars were loaded for (the backtest reads the same
+        // query). T-1's verdict reads no later bar: an id change on T-1 is held today and T's bar
+        // confirms it a roll or a one-day flip on the next run.
+        {
+            const auto id_rows = ListingDates::instance().read_ids(
+                symbols,
+                db->get_futures_instrument_ids(symbols, k01_history_start, end_date));
+            const auto id_feed = feed_instrument_ids(session_classifier, id_rows);
+            if (id_feed.fed) {
+                INFO(id_feed.line);
+            } else {
+                WARN(id_feed.line);
+            }
+        }
+        const T1Classification t1_classification =
+            classify_t1(session_classifier, symbols,
+                        SessionClassifier::day_of(now - std::chrono::hours(24)),
+                        holiday_lookup(holiday_checker));
+        log_t1_classification(t1_classification,
+                              app_config.live.data_staleness_tolerance_days);
+
+        // FEED-HOLE REFUSAL: a HELD symbol with no bar for
+        // longer than live.data_staleness_tolerance_days refuses the run when the run date is
+        // the host's date (true live). A replay of a past date WARNs and runs. It sits above the
+        // live_run_metadata upsert like the other refusals, so a refused run leaves no row.
+        // Any no-bar verdict counts, a closure too: a feed dead for more than eight weeks is
+        // reclassified as a closure and still refuses.
+        {
+            const int hole_tolerance_days = app_config.live.data_staleness_tolerance_days;
+            std::vector<HeldFeedHole> held_holes;
+            if (any_no_bar_past_tolerance(t1_classification, hole_tolerance_days)) {
+                auto held_book_result = db->load_positions_by_date(
+                    combined_strategy_id, "", coordinator_config.portfolio_id,
+                    now - std::chrono::hours(24), "trading.positions", qt_read_book);
+                if (held_book_result.is_ok()) {
+                    held_holes = held_feed_holes_past_tolerance(
+                        t1_classification, held_book_result.value(), hole_tolerance_days);
+                    // What the book does not hold stops nothing: one line names it.
+                    const std::string not_held = unheld_no_bar_line(
+                        t1_classification, held_book_result.value(), hole_tolerance_days);
+                    if (!not_held.empty()) WARN(not_held);
+                } else {
+                    WARN("FEED_HOLE_REFUSAL could not read the held book to test the feed "
+                         "holes: " +
+                         std::string(held_book_result.error()->what()));
+                }
+            }
+            // The one ruling, shared with the equity runner (rule_held_feed_holes): refused on
+            // the host's own date, a warning when the date is run on another day.
+            const HeldFeedHoleRuling hole_ruling = rule_held_feed_holes(
+                held_holes, hole_tolerance_days, now, std::chrono::system_clock::now());
+            for (const auto& line : hole_ruling.lines) {
+                if (hole_ruling.refuse) {
+                    ERROR(line);
+                } else {
+                    WARN(line);
+                }
+            }
+            if (hole_ruling.refuse) {
+                return 1;
+            }
+        }
+
+        // ========================================
+        // THE STRATEGY FEED (K-01)
+        // Every bar of the window except the WITHHELD ones: a JUNK bar or a thin first print, on any
+        // date of the window, is never consumed and never fed. An unconfirmed instrument-id change
+        // the classifier holds is consumed: it is the change bar, held. The strategies and the
+        // PortfolioManager are fed it below, and so are both cost managers (a junk print must not
+        // enter the volume and volatility the cost model reads) and the snapshot risk reader. A
+        // non-SESSION symbol is held on every book today, so it has no fill to cost.
+        // ========================================
+        std::vector<SymbolDayVerdict> k01_withheld;
+        const std::vector<Bar> k01_feed =
+            k01_consumed_bars(session_classifier, all_bars, &k01_withheld);
+        const std::vector<Bar>& strategy_feed_bars = k01_feed;
+        std::vector<std::string> withheld_junk_bars;  // the symbols whose T-1 bar is withheld
+        for (const auto& v : k01_withheld) {
+            if (v.date == t1_classification.t1_date) withheld_junk_bars.push_back(v.symbol);
+        }
+        std::sort(withheld_junk_bars.begin(), withheld_junk_bars.end());
+        // Each symbol's roll status on the window's CONSUMED
+        // bars (k01_feed: a withheld bar never walks it), evaluated bar by bar, so a run that consumes
+        // several bars of a symbol (a catch-up after a missed run) reads the status of its LAST one.
+        const auto roll_status = roll_series::roll_status_of(strategy_feed_bars);
+        std::unordered_map<std::string, std::string> last_consumed_date;
+        for (const auto& bar : strategy_feed_bars) {
+            const std::string d = core::format_utc_date(bar.timestamp);
+            auto& last = last_consumed_date[bar.symbol];
+            if (d > last) last = d;
+        }
+        // A day none of whose T-1 bars is consumed (T-1 printed
+        // no bar, or every bar it printed is withheld) is not a rebalance. The backtest feeds
+        // nothing on such a cycle (BT_JUNK_FEED): no OVERLAY, OPTIMISER or BOOK line and no
+        // risk_detail. Live carries the whole book on it, below.
+        const bool no_t1_bar_consumed =
+            std::none_of(last_consumed_date.begin(), last_consumed_date.end(),
+                         [&](const auto& entry) { return entry.second == t1_classification.t1_date; });
+        // The rolls this run legs, by STATE: every roll a
+        // consumed bar confirmed since the contract recorded on the symbol's stored T-1 positions
+        // row (live/live_roll_legs.hpp), never the rolls of a calendar span, so a late (back-filled)
+        // confirming bar is legged on the run that first consumes it. A re-run reads the contract its
+        // own stored legs rolled out of: the first run re-wrote the T-1 row (unless an earlier date
+        // already booked that roll). Each roll is booked once; a re-run of today re-books
+        // today's (the sweep below clears them).
+        LiveRollState roll_state;
+        {
+            std::unordered_map<std::string, std::string> recorded_contract;
+            for (const auto& sleeve : strategy_names) {
+                auto stored_book = db->load_positions_by_date(
+                    combined_strategy_id, sleeve, coordinator_config.portfolio_id,
+                    now - std::chrono::hours(24), "trading.positions", qt_read_book);
+                if (stored_book.is_error()) {
+                    ERROR("ROLL_LEG STOP: sleeve " + sleeve + "'s stored Day T-1 book is unreadable (" +
+                          std::string(stored_book.error()->what()) +
+                          "); refusing to run: the contract it holds, and so the rolls to book, "
+                          "cannot be told");
+                    std::cerr << "ROLL_LEG STOP: sleeve " << sleeve
+                              << "'s stored Day T-1 book is unreadable" << std::endl;
+                    return 1;
+                }
+                for (const auto& [symbol, position] : stored_book.value()) {
+                    if (position.quantity.as_double() == 0.0) continue;
+                    auto& contract = recorded_contract[symbol];
+                    // a stored id is read as the bars are: through the declared relabels
+                    if (contract.empty()) {
+                        contract = ListingDates::instance().read_id(
+                            symbol, now - std::chrono::hours(24), position.instrument_id);
+                    }
+                }
+            }
+            auto stored_legs = db->get_stored_roll_contracts(combined_strategy_id, portfolio_id, now,
+                                                             "trading.executions", qt_write_book);
+            if (stored_legs.is_error()) {
+                ERROR("ROLL_LEG STOP: today's stored ROLL legs are unreadable (" +
+                      std::string(stored_legs.error()->what()) +
+                      "); refusing to run: the rolls to book cannot be told");
+                return 1;
+            }
+            // Issue #188: the day's own legs are the state coming in unless the rolls stored for
+            // earlier dates of the window rolled out of their contract since they last rolled into
+            // it (a re-run in a repair after late bars: the first pass booked the roll here, late;
+            // the re-runs of the earlier dates have since booked it, or the several rolls it stood
+            // for, there). The T-1 row is then the state (contract_held_coming_into).
+            std::unordered_map<std::string, std::string> todays_legs;
+            std::unordered_map<std::string, std::vector<StoredRoll>> earlier_rolls;
+            for (const auto& [symbol, contract] : stored_legs.value()) {
+                if (contract.empty()) continue;
+                const auto held = todays_legs.try_emplace(symbol).first;
+                held->second = ListingDates::instance().read_id(symbol, now, contract);
+            }
+            if (!todays_legs.empty()) {
+                Timestamp window_from = now;
+                for (const auto& bar : strategy_feed_bars) {
+                    if (bar.timestamp < window_from) window_from = bar.timestamp;
+                }
+                auto previous_rolls = db->get_previous_rolls(combined_strategy_id, portfolio_id,
+                                                             window_from, now, "trading.executions",
+                                                             qt_write_book);
+                if (previous_rolls.is_error()) {
+                    ERROR("ROLL_LEG STOP: the ROLL legs stored before today are unreadable (" +
+                          std::string(previous_rolls.error()->what()) +
+                          "); refusing to run: the rolls to book cannot be told");
+                    return 1;
+                }
+                for (const auto& [symbol, rolls] : previous_rolls.value()) {
+                    auto& read = earlier_rolls[symbol];
+                    for (const auto& roll : rolls) {
+                        read.push_back(
+                            {roll.outgoing.empty() ? std::string()
+                                                   : ListingDates::instance().read_id(symbol, now, roll.outgoing),
+                             roll.incoming.empty() ? std::string()
+                                                   : ListingDates::instance().read_id(symbol, now, roll.incoming)});
+                    }
+                }
+            }
+            HeldComingIn held_in =
+                contract_held_coming_into(recorded_contract, todays_legs, earlier_rolls);
+            for (const auto& symbol : held_in.stale) {
+                INFO("ROLL_LEG re-run " + symbol + ": the day's stored legs roll out of " +
+                     todays_legs[symbol] + ", which the legs of an earlier date already rolled out "
+                     "of since it was last rolled into: they are stale (a roll booked late and "
+                     "since booked on its own date). The contract held coming in is the stored T-1 "
+                     "row's, " + held_in.contract[symbol]);
+            }
+            recorded_contract = std::move(held_in.contract);
+            roll_state = live_rolls_by_state(strategy_feed_bars, recorded_contract,
+                                             t1_classification.t1_date);
+            if (!roll_state.unplaced.empty()) {
+                std::string unplaced;
+                for (const auto& symbol : roll_state.unplaced) {
+                    unplaced += (unplaced.empty() ? "" : ", ") + symbol + " (" +
+                                recorded_contract[symbol] + ")";
+                }
+                ERROR("ROLL_LEG STOP: the contract recorded on the stored T-1 row is at no consumed "
+                      "bar of the window for " + unplaced +
+                      "; refusing to run: the rolls to book cannot be told. The instrument_id on "
+                      "that symbol's stored T-1 trading.positions row does not appear on the "
+                      "consumed bars. Remedy: restore the symbol's bars or their instrument ids "
+                      "(futures_data.ohlcv_1d, futures_data.ohlcv_1d_raw), or set that row's "
+                      "instrument_id to NULL, after which the run legs only a roll its T-1 bar "
+                      "confirms. Every run refuses until then.");
+                return 1;
+            }
+            // A roll legged LATE books the moves of
+            // every consumed bar after the stored state, LESS what earlier runs already booked of
+            // them. That is read from the stored rows, never guessed from the bars: a run that
+            // consumed a bar booked its move on the row dated that bar, a run that saw a hole
+            // booked 0 (live/live_roll_legs.hpp, late_booked_points).
+            if (!roll_state.late.empty()) {
+                std::vector<std::string> late_symbols;
+                std::string booked_after;
+                for (const auto& [symbol, late] : roll_state.late) {
+                    late_symbols.push_back(symbol);
+                    if (booked_after.empty() || late.booked_after < booked_after) {
+                        booked_after = late.booked_after;
+                    }
+                }
+                std::sort(late_symbols.begin(), late_symbols.end());
+                auto stored_rows = db->get_stored_realised_rows(
+                    combined_strategy_id, portfolio_id, booked_after, t1_classification.t1_date,
+                    "trading.positions", qt_read_book);
+                if (stored_rows.is_error()) {
+                    ERROR("ROLL_LEG STOP: the stored rows after " + booked_after +
+                          " are unreadable (" + std::string(stored_rows.error()->what()) +
+                          "); refusing to run: what earlier runs booked of the late roll's moves "
+                          "cannot be told");
+                    std::cerr << "ROLL_LEG STOP: the stored rows of a late roll are unreadable"
+                              << std::endl;
+                    return 1;
+                }
+                for (const auto& symbol : late_symbols) {
+                    auto& late = roll_state.late[symbol];
+                    const LateBooked booked = late_booked_points(
+                        symbol, late.booked_after, t1_classification.t1_date, stored_rows.value(),
+                        pnl_manager->get_point_value(symbol));
+                    if (!booked.undecided.empty()) {
+                        ERROR("ROLL_LEG STOP " + symbol + ": the stored rows cannot tell what "
+                              "earlier runs booked of its late roll's moves: " + booked.undecided +
+                              "; refusing to run. Remedy: correct daily_realized_pnl on the "
+                              "symbol's trading.positions rows dated after " + late.booked_after +
+                              " and before " + t1_classification.t1_date +
+                              " so that every sleeve's row of a date books the same move per "
+                              "contract (0 where no run consumed a bar), then run this date "
+                              "again. Every run refuses until then.");
+                        std::cerr << "ROLL_LEG STOP " << symbol
+                                  << ": the stored rows cannot decide a late roll's settlement"
+                                  << std::endl;
+                        return 1;
+                    }
+                    std::string booked_dates;
+                    for (const auto& d : booked.dates) booked_dates += (booked_dates.empty() ? "" : ",") + d;
+                    INFO("ROLL_LEG late " + symbol + ": the consumed bars after " + late.booked_after +
+                         " moved " + std::to_string(late.settle_to - late.settle_from) +
+                         " points; the stored rows already book " + std::to_string(booked.points) +
+                         " (" + (booked_dates.empty() ? std::string("none") : booked_dates) +
+                         "); the Day T-1 row books " +
+                         std::to_string(late.settle_to - late.settle_from - booked.points));
+                    late.settle_from += booked.points;
+                }
+            }
+        }
+        const std::vector<ConfirmedRoll>& confirmed_rolls = roll_state.rolls;
+        // The T-1 settlement on the CONSUMED bars. A
+        // symbol whose T-1 bar is a change bar (a roll's switch day or either bar of a flip) or a
+        // WITHHELD bar (K-01) books no move for T-1; every other symbol books T-1 against the close of
+        // its previous CONSUMED bar (a withheld bar between them is skipped), which is the T-2 close
+        // whenever no bar was withheld; a symbol whose roll is legged late books its unbooked bars.
+        // Built here, above the sizing read: the book is sized on this settlement, the one
+        // PHASE 5 finalises Day T-1 with, so the sizing equity is the equity the stored rows show.
+        const ConsumedT1Settlement t1_settlement = consumed_t1_settlement(
+            strategy_feed_bars, t1_classification.t1_date, roll_status, withheld_junk_bars,
+            price_manager->get_all_two_days_ago_prices(),
+            price_manager->get_all_previous_day_prices(), roll_state.late);
+
+        // ========================================
+        // SIZING CAPITAL (half compounding)
+        // The book is sized on the account's equity at the close of T-1, the bar the strategies
+        // size from, the quantity the futures backtest sizes on (its equity curve's last row).
+        // Day T-1 is finalised only in STEP 4, after the rebalance, so it is rebuilt here from
+        // STEP 4's own parts (portfolio/sizing_capital.hpp): the stored value of the row before
+        // Day T-1, Day T-1's settlement move and Day T-1's stored costs. Day T-1's own stored value
+        // is never read (a replayed date's is already finalised), and STEP 5's reading is logged
+        // beside it. Every sizing input follows it: each sleeve's capital (x its allocation), the
+        // optimizer's weights, the gate's leverage and the snapshot reporter. It sits above the
+        // live_run_metadata upsert like the other refusals, so a run that cannot set it leaves no
+        // row.
+        // ========================================
+        // A stored book the run will not load (live/stored_book_ownership.hpp): refused here,
+        // before any row of the day is written.
+        {
+            auto outside = stored_positions_outside_run(*db, coordinator_config.portfolio_id,
+                                                        combined_strategy_id, strategy_names, now,
+                                                        "trading", qt_read_book);
+            if (outside.is_error() || !outside.value().empty()) {
+                const std::string line =
+                    outside.is_error()
+                        ? "STORED_BOOK_NOT_LOADED portfolio " + coordinator_config.portfolio_id +
+                              ": " + std::string(outside.error()->what()) + ". Refusing to run."
+                        : stored_positions_outside_run_line(coordinator_config.portfolio_id,
+                                                            combined_strategy_id, outside.value());
+                ERROR(line);
+                std::cerr << line << std::endl;
+                return 1;
+            }
+        }
+        LiveSizingEquity sizing_equity;
+        // The capital the book is sized on is the half compounding of
+        // the book's settled daily P&L (live/live_sizing_read.hpp), recomputed on every run from
+        // the stored rows before Day T-1 and Day T-1's rebuilt net; `sizing_equity` above stays
+        // the account's value rebuilt at the close of T-1, for the log and the check.
+        LiveSizingRead sizing_capital_read;
+        // Each read's own "nothing stored" answer (live/live_sizing_read.hpp) sizes the book as
+        // usual (no Day T-1 row, no row before it, a sleeve with no stored book). A sleeve book
+        // that fails to load refuses the run here (exit 1, no row: nothing to
+        // hold). With every book loaded, a failed Day T-1 row or previous-row read is a SIZING
+        // HOLD: no figure is set, every strategy is held at its seeded T-1 book with no rebalance
+        // and no order, today's live_run_metadata row is marked, the email is flagged and the run
+        // exits kRiskModuleFailureExitCode, as a RISK_MODULE_FAILURE day does.
+        std::optional<nlohmann::json> sizing_hold;
+        {
+            auto sizing_read = read_live_sizing_equity(
+                *data_loader, *db, combined_strategy_id, coordinator_config.portfolio_id,
+                strategy_names, now, initial_capital, t1_settlement.t1_close_prices,
+                t1_settlement.t2_close_prices,
+                [&](const std::string& symbol) { return pnl_manager->get_point_value(symbol); },
+                t1_settlement.zero_pnl_symbols, [&] {
+                    // The dates the run loaded a bar on, and the finalize's own two tests on the
+                    // price manager's raw maps (PHASE 5's "No T-1 close prices available", STEP
+                    // 4's first clause).
+                    LiveSizingCalendar calendar;
+                    for (const auto& bar : all_bars) {
+                        calendar.bar_dates.insert(
+                            SessionClassifier::ymd(SessionClassifier::day_of(bar.timestamp)));
+                    }
+                    if (!calendar.bar_dates.empty()) {
+                        calendar.first_bar_date = *calendar.bar_dates.begin();
+                    }
+                    calendar.no_t1_closes = price_manager->get_all_previous_day_prices().empty();
+                    calendar.no_t2_closes = price_manager->get_all_two_days_ago_prices().empty();
+                    return calendar;
+                }());
+            if (sizing_read.outcome == LiveSizingOutcome::kRefuseRun) {
+                ERROR("SIZING_CAPITAL refused: " + sizing_read.failure +
+                      ". Refusing to run: the book cannot be sized and there is no book to hold.");
+                std::cerr << "SIZING_CAPITAL refused: " << sizing_read.failure << std::endl;
+                return 1;
+            } else if (sizing_read.outcome == LiveSizingOutcome::kHoldBook) {
+                sizing_hold = sizing_hold_refusal(sizing_read.failure);
+                ERROR("SIZING_HOLD " + sizing_read.failure +
+                      ": the book is not sized; every strategy is held at its seeded T-1 book and "
+                      "no orders are sent; the day is stored as a REFUSE day and the run exits " +
+                      std::to_string(kRiskModuleFailureExitCode));
+            } else {
+                sizing_equity = sizing_read.equity;
+                sizing_capital_read = sizing_read;
+                INFO(sizing_capital_log_line(core::format_utc_date(now), sizing_read));
+                if (sizing_history_mismatch(sizing_read)) {
+                    WARN(sizing_capital_history_log_line(core::format_utc_date(now), sizing_read));
+                }
+                if (sizing_read.t1_unsettled) {
+                    WARN(sizing_capital_unsettled_log_line(core::format_utc_date(now), sizing_read));
+                }
+                auto sized = portfolio->set_sizing_capital(sizing_read.capital.capital);
+                if (sized.is_error()) {
+                    ERROR("SIZING_CAPITAL refused: " + std::string(sized.error()->what()) +
+                          ". Refusing to run: the book cannot be sized on the account's equity.");
+                    std::cerr << "SIZING_CAPITAL refused: " << sized.error()->what() << std::endl;
+                    return 1;
+                }
+            }
+        }
+
+        // ========================================
+        // STORE LIVE RUN METADATA
+        // Save run metadata (allocations, configs) for this trading day. Written only
+        // after the run-gap, feed-freshness, calendar-coverage and held-feed-hole guards
+        // have all passed: a refused run must leave no row. A day with no T-1 price is
+        // carried, never refused.
+        // ========================================
+        // Contract C5 (ruling 29): on a desk-editable portfolio only the runner's calendar closes
+        // a day. A whole-book carry (no T-1 price) on a calendar trading day is a feed hole: the
+        // model run stores nothing, publishes nothing and exits 1 (QT_ALERT), and the catch-up runs
+        // the date again once the data is in.
+        const std::time_t qt_t1_time =
+            std::chrono::system_clock::to_time_t(now - std::chrono::hours(24));
+        const qt::DayKind qt_day_kind = qt::classify_qt_day(
+            std::gmtime(&qt_t1_time)->tm_wday, is_yesterday_holiday,
+            early_previous_day_close_prices.empty() || no_t1_bar_consumed);
+        if (qt_desk_editable && qt_mode == qt::Mode::MODEL &&
+            qt_day_kind == qt::DayKind::FEED_HOLE) {
+            const std::string why =
+                "QT_ALERT " + portfolio_id + ": no T-1 price on " + yesterday_date_str_check +
+                ", a trading day on the runner's calendar (a feed hole, not a closure): " + qt_date +
+                " is not stored and not published; run it again once the data is in (contract C5)";
+            ERROR(why);
+            std::cerr << why << std::endl;
+            return 1;
+        }
+        INFO("Storing live run metadata for this trading day...");
+        // Kept at this scope: a portfolio risk REFUSE found by process_market_data writes
+        // this row a second time, from the same values, with the refusal marked.
+        // The object the backtest records with its run
+        // (PortfolioConfig::to_json: total_capital and use_optimization are in it), so both
+        // tables carry the same design keys; the marks below are added to it.
+        nlohmann::json portfolio_config_json = portfolio_config.to_json();
+        // The sessions a year this run's statistics are annualised with.
+        portfolio_config_json[trade_ngin::kStatisticsKKey] =
+            app_config.statistics.futures_sessions_per_year;
+
+        // Convert strategy_allocations to JSON
+        nlohmann::json strategy_alloc_json(strategy_allocations);
+        // A sizing hold's row is written marked (risk_refusal, scope "sizing").
+        if (sizing_hold) {
+            portfolio_config_json = mark_risk_refusal(portfolio_config_json, *sizing_hold,
+                                                      portfolio->risk_decisions_json());
+        }
+        {
+            // strategy_configs is already nlohmann::json
+            auto metadata_result = !qt_model_records ? Result<void>() : db->store_live_run_metadata(
+                now, combined_strategy_id, portfolio_id, strategy_alloc_json, portfolio_config_json,
+                strategy_configs  // already nlohmann::json
+            );
+
+            if (metadata_result.is_error()) {
+                WARN("Failed to store live run metadata: " +
+                     std::string(metadata_result.error()->what()));
+                qt_store_failed("live_run_metadata");
+            } else {
+                INFO("Successfully stored live run metadata for date");
+                if (sizing_hold) {
+                    INFO("Marked today's live_run_metadata row with the sizing hold");
+                }
+            }
+        }
+
+        // QT plan E2: the settings this run trades on, credential-free, on the day's
+        // live_run_metadata row (settings_used), with the strategy_config version or null.
+        {
+            auto settings_result = !qt_model_records ? Result<void>() : db->store_settings_used(now, combined_strategy_id, portfolio_id,
+                                                           live_settings.settings_used);
+            if (settings_result.is_error()) {
+                ERROR("SETTINGS_USED not recorded for " + portfolio_id + ": " +
+                      std::string(settings_result.error()->what()));
+            } else {
+                INFO("SETTINGS_USED recorded for " + portfolio_id + " (strategy_config version " +
+                     (live_settings.strategy_config_version
+                          ? std::to_string(*live_settings.strategy_config_version)
+                          : std::string("none: config files only")) +
+                     ")");
+            }
+        }
 
         // Flag to track if we should skip strategy processing
         bool skip_strategy_processing = false;
+        // The symbols whose last consumed bar is pending,
+        // held on EVERY rebalance by the book gate below, never only through a cut.
+        std::unordered_set<std::string> change_bar_holds;
 
         // Data structures for non-trading day case
         std::unordered_map<std::string, std::unordered_map<std::string, Position>>
             strategy_positions_map;
         std::unordered_map<std::string, Position> positions;
 
-        if (early_previous_day_close_prices.empty()) {
-            if (is_non_trading_day) {
-                // ========================================
-                // EXPECTED: Non-trading day detected
-                // Reuse previous positions, skip strategy processing
-                // ========================================
-                INFO("═══════════════════════════════════════════════════════════════");
-                INFO("NON-TRADING DAY DETECTED - POSITIONS UNCHANGED");
-                INFO("═══════════════════════════════════════════════════════════════");
+        // The book-level rule: carry the whole book when NO symbol printed on T-1,
+        // i.e. the T-1 price map is empty. It is a carry on every such day, never an abort; the
+        // classifier names the reason (a closure is INFO, a feed hole an ERROR). A T-1 whose
+        // every bar is withheld is carried the same way: no bar of it is consumed.
+        if (early_previous_day_close_prices.empty() || no_t1_bar_consumed) {
+            // ========================================
+            // No symbol has a T-1 price: reuse previous positions, skip strategy processing
+            // ========================================
+            INFO("═══════════════════════════════════════════════════════════════");
+            INFO("NON-TRADING DAY DETECTED - POSITIONS UNCHANGED");
+            INFO("═══════════════════════════════════════════════════════════════");
 
-                if (is_sunday) {
-                    INFO("Today is Sunday - Saturday was not a trading day");
-                } else if (is_yesterday_holiday) {
-                    INFO("Yesterday (" + yesterday_date_str_check + ") was a holiday: " +
-                         holiday_checker.get_holiday_name(yesterday_date_str_check));
-                }
-
-                INFO("No new market data available - positions will remain unchanged");
-                INFO("Loading previous trading day positions to carry forward...");
-
-                // Calculate previous date for position loading
-                auto previous_date_nontrade = now - std::chrono::hours(24);
-
-                // Load previous positions for each strategy and use as current
-                for (const auto& [strategy_name, allocation] : strategy_allocations) {
-                    auto prev_result = db->load_positions_by_date(
-                        combined_strategy_id, strategy_name, coordinator_config.portfolio_id,
-                        previous_date_nontrade, "trading.positions");
-
-                    if (prev_result.is_ok() && !prev_result.value().empty()) {
-                        strategy_positions_map[strategy_name] = prev_result.value();
-                        INFO("Loaded " + std::to_string(prev_result.value().size()) +
-                             " positions for strategy: " + strategy_name);
-
-                        // Also add to combined positions map
-                        for (const auto& [symbol, pos] : prev_result.value()) {
-                            positions[symbol] = pos;
-                        }
-                    } else {
-                        INFO("No previous positions found for strategy: " + strategy_name);
-                        strategy_positions_map[strategy_name] = {};
-                    }
-                }
-
-                INFO("Total positions carried forward: " + std::to_string(positions.size()));
-                INFO("═══════════════════════════════════════════════════════════════");
-                INFO("Skipping strategy calculations - proceeding to storage phase");
-                INFO("═══════════════════════════════════════════════════════════════");
-
-                skip_strategy_processing = true;
-
-            } else {
-                // ========================================
-                // UNEXPECTED: No prices on a trading day
-                // This indicates a data pipeline issue
-                // ========================================
-                ERROR("═══════════════════════════════════════════════════════════════");
-                ERROR("DATA ISSUE DETECTED - ABORTING");
-                ERROR("═══════════════════════════════════════════════════════════════");
-                ERROR("No T-1 close prices available, but today appears to be a trading day!");
-                ERROR("Today: " + std::string(use_override_date ? "HISTORICAL RUN" : "LIVE RUN"));
-                ERROR("Day of week: " + std::to_string(day_of_week) + " (0=Sun, 6=Sat)");
-                ERROR("Yesterday: " + yesterday_date_str_check);
-                ERROR("Is yesterday a holiday? " +
-                      std::string(is_yesterday_holiday ? "YES" : "NO"));
-                ERROR("");
-                ERROR("This indicates missing market data in the database.");
-                ERROR("Please investigate the data pipeline before re-running.");
-                ERROR("═══════════════════════════════════════════════════════════════");
-                return 1;  // Fail fast on data issues
+            if (is_sunday) {
+                INFO("Today is Sunday - Saturday was not a trading day");
+            } else if (is_yesterday_holiday) {
+                INFO("Yesterday (" + yesterday_date_str_check + ") was a holiday: " +
+                     holiday_checker.get_holiday_name(yesterday_date_str_check));
             }
+            log_whole_book_carry(t1_classification);
+
+            INFO("No new market data available - positions will remain unchanged");
+            INFO("Loading previous trading day positions to carry forward...");
+
+            // Calculate previous date for position loading
+            auto previous_date_nontrade = now - std::chrono::hours(24);
+
+            // Load previous positions for each strategy and use as current
+            for (const auto& [strategy_name, allocation] : strategy_allocations) {
+                auto prev_result = db->load_positions_by_date(
+                    combined_strategy_id, strategy_name, coordinator_config.portfolio_id,
+                    previous_date_nontrade, "trading.positions", qt_read_book);
+
+                if (prev_result.is_ok() && !prev_result.value().empty()) {
+                    strategy_positions_map[strategy_name] = prev_result.value();
+                    INFO("Loaded " + std::to_string(prev_result.value().size()) +
+                         " positions for strategy: " + strategy_name);
+                } else {
+                    INFO("No previous positions found for strategy: " + strategy_name);
+                    strategy_positions_map[strategy_name] = {};
+                }
+            }
+
+            // The combined map is the SUM over the sleeves, as on a trading day.
+            rebuild_combined_positions(positions, strategy_positions_map);
+
+            INFO("Total positions carried forward: " + std::to_string(positions.size()));
+            INFO("═══════════════════════════════════════════════════════════════");
+            INFO("Skipping strategy calculations - proceeding to storage phase");
+            INFO("═══════════════════════════════════════════════════════════════");
+
+            skip_strategy_processing = true;
+        }
+
+        // The rolls this run legs (found by state above).
+        for (const auto& r : confirmed_rolls) {
+            if (r.price_source_change) {
+                // The micros' change of price source: no trade, no legs, no cost.
+                INFO("PRICE_SOURCE_CHANGE " + r.symbol + " date=" + r.confirm_date + " " + r.outgoing_id +
+                     "->" + r.incoming_id + " old_close=" + std::to_string(r.closing_price) +
+                     " new_close=" + std::to_string(r.opening_price) + " gap_points=" +
+                     std::to_string(r.opening_price - r.closing_price) +
+                     ": the micro's price source changes to its own contract; no legs, no cost (the gap "
+                     "is not P&L)");
+                continue;
+            }
+            INFO("ROLL_CONFIRMED " + r.symbol + " date=" + r.confirm_date + " " + r.outgoing_id +
+                 "->" + r.incoming_id + " closing_px=" + std::to_string(r.closing_price) +
+                 " opening_px=" + std::to_string(r.opening_price) +
+                 " change_bars=" + std::to_string(r.change_bars) +
+                 (r.known_on_bar ? ": a per-contract roll known on its bar"
+                                 : ": the next consumed bar kept the new id") +
+                 "; the legs are booked on this run");
         }
 
         // ========================================
         // UPDATE TRANSACTION COST MANAGER WITH MARKET DATA
-        // Feed rolling ADV and volatility for accurate cost calculations
+        // K2: the fill day's own volume for participation and the impact tier,
+        // the walk of returns ending at T-1 for the volatility term (futures_cost_feed.hpp).
+        // The execution manager's cost manager is fed here, and the
+        // PortfolioManager's right after it, from the same feed.
         // ========================================
         INFO("Updating execution manager with market data for transaction cost tracking...");
 
-        // Build map of latest bars per symbol (T-1 data)
+        // Map of latest bars per symbol (T-1 data), from the strategy feed: a JUNK symbol's
+        // latest bar here is its T-2 bar. On a carried day the feed is every bar, so the
+        // carried positions file's last marks (read from this map) are unchanged.
         std::unordered_map<std::string, Bar> latest_bars_per_symbol;
-        std::unordered_map<std::string, Bar> previous_bars_per_symbol;
-
-        for (const auto& bar : all_bars) {
+        for (const auto& bar : strategy_feed_bars) {
             auto it = latest_bars_per_symbol.find(bar.symbol);
             if (it == latest_bars_per_symbol.end() || bar.timestamp > it->second.timestamp) {
-                // Save previous latest as "previous" before updating
-                if (it != latest_bars_per_symbol.end()) {
-                    previous_bars_per_symbol[bar.symbol] = it->second;
-                }
                 latest_bars_per_symbol[bar.symbol] = bar;
-            } else if (!previous_bars_per_symbol.count(bar.symbol) &&
-                       bar.timestamp < latest_bars_per_symbol[bar.symbol].timestamp) {
-                // Track the second-most-recent bar as previous
-                auto prev_it = previous_bars_per_symbol.find(bar.symbol);
-                if (prev_it == previous_bars_per_symbol.end() ||
-                    bar.timestamp > prev_it->second.timestamp) {
-                    previous_bars_per_symbol[bar.symbol] = bar;
+            }
+        }
+
+        {
+            auto& cost_model = execution_manager->get_transaction_cost_manager();
+            // The run date decides the weekend merge's
+            // rule for a symbol whose T-1 bar is a weekend stub (futures_cost_feed.hpp).
+            const auto cost_feed = feed_futures_cost_model(cost_model, strategy_feed_bars, now);
+            for (const auto& fed : cost_feed.symbols) {
+                INFO("COST_FEED " + fed.symbol + " own_day=" +
+                     core::format_utc_date(fed.own_day_time) +
+                     " own_day_volume=" + std::to_string(fed.own_day_volume) +
+                     " bars=" + std::to_string(fed.bars) +
+                     " returns=" + std::to_string(fed.returns) +
+                     " vol_mult=" + std::to_string(cost_model.get_volatility_multiplier(fed.symbol)) +
+                     // The weekend merge, when it applied
+                     (fed.merged_weekend_bars > 0
+                          ? " weekend_merged_volume=" + std::to_string(fed.merged_weekend_volume) +
+                                " weekend_bars=" + std::to_string(fed.merged_weekend_bars) +
+                                " previous_session_volume=" +
+                                std::to_string(fed.previous_session_volume) +
+                                " participation_volume=" + std::to_string(fed.participation_volume)
+                          : std::string()));
+            }
+            std::string thin_list;
+            for (const auto& s : cost_feed.thin) thin_list += (thin_list.empty() ? "" : ", ") + s;
+            INFO("Updated transaction cost manager with market data for " +
+                 std::to_string(cost_feed.symbols.size()) + " symbols (" +
+                 std::to_string(cost_feed.returns_fed) + " log returns; fewer than 21 bars: " +
+                 (thin_list.empty() ? std::string("none") : thin_list) + ")");
+            if (!cost_feed.repeated_instants.empty()) {
+                std::string repeated;
+                for (const auto& s : cost_feed.repeated_instants) {
+                    repeated += (repeated.empty() ? "" : ", ") + s;
                 }
+                WARN("COST_FEED two bars at one instant for " + repeated +
+                     " (the loader keeps one bar per symbol-instant; fed as given)");
             }
         }
 
-        // Update execution manager with daily market data for each symbol
-        int symbols_updated = 0;
-        for (const auto& [symbol, latest_bar] : latest_bars_per_symbol) {
-            double close = static_cast<double>(latest_bar.close);
-            double volume = latest_bar.volume;
-            double prev_close = close;  // Default to same if no previous
-
-            auto prev_it = previous_bars_per_symbol.find(symbol);
-            if (prev_it != previous_bars_per_symbol.end()) {
-                prev_close = static_cast<double>(prev_it->second.close);
-            }
-
-            // Update the transaction cost manager with market data
-            execution_manager->update_market_data(symbol, volume, close);
-            symbols_updated++;
-
-            DEBUG("Updated market data for " + symbol + ": volume=" + std::to_string(volume) +
-                  ", close=" + std::to_string(close) +
-                  ", prev_close=" + std::to_string(prev_close));
+        // The PortfolioManager's own cost manager prices the one pass's cost
+        // vector (the cost of one contract of every symbol the pass weighs,
+        // rebalance_one_pass) and the fills it books. It is fed the SAME K2 feed as the
+        // execution manager's, here, before process_market_data runs the pass below; a symbol
+        // with no usable volume in it is held, never priced on a generic ADV.
+        {
+            auto& optimizer_cost_model = portfolio->get_transaction_cost_manager();
+            const auto optimizer_feed =
+                feed_futures_cost_model(optimizer_cost_model, strategy_feed_bars, now);
+            INFO("COST_FEED_OPTIMIZER fed the PortfolioManager's cost model (the optimizer's cost "
+                 "vector) for " + std::to_string(optimizer_feed.symbols.size()) + " symbols (" +
+                 std::to_string(optimizer_feed.returns_fed) + " log returns)");
         }
 
-        INFO("Updated transaction cost manager with market data for " +
-             std::to_string(symbols_updated) + " symbols");
+        // Set when a portfolio risk module could not answer and the PortfolioManager held the
+        // book: the day is stored as a REFUSE day, the email
+        // is flagged and main() exits kRiskModuleFailureExitCode instead of 0.
+        std::optional<nlohmann::json> risk_module_failure;
+        // The one pass's record of today's rebalance: what the row
+        // stores as risk_detail and risk_scale, and the forecast-sign closes booked as their own
+        // fills. Left at its defaults on a day with no rebalance.
+        OnePassDay one_pass_day;
 
         // ========================================
         // NORMAL TRADING DAY PROCESSING
         // Only run strategy calculations if NOT a non-trading day
         // ========================================
         if (!skip_strategy_processing) {
-            // FIX: Seed strategy's positions_ from yesterday's DB snapshot BEFORE prewarm.
-            // Each live invocation is a fresh process where positions_ defaults to zero.
-            // The Carver position buffer reads positions_ as the comparison anchor; without
-            // seeding it correctly the buffer can't absorb small day-to-day signal jitter
-            // and triggers a phantom trade every day. Backtest doesn't need this because
-            // its state is continuous in-memory across simulated days.
+            // FIX: Seed every sleeve's positions_ and PortfolioManager slot from yesterday's DB
+            // snapshot BEFORE the day's rebalance. Each live invocation is a fresh process where
+            // positions_ and current_positions default to zero. The Carver position buffer reads
+            // positions_ as the comparison anchor, and the optimizer reads current_positions as
+            // its baseline; without seeding both correctly the book trades a phantom difference
+            // every day. Backtest doesn't need this because its state is continuous in-memory
+            // across simulated days.
+            // EVERY sleeve is seeded from its OWN stored rows (seed_positions +
+            // update_strategy_position per row; see include/trade_ngin/live/sleeve_seeding.hpp), so
+            // no sleeve is anchored at zero or at whatever the PM holds.
+            // NOTE: two sleeves holding OPPOSITE signs on one
+            // symbol are each seeded with their own signed row, so the optimizer's anchor is the
+            // net while each sleeve's execution diff is gross.
             {
                 auto seed_previous_date = now - std::chrono::hours(24);
-                std::string seed_strategy_name =
-                    strategy_names.empty() ? std::string() : strategy_names[0];
-                auto seed_result = db->load_positions_by_date(
-                    combined_strategy_id, seed_strategy_name,
-                    coordinator_config.portfolio_id, seed_previous_date, "trading.positions");
-                if (seed_result.is_ok() && !seed_result.value().empty()) {
-                    // Fix #1: seed strategy's positions_ for buffer correctness
-                    auto seeded = tf_strategy->seed_positions(seed_result.value());
-                    if (seeded.is_error()) {
-                        WARN("Failed to seed strategy positions: " +
-                             std::string(seeded.error()->what()));
-                    }
-                    // Fix #7: seed PortfolioManager's info.current_positions for optimizer
-                    // baseline correctness. Without this, the optimizer's coordinate descent
-                    // starts from current=0 every fresh process and converges to a
-                    // zero-anchored compromise (e.g., MYM=2 instead of yesterday's actual=1),
-                    // producing daily ±1 trades as market noise crosses rounding boundaries.
-                    // PortfolioManager.strategies_ is keyed by the strategy's metadata.id
-                    // (e.g. "TREND_FOLLOWING"), NOT the combined_strategy_id used for DB
-                    // (e.g. "LIVE_TREND_FOLLOWING"). Use seed_strategy_name which matches.
-                    int pm_seeded_count = 0;
-                    for (const auto& [sym, pos] : seed_result.value()) {
-                        auto pm_seed = portfolio->update_strategy_position(
-                            seed_strategy_name, sym, pos);
-                        if (pm_seed.is_error()) {
-                            WARN("Failed to seed PortfolioManager position for " + sym +
-                                 ": " + std::string(pm_seed.error()->what()));
-                        } else {
-                            pm_seeded_count++;
-                        }
-                    }
-                    INFO("Seeded " + std::to_string(pm_seeded_count) +
-                         " positions into PortfolioManager.current_positions for "
-                         "optimizer-baseline correctness (strategy_name=" +
-                         seed_strategy_name + ")");
-                } else {
-                    INFO("No yesterday positions to seed for strategy " +
-                         seed_strategy_name + " (first run or no data)");
-                }
+                seed_every_sleeve(strategies, strategy_names, *portfolio,
+                                  [&](const std::string& seed_strategy_name) {
+                                      return db->load_positions_by_date(
+                                          combined_strategy_id, seed_strategy_name,
+                                          coordinator_config.portfolio_id, seed_previous_date,
+                                          "trading.positions", qt_read_book);
+                                  });
             }
 
-            // Pre-warm strategy state so portfolio can pull price history for optimization/risk
-            INFO("Preprocessing data in strategy to populate price history...");
-            auto strat_prewarm = tf_strategy->on_data(all_bars);
-            if (strat_prewarm.is_error()) {
-                std::cerr << "Failed to preprocess data in strategy: "
-                          << strat_prewarm.error()->what() << std::endl;
-                return 1;
+            // The sleeves' estimator history before the window, ahead of the window's own feed.
+            {
+                auto seeded = portfolio->seed_strategy_history(estimator_history_bars);
+                if (seeded.is_error()) {
+                    ERROR("The estimators' history before the window could not be seeded: " +
+                          std::string(seeded.error()->what()) + ". Refusing to run.");
+                    return 1;
+                }
             }
 
             // Process data through portfolio pipeline (optimization + risk), mirroring backtest
@@ -950,15 +2418,187 @@ int main(int argc, char* argv[]) {
             // Disable MarketDataBus to prevent duplicate processing during explicit data feed
             MarketDataBus::instance().set_publish_enabled(false);
             INFO("MarketDataBus publishing DISABLED before process_market_data");
-            auto port_process_result = portfolio->process_market_data(all_bars);
+            // JUNK: a withheld T-1 bar is kept out of the strategy and the
+            // portfolio stage, so its signal is not updated today, and it is never fed on a later
+            // run either. The price manager already has every bar: the mark uses it.
+            // The feed (strategy_feed_bars) is built above the cost feed.
+            if (!withheld_junk_bars.empty()) {
+                std::string withheld_list;
+                for (const auto& s : withheld_junk_bars) {
+                    withheld_list += (withheld_list.empty() ? "" : ", ") + s;
+                }
+                INFO("BOOK_GATE withheld the JUNK T-1 bar of " +
+                     std::to_string(withheld_junk_bars.size()) + " symbol(s) from the strategy "
+                     "and portfolio feed (signal not updated today): " + withheld_list);
+            }
+            // The hold set of today's rebalance. A symbol whose T-1 verdict
+            // is not SESSION and a change-bar symbol are held at their stored T-1 quantity:
+            // counted in every reading, never scaled, searched, trimmed or filled.
+            {
+                std::unordered_set<std::string> book_gate_holds;
+                change_bar_holds.clear();
+                for (const auto& symbol : symbols) {
+                    if (!t1_classification.is_session(symbol)) book_gate_holds.insert(symbol);
+                    // A symbol whose last consumed bar is pending (a change bar, either bar of a
+                    // flip, an id-less bar inside a pending roll) is held at its stored T-1
+                    // quantity on every book until its next consumed
+                    // bar, whatever that bar's date.
+                    const auto rs = roll_status.find(symbol);
+                    if (rs == roll_status.end() || !rs->second.holds()) continue;
+                    book_gate_holds.insert(symbol);
+                    change_bar_holds.insert(symbol);
+                    INFO("CHANGE_BAR_HOLD " + symbol + " date=" + core::format_utc_date(now) +
+                         " kind=" +
+                         (rs->second.flip ? "flip_revert"
+                                          : rs->second.change ? "pending_change" : "idless_pending") +
+                         " held_id=" + rs->second.held_id +
+                         ": the last consumed bar is pending; held at the stored T-1 quantity, no "
+                         "order today");
+                    const auto lc = last_consumed_date.find(symbol);
+                    if (rs->second.flip && lc != last_consumed_date.end() &&
+                        lc->second == t1_classification.t1_date) {
+                        INFO("FLIP_PAIR " + symbol + " date=" + t1_classification.t1_date +
+                             " held_id=" + rs->second.held_id +
+                             " bars=" + std::to_string(rs->second.bars_pending + 1) +
+                             ": the id returned to the held contract; no legs, every bar of it held "
+                             "and its returns excluded");
+                    }
+                }
+                portfolio->set_hold_set(std::move(book_gate_holds));
+            }
+            // A sizing hold skips process_market_data only, so every strategy keeps the
+            // seeded T-1 book above (no rebalance, no order). PHASE 4 below still runs and stores
+            // each sleeve's current_forecast, which no on_data set today: the stored signals are 0.
+            if (qt_mode == qt::Mode::DESK || qt_mode == qt::Mode::OVERRIDE || qt_sends) {
+                // QT plan E5 (rulings 6 to 8): the pass runs on the desk's totals; the split back
+                // to the sleeves follows plan section 3b, Q2. A send re-books the stored book
+                // exactly, split as it is stored, so the e-mail is built from that book.
+                DeskBook desk;
+                desk.totals = qt_desk_totals;
+                desk.exact = qt_mode != qt::Mode::DESK;
+                if (qt_sends) {
+                    for (const auto& [sleeve, rows] : qt_publish_book) {
+                        for (const auto& [symbol, quantity] : rows) {
+                            if (quantity != 0.0) desk.weights[symbol][sleeve] = std::abs(quantity);
+                        }
+                    }
+                } else {
+                    auto model = qt::load_book(*db, portfolio_id, combined_strategy_id, "system",
+                                               qt_date);
+                    if (model.is_error()) {
+                        ERROR("QT: " + std::string(model.error()->what()));
+                        return 1;
+                    }
+                    SleeveQuantities previous;
+                    for (const auto& sleeve : strategy_names) {
+                        auto held = db->load_positions_by_date(
+                            combined_strategy_id, sleeve, coordinator_config.portfolio_id,
+                            now - std::chrono::hours(24), "trading.positions", qt_read_book);
+                        if (held.is_error()) continue;
+                        for (const auto& [symbol, position] : held.value()) {
+                            previous[sleeve][symbol] = position.quantity.as_double();
+                        }
+                    }
+                    std::map<std::string, std::set<std::string>> universe;
+                    for (const auto& sleeve : strategy_names) {
+                        universe[sleeve] = std::set<std::string>(symbols.begin(), symbols.end());
+                    }
+                    auto weights = resolve_desk_split(qt_desk_totals, model.value(), previous,
+                                                      universe);
+                    if (weights.is_error()) return qt_refuse(weights.error()->what());
+                    desk.weights = weights.value();
+                }
+                portfolio->set_desk_book(desk);
+            }
+            auto port_process_result =
+                sizing_hold ? Result<void>() : portfolio->process_market_data(strategy_feed_bars);
             INFO("MarketDataBus publishing RE-ENABLED after process_market_data");
             MarketDataBus::instance().set_publish_enabled(true);
+            // PORTFOLIO RISK REFUSE: a portfolio-scope risk REFUSE is found here, after
+            // today's live_run_metadata row was written. That row records a run that did
+            // happen, so it is marked, not deleted: the same row is written again with the
+            // refusal and the PM's decision record in its portfolio_config JSON. Placed before
+            // the error check, so a refusal that fails the call (an unseeded scope) is marked.
+            if (auto risk_refusal = portfolio_risk_refusal(portfolio->last_risk_decisions())) {
+                WARN("Portfolio risk REFUSE by module " +
+                     risk_refusal->value("module", std::string()) + ": " +
+                     risk_refusal->value("reason", std::string()) +
+                     "; marking today's live_run_metadata row");
+                // The marked JSON is kept, so a later mark on the same row (the
+                // STRICT assertion's) is added to this one instead of replacing it.
+                auto mark_result = !qt_model_records ? Result<void>() : db->store_live_run_metadata(
+                    now, combined_strategy_id, portfolio_id, strategy_alloc_json,
+                    portfolio_config_json = mark_risk_refusal(portfolio_config_json, *risk_refusal,
+                                                              portfolio->risk_decisions_json()),
+                    strategy_configs);
+                if (mark_result.is_error()) {
+                    ERROR("Failed to mark today's live_run_metadata row with the risk refusal: " +
+                          std::string(mark_result.error()->what()));
+                } else {
+                    INFO("Marked today's live_run_metadata row with the risk refusal");
+                }
+            }
+            // PORTFOLIO RISK MODULE FAILURE: a portfolio risk module that could not evaluate
+            // the book refused the scope, so the PM holds every strategy at its seeded T-1 book
+            // and no order follows. The run goes on to store the day as it stores any REFUSE day
+            // (the row above is marked) and exits non-zero at the end, with the email flagged.
+            risk_module_failure = portfolio_risk_module_failure(portfolio->last_risk_decisions());
+            if (risk_module_failure) {
+                ERROR("RISK_MODULE_FAILURE portfolio risk module " +
+                      risk_module_failure->value("module", std::string()) +
+                      " could not evaluate the book: " +
+                      risk_module_failure->value("error", std::string()) +
+                      "; the book is held at the seeded T-1 positions and no orders are sent; "
+                      "the day is stored as a REFUSE day and the run exits " +
+                      std::to_string(kRiskModuleFailureExitCode));
+            }
+            // SLEEVE RISK MODULE FAILURE: a SLEEVE-scope risk module that could not
+            // answer refused its sleeve, as the portfolio rule does for the book: the PM held that
+            // sleeve at its seeded T-1 book (no order for it) and the other sleeves traded. The day
+            // is flagged as a portfolio failure is (the same exit code and email flag, which the
+            // cron wrapper and the operator already read) and, unless a portfolio refusal marked it
+            // above, today's live_run_metadata row carries the sleeve's risk_refusal mark.
+            if (!risk_module_failure) {
+                risk_module_failure =
+                    sleeve_risk_module_failure(portfolio->last_risk_decisions());
+                if (risk_module_failure) {
+                    ERROR("RISK_MODULE_FAILURE sleeve risk module " +
+                          risk_module_failure->value("module", std::string()) +
+                          " could not evaluate sleeve " +
+                          risk_module_failure->value("scope_id", std::string()) + ": " +
+                          risk_module_failure->value("error", std::string()) +
+                          "; that sleeve is held at its seeded T-1 book and sends no orders, the "
+                          "other sleeves trade; the run exits " +
+                          std::to_string(kRiskModuleFailureExitCode));
+                    if (!portfolio_risk_refusal(portfolio->last_risk_decisions())) {
+                        auto sleeve_mark = !qt_model_records ? Result<void>() : db->store_live_run_metadata(
+                            now, combined_strategy_id, portfolio_id, strategy_alloc_json,
+                            portfolio_config_json =
+                                mark_risk_refusal(portfolio_config_json, *risk_module_failure,
+                                                  portfolio->risk_decisions_json()),
+                            strategy_configs);
+                        if (sleeve_mark.is_error()) {
+                            ERROR("Failed to mark today's live_run_metadata row with the sleeve "
+                                  "risk refusal: " +
+                                  std::string(sleeve_mark.error()->what()));
+                        } else {
+                            INFO("Marked today's live_run_metadata row with the sleeve risk "
+                                 "refusal");
+                        }
+                    }
+                }
+            }
+            one_pass_day = portfolio->last_one_pass();
             if (port_process_result.is_error()) {
                 std::cerr << "Failed to process data in portfolio manager: "
                           << port_process_result.error()->what() << std::endl;
                 return 1;
             }
             INFO("Portfolio processing completed");
+            INFO(trade_ngin::estimator_short_window_line(strategies));
+            if (const std::string line = trade_ngin::carry_driven_shorts_line(strategies); !line.empty()) {
+                INFO(line);  // carry on only
+            }
 
             // ========================================
             // PHASE 4: PER-STRATEGY SIGNALS STORAGE
@@ -970,12 +2610,10 @@ int main(int argc, char* argv[]) {
                 const auto& metadata = strategy->get_metadata();
                 std::string strategy_name = metadata.id;
 
-                // Try to extract signals from either TrendFollowingStrategy or
-                // TrendFollowingFastStrategy
+                // Extract signals from a TrendFollowingStrategy sleeve (TREND or FAST)
                 std::unordered_map<std::string, double> signals_map;
                 bool signals_extracted = false;
 
-                // Try TrendFollowingStrategy first
                 auto tf_strategy_ptr = std::dynamic_pointer_cast<TrendFollowingStrategy>(strategy);
                 if (tf_strategy_ptr) {
                     // Get all instrument data (contains signals for all symbols)
@@ -987,20 +2625,6 @@ int main(int argc, char* argv[]) {
                         signals_map[symbol] = data.current_forecast;
                     }
                     signals_extracted = true;
-                } else {
-                    // Try TrendFollowingFastStrategy
-                    auto tf_fast_ptr =
-                        std::dynamic_pointer_cast<TrendFollowingFastStrategy>(strategy);
-                    if (tf_fast_ptr) {
-                        // Get all instrument data from fast strategy
-                        const auto& all_instrument_data = tf_fast_ptr->get_all_instrument_data();
-
-                        // Extract signals (current_forecast) from instrument data
-                        for (const auto& [symbol, data] : all_instrument_data) {
-                            signals_map[symbol] = data.current_forecast;
-                        }
-                        signals_extracted = true;
-                    }
                 }
 
                 if (signals_extracted) {
@@ -1008,7 +2632,7 @@ int main(int argc, char* argv[]) {
                          std::to_string(signals_map.size()) + " signals");
 
                     if (!signals_map.empty()) {
-                        auto save_result = db->store_signals(
+                        auto save_result = !qt_model_records ? Result<void>() : db->store_signals(
                             signals_map,
                             combined_strategy_id,  // Combined strategy_id for tier 2
                             strategy_name,         // Individual strategy_name for tier 3
@@ -1054,13 +2678,18 @@ int main(int argc, char* argv[]) {
             INFO("DEBUG: Retrieved " + std::to_string(strategy_positions_map.size()) +
                  " strategies from PortfolioManager");
         }  // End of if (!skip_strategy_processing) - strategy processing block
+        // A sizing hold is flagged and exits as a held book does (the PortfolioManager
+        // did not run, so no risk module failure competes with it).
+        if (sizing_hold) {
+            risk_module_failure = sizing_hold;
+        }
 
         // Load previous day positions for PnL calculation
         INFO("Loading previous day positions for PnL calculation...");
         auto previous_date = now - std::chrono::hours(24);
         auto previous_positions_result =
             db->load_positions_by_date(combined_strategy_id, "", coordinator_config.portfolio_id,
-                                       previous_date, "trading.positions");
+                                       previous_date, "trading.positions", qt_read_book);
         std::unordered_map<std::string, Position> previous_positions;
 
         if (previous_positions_result.is_ok()) {
@@ -1089,108 +2718,149 @@ int main(int argc, char* argv[]) {
             price_manager->get_all_previous_day_prices();
         std::unordered_map<std::string, double> two_days_ago_close_prices =
             price_manager->get_all_two_days_ago_prices();
+        // A WITHHELD T-1 print is not a usable close. The
+        // Day T row of such a symbol is valued at its last consumed close, never at the print.
+        std::unordered_map<std::string, double> day_t_mark_prices = previous_day_close_prices;
+        for (const auto& symbol : withheld_junk_bars) {
+            const auto last_consumed = latest_bars_per_symbol.find(symbol);
+            if (last_consumed != latest_bars_per_symbol.end()) {
+                day_t_mark_prices[symbol] = static_cast<double>(last_consumed->second.close);
+            } else {
+                day_t_mark_prices.erase(symbol);
+            }
+        }
 
         INFO("Retrieved prices from PriceManager: " +
              std::to_string(previous_day_close_prices.size()) + " Day T-1, " +
              std::to_string(two_days_ago_close_prices.size()) + " Day T-2");
 
         // ========================================
-        // MONDAY AGRICULTURAL FUTURES FIX
-        // Agricultural futures don't trade Sunday evening, so on Monday they have
-        // the same rolling window problem as other futures have on Sunday.
-        // For agricultural symbols missing T-1 prices on Monday, reuse previous positions.
+        // PREVIOUS DAY PER-STRATEGY BOOKS
+        // Loaded once, here, and used by both the book gate below and the execution step
+        // (the gate holds against the exact map the executions are diffed against).
         // ========================================
-        bool is_monday = (day_of_week == 1);
+        INFO("DEBUG PHASE 4: Loading previous day positions per-strategy...");
+        std::unordered_map<std::string, std::unordered_map<std::string, Position>>
+            previous_strategy_positions;
 
-        // Agricultural futures that don't trade Sunday evening
-        const std::set<std::string> AGRICULTURAL_FUTURES_BASE = {
-            "ZC", "ZS", "ZW", "ZL", "ZM", "KE", "ZR",  // Grains
-            "LE", "HE", "GF"                           // Livestock
-        };
+        for (const auto& [strategy_name, _] : strategy_positions_map) {
+            // Load previous positions filtering by BOTH combined_strategy_id AND individual
+            // strategy_name to ensure we only get positions from this specific run
+            auto prev_result =
+                db->load_positions_by_date(combined_strategy_id,  // Combined strategy_id
+                                           strategy_name,         // Individual strategy_name
+                                           coordinator_config.portfolio_id,  // Portfolio ID
+                                           previous_date, "trading.positions", qt_read_book);
 
-        // Helper lambda to check if a symbol is an agricultural future
-        auto is_agricultural_future =
-            [&AGRICULTURAL_FUTURES_BASE](const std::string& symbol) -> bool {
-            // Extract base symbol (e.g., "ZC.v.0" -> "ZC")
-            std::string base = symbol;
-            auto dot_pos = symbol.find('.');
-            if (dot_pos != std::string::npos) {
-                base = symbol.substr(0, dot_pos);
-            }
-            return AGRICULTURAL_FUTURES_BASE.count(base) > 0;
-        };
+            if (prev_result.is_ok()) {
+                previous_strategy_positions[strategy_name] = prev_result.value();
+                INFO("DEBUG PHASE 4: Loaded " + std::to_string(prev_result.value().size()) +
+                     " previous positions for strategy: " + strategy_name);
 
-        if (is_monday && !skip_strategy_processing) {
-            INFO("═══════════════════════════════════════════════════════════════");
-            INFO("MONDAY AGRICULTURAL FUTURES CHECK");
-            INFO("Agricultural futures don't trade Sunday - checking for missing T-1 prices");
-            INFO("═══════════════════════════════════════════════════════════════");
-
-            int ag_symbols_fixed = 0;
-
-            // For each strategy, check agricultural symbols
-            for (auto& [strategy_name, current_positions_map] : strategy_positions_map) {
-                // Load previous positions for this strategy
-                auto prev_strategy_result = db->load_positions_by_date(
-                    combined_strategy_id, strategy_name, coordinator_config.portfolio_id,
-                    previous_date, "trading.positions");
-
-                std::unordered_map<std::string, Position> prev_strategy_positions;
-                if (prev_strategy_result.is_ok()) {
-                    prev_strategy_positions = prev_strategy_result.value();
+                // Log individual previous positions for debugging
+                for (const auto& [symbol, pos] : prev_result.value()) {
+                    DEBUG("DEBUG PHASE 4: Previous " + strategy_name + " - " + symbol +
+                          " qty=" + std::to_string(pos.quantity.as_double()));
                 }
+            } else {
+                INFO("No previous positions found for strategy: " + strategy_name +
+                     " (first run or no data): " + std::string(prev_result.error()->what()));
+                previous_strategy_positions[strategy_name] = {};
+            }
+        }
 
-                // Check each position in the current strategy
-                for (auto& [symbol, current_pos] : current_positions_map) {
-                    if (is_agricultural_future(symbol)) {
-                        // Check if T-1 price is missing for this symbol
-                        bool has_t1_price = previous_day_close_prices.find(symbol) !=
-                                            previous_day_close_prices.end();
-
-                        if (!has_t1_price) {
-                            // This agricultural future has no Sunday data
-                            // Reuse Friday's position to avoid phantom execution
-                            auto prev_it = prev_strategy_positions.find(symbol);
-                            if (prev_it != prev_strategy_positions.end()) {
-                                double prev_qty = prev_it->second.quantity.as_double();
-                                double curr_qty = current_pos.quantity.as_double();
-
-                                if (std::abs(curr_qty - prev_qty) > 1e-10) {
-                                    INFO("Monday fix for " + symbol + " (" + strategy_name +
-                                         "): " + "No Sunday data - reverting position from " +
-                                         std::to_string(curr_qty) + " to " +
-                                         std::to_string(prev_qty) + " (Friday's position)");
-
-                                    // Override with previous position
-                                    current_pos = prev_it->second;
-                                    current_pos.last_update = now;  // Update timestamp
-                                    ag_symbols_fixed++;
-                                }
-                            } else {
-                                // No previous position exists - keep current (likely first time)
-                                INFO("Monday check for " + symbol + " (" + strategy_name + "): " +
-                                     "No Sunday data and no previous position - keeping current");
-                            }
+        // A LATE BAR (a warning, no catch-up and no refusal). A held symbol's bar
+        // that arrived after the run that should have settled it: the stored row of its date books
+        // 0 and this run settles Day T-1 against its close, so its own move is on no stored row.
+        // The run that first consumes it names it once (live/late_bar_warning.hpp). Nothing stored
+        // changes.
+        {
+            std::unordered_set<std::string> held_symbols;
+            for (const auto& [strategy_name, book] : previous_strategy_positions) {
+                for (const auto& [symbol, row] : book) {
+                    if (row.quantity.as_double() != 0.0) held_symbols.insert(symbol);
+                }
+            }
+            std::unordered_set<std::string> late_roll_symbols;
+            for (const auto& [symbol, late] : roll_state.late) late_roll_symbols.insert(symbol);
+            std::map<Timestamp, std::vector<Position>> rows_by_date;
+            const auto late_bars = find_late_bars(
+                strategy_feed_bars, t1_classification.t1_date, held_symbols, late_roll_symbols,
+                [&](const Timestamp& bar_time) {
+                    const auto cached = rows_by_date.find(bar_time);
+                    if (cached != rows_by_date.end()) return cached->second;
+                    std::vector<Position> rows;
+                    for (const auto& [strategy_name, book] : previous_strategy_positions) {
+                        auto stored = db->load_positions_by_date(
+                            combined_strategy_id, strategy_name, coordinator_config.portfolio_id,
+                            bar_time, "trading.positions", qt_read_book);
+                        if (stored.is_error()) continue;
+                        for (const auto& [symbol, stored_row] : stored.value()) {
+                            Position row = stored_row;
+                            row.symbol = symbol;
+                            rows.push_back(std::move(row));
                         }
                     }
-                }
+                    return rows_by_date.emplace(bar_time, std::move(rows)).first->second;
+                });
+            for (const auto& bar : late_bars) {
+                WARN(late_bar_warning_line(bar, pnl_manager->get_point_value(bar.symbol)));
+            }
+        }
 
-                // Also update the combined positions map
-                for (const auto& [symbol, pos] : current_positions_map) {
-                    if (is_agricultural_future(symbol) &&
-                        previous_day_close_prices.find(symbol) == previous_day_close_prices.end()) {
-                        positions[symbol] = pos;
+        // ========================================
+        // BOOK GATE
+        // A symbol whose T-1 verdict is not SESSION is held at its stored T-1 quantity on EVERY
+        // per-strategy book: no signal-driven change, no order, marked at its last mark (NO_BAR)
+        // or at its T-1 bar (JUNK). The key is the verdict, never membership of the price map:
+        // a JUNK symbol has a T-1 price and would otherwise be traded at the junk print. A
+        // symbol held yesterday and absent from today's target is re-inserted, so the close-out
+        // loop cannot flatten it at a stale mark. Every other symbol trades normally.
+        // ========================================
+        std::vector<BookHold> book_holds;
+        if (!skip_strategy_processing) {
+            book_holds = hold_non_session_symbols(strategy_positions_map,
+                                                  previous_strategy_positions, t1_classification,
+                                                  now, change_bar_holds);
+            log_book_holds(book_holds);
+            if (!book_holds.empty()) {
+                rebuild_combined_positions(positions, strategy_positions_map);
+            }
+            // Ruling 21: a symbol with no model data is held and counted in risk until its data
+            // arrives; if the desk closes it, it is closed at its latest known price.
+            if (qt_mode == qt::Mode::DESK || qt_mode == qt::Mode::OVERRIDE) {
+                bool closed_any = false;
+                for (const auto& hold : book_holds) {
+                    const auto asked = qt_desk_totals.find(hold.symbol);
+                    if (asked == qt_desk_totals.end() || asked->second != 0.0 ||
+                        hold.held_quantity == 0.0) {
+                        continue;
                     }
+                    const auto last = latest_bars_per_symbol.find(hold.symbol);
+                    if (last == latest_bars_per_symbol.end()) {
+                        WARN("QT_DESK_CLOSE " + hold.symbol +
+                             ": no known price at all; held at " +
+                             std::to_string(hold.held_quantity));
+                        continue;
+                    }
+                    const double price = static_cast<double>(last->second.close);
+                    auto& row = strategy_positions_map[hold.strategy_name][hold.symbol];
+                    row.symbol = hold.symbol;
+                    row.quantity = Decimal(0.0);
+                    if (previous_day_close_prices.count(hold.symbol) == 0) {
+                        previous_day_close_prices[hold.symbol] = price;
+                    }
+                    if (day_t_mark_prices.count(hold.symbol) == 0) {
+                        day_t_mark_prices[hold.symbol] = price;
+                    }
+                    INFO("QT_DESK_CLOSE " + hold.strategy_name + " " + hold.symbol + " " +
+                         std::to_string(hold.held_quantity) + " -> 0 at its latest known price " +
+                         std::to_string(price) + " (" +
+                         core::format_utc_date(last->second.timestamp) + ", ruling 21)");
+                    closed_any = true;
                 }
+                if (closed_any) rebuild_combined_positions(positions, strategy_positions_map);
             }
-
-            if (ag_symbols_fixed > 0) {
-                INFO("Monday agricultural fix: Reverted " + std::to_string(ag_symbols_fixed) +
-                     " positions to Friday's values (no Sunday trading data)");
-            } else {
-                INFO("Monday agricultural check complete: No position reversions needed");
-            }
-            INFO("═══════════════════════════════════════════════════════════════");
         }
 
         // Verify we have prices for all required symbols
@@ -1206,10 +2876,11 @@ int main(int argc, char* argv[]) {
 
         for (const auto& symbol : all_symbols) {
             if (previous_day_close_prices.find(symbol) == previous_day_close_prices.end()) {
-                // On Monday, agricultural futures missing T-1 is expected (handled above)
-                if (is_monday && is_agricultural_future(symbol)) {
-                    INFO("Expected: Missing T-1 price for agricultural future " + symbol +
-                         " on Monday");
+                // A closure is expected; a feed hole was logged as an ERROR by the classifier.
+                const SymbolDayVerdict* t1_verdict = t1_classification.find(symbol);
+                if (t1_verdict && t1_verdict->verdict == SessionVerdict::NO_BAR_CLOSURE) {
+                    INFO("Expected: Missing T-1 price for " + symbol + " (NO_BAR(closure): " +
+                         t1_verdict->reason + ")");
                 } else {
                     WARN("Missing T-1 price for symbol: " + symbol);
                 }
@@ -1240,6 +2911,20 @@ int main(int argc, char* argv[]) {
 
         double aggregate_yesterday_total_pnl = 0.0;
 
+        // The T-1 settlement on the CONSUMED bars, built above the sizing read (D-B).
+        const auto& t1_zero_pnl_symbols = t1_settlement.zero_pnl_symbols;
+        const auto& t2_consumed_close_prices = t1_settlement.t2_close_prices;
+
+        // A T-1 whose only held moves were settled at 0 (change or
+        // withheld bars) has a zero aggregate but WAS finalized; the live_results update below must
+        // not skip it. The test is on the HELD symbols, not on the universe.
+        bool t1_zero_pnl_held = false;
+        // The finalized Day T-1 rows carry the contract held
+        // AFTER the T-1 bar, and the stored row's contract is the state the roll legs are booked
+        // from. They are computed here and written only after the day's executions are stored
+        // (below), so a run stopped anywhere leaves either the T-1 rows as they were (the replay
+        // legs the same rolls and books the same late moves) or the stored legs a re-run reads.
+        std::vector<std::pair<std::string, std::vector<Position>>> t1_position_rewrites;
         if (!two_days_ago_close_prices.empty() && pnl_manager) {
             INFO("Finalizing Day T-1 positions per-strategy...");
 
@@ -1252,7 +2937,7 @@ int main(int argc, char* argv[]) {
                     db->load_positions_by_date(combined_strategy_id,  // Combined strategy_id
                                                strategy_name,         // Individual strategy_name
                                                coordinator_config.portfolio_id,  // Portfolio ID
-                                               previous_date, "trading.positions");
+                                               previous_date, "trading.positions", qt_read_book);
 
                 if (prev_strategy_positions_result.is_error()) {
                     INFO("No previous positions found for strategy " + strategy_name +
@@ -1289,11 +2974,12 @@ int main(int argc, char* argv[]) {
                 // Use PnLManager to finalize previous day for this strategy
                 auto finalization_result =
                     pnl_manager->finalize_previous_day(prev_positions_vec,
-                                                       previous_day_close_prices,  // T-1 prices
-                                                       two_days_ago_close_prices,  // T-2 prices
+                                                       t1_settlement.t1_close_prices,  // T-1 prices
+                                                       t2_consumed_close_prices,  // T-2 prices
                                                        strategy_capital,
-                                                       0.0  // Commissions (will be handled later)
-                    );
+                                                       0.0,  // Commissions (will be handled later)
+                                                       LivePnLManager::UnrealizedPolicy::SETTLED,
+                                                       t1_zero_pnl_symbols);
 
                 if (finalization_result.is_ok()) {
                     auto& result = finalization_result.value();
@@ -1309,25 +2995,31 @@ int main(int argc, char* argv[]) {
                               " finalized PnL: $" + std::to_string(pnl));
                     }
 
-                    // Store updated positions for yesterday (Day T-1) in database FOR THIS STRATEGY
-                    if (!result.finalized_positions.empty()) {
-                        auto update_result =
-                            db->store_positions(result.finalized_positions,
-                                                combined_strategy_id,  // Combined strategy_id
-                                                strategy_name,         // Individual strategy_name
-                                                portfolio_id,          // Portfolio identifier
-                                                "trading.positions");
-
-                        if (update_result.is_error()) {
-                            ERROR("Failed to update Day T-1 positions for strategy " +
-                                  strategy_name + ": " +
-                                  std::string(update_result.error()->what()));
-                        } else {
-                            INFO("Successfully updated " +
-                                 std::to_string(result.finalized_positions.size()) +
-                                 " Day T-1 positions with finalized PnL for strategy: " +
-                                 strategy_name);
+                    // The T-1 row carries
+                    // the contract held AFTER the T-1 bar, as the backtest's row of that date
+                    // does: on the confirming bar's row, the incoming contract.
+                    std::vector<Position> finalized_positions = result.finalized_positions;
+                    // Migration 041: the settle's two prices and why a row booked no move, for
+                    // the book e-mail's settled table.
+                    const SettledTablePrices settle_prices = settled_table_prices(
+                        t1_settlement.t2_close_prices, t1_settlement.t1_close_prices,
+                        t1_settlement.last_close_without_t1);
+                    const SettledZeroKinds settle_kinds{t1_settlement.roll_zero_symbols,
+                                                        t1_settlement.withheld_zero_symbols};
+                    for (auto& finalized_pos : finalized_positions) {
+                        const auto rs = roll_status.find(finalized_pos.symbol);
+                        if (rs != roll_status.end()) finalized_pos.instrument_id = rs->second.held_id;
+                        stamp_settled_row(finalized_pos, settle_prices, settle_kinds);
+                        if (t1_zero_pnl_symbols.count(finalized_pos.symbol) &&
+                            finalized_pos.quantity.as_double() != 0.0) {
+                            t1_zero_pnl_held = true;
                         }
+                    }
+
+                    // The Day T-1 rows of this strategy, written after the executions.
+                    if (!finalized_positions.empty()) {
+                        t1_position_rewrites.emplace_back(strategy_name,
+                                                          std::move(finalized_positions));
                     }
                 } else {
                     ERROR("PnLManager failed to finalize Day T-1 for strategy " + strategy_name +
@@ -1347,6 +3039,7 @@ int main(int argc, char* argv[]) {
         INFO("STEP 2: Creating Day T positions with zero PnL (placeholders)...");
 
         double total_daily_transaction_costs = 0.0;  // Will be calculated from executions
+        double total_daily_roll_costs = 0.0;  // migration 017: the ROLL subset of the above
 
         // Update all current positions to have:
         // - average_price = Day T-1 close (execution price)
@@ -1357,8 +3050,8 @@ int main(int argc, char* argv[]) {
         for (auto& [symbol, current_position] : positions) {
             // Get Day T-1 close price for this symbol
             double yesterday_close = current_position.average_price.as_double();  // Default
-            if (previous_day_close_prices.find(symbol) != previous_day_close_prices.end()) {
-                yesterday_close = previous_day_close_prices[symbol];
+            if (day_t_mark_prices.find(symbol) != day_t_mark_prices.end()) {
+                yesterday_close = day_t_mark_prices[symbol];
             }
 
             // Set position fields for Day T
@@ -1377,58 +3070,131 @@ int main(int argc, char* argv[]) {
         // ========================================
         // PHASE 4: PER-STRATEGY EXECUTIONS GENERATION
         // Generate executions for each strategy based on their position changes
-        // Load previous positions per-strategy (Option A)
+        // Load previous positions per-strategy
         // ========================================
         INFO("PHASE 4: Generating per-strategy executions...");
 
-        // Load previous day per-strategy positions
-        INFO("DEBUG PHASE 4: Loading previous day positions per-strategy...");
-        std::unordered_map<std::string, std::unordered_map<std::string, Position>>
-            previous_strategy_positions;
-
-        for (const auto& [strategy_name, _] : strategy_positions_map) {
-            // Load previous positions filtering by BOTH combined_strategy_id AND individual
-            // strategy_name to ensure we only get positions from this specific run
-            auto prev_result =
-                db->load_positions_by_date(combined_strategy_id,  // Combined strategy_id
-                                           strategy_name,         // Individual strategy_name
-                                           coordinator_config.portfolio_id,  // Portfolio ID
-                                           previous_date, "trading.positions");
-
-            if (prev_result.is_ok()) {
-                previous_strategy_positions[strategy_name] = prev_result.value();
-                INFO("DEBUG PHASE 4: Loaded " + std::to_string(prev_result.value().size()) +
-                     " previous positions for strategy: " + strategy_name);
-
-                // Log individual previous positions for debugging
-                for (const auto& [symbol, pos] : prev_result.value()) {
-                    DEBUG("DEBUG PHASE 4: Previous " + strategy_name + " - " + symbol +
-                          " qty=" + std::to_string(pos.quantity.as_double()));
-                }
-            } else {
-                INFO("No previous positions found for strategy: " + strategy_name +
-                     " (first run or no data): " + std::string(prev_result.error()->what()));
-                previous_strategy_positions[strategy_name] = {};
-            }
-        }
+        // The previous day per-strategy books were loaded above, before the book gate.
 
         // Generate executions for each strategy
         std::unordered_map<std::string, std::vector<ExecutionReport>> all_strategy_executions;
         int total_executions = 0;
         // total_daily_transaction_costs already declared earlier at line 881
+        // The sleeves whose fills were generated, in the order of this loop: the day's cost is
+        // added up in that order, after the netting below.
+        std::vector<std::string> sleeves_filled;
 
-        for (const auto& [strategy_name, current_positions_map] : strategy_positions_map) {
+        // PricingPolicy::STRICT: a fill is priced from a real T-1 close or not at
+        // all. With the book gate above every changed symbol has one, so nothing is unpriced
+        // by construction; a symbol that still is gets its stored row back (the rollback of
+        // LiveDailyCycle::execute_day_t), is logged as a tripwire, and the assertion after the
+        // loop fails the run if any book change is left without a price.
+        std::vector<std::string> strict_rolled_back;
+        for (auto& [strategy_name, current_positions_map] : strategy_positions_map) {
             auto prev_positions_map = previous_strategy_positions[strategy_name];
 
             INFO("DEBUG PHASE 4: Generating executions for strategy '" + strategy_name +
                  "' (current=" + std::to_string(current_positions_map.size()) +
                  ", previous=" + std::to_string(prev_positions_map.size()) + ")");
 
-            auto exec_result = execution_manager->generate_daily_executions(
-                current_positions_map, prev_positions_map, previous_day_close_prices, now);
+            // A forecast-sign close is its own fill to flat, ahead of the symbol's
+            // move to today's quantity.
+            const auto sleeve_sign_closes = one_pass_day.sign_closes.find(strategy_name);
+            auto exec_result =
+                execute_strategy_day_strict(*execution_manager, current_positions_map,
+                                            prev_positions_map, previous_day_close_prices, now,
+                                            sleeve_sign_closes == one_pass_day.sign_closes.end()
+                                                ? std::map<std::string, double>{}
+                                                : sleeve_sign_closes->second);
 
             if (exec_result.is_ok()) {
-                std::vector<ExecutionReport> strategy_executions = exec_result.value();
+                for (const auto& s : exec_result.value().rolled_back) {
+                    ERROR("STRICT_TRIPWIRE " + s + " (" + strategy_name +
+                          ") had a book change and no T-1 price: rolled back to its stored "
+                          "row, not traded. The book gate should have held it.");
+                    strict_rolled_back.push_back(s);
+                }
+                std::vector<ExecutionReport> strategy_executions = exec_result.value().executions;
+
+                // The two ROLL legs of every roll confirmed in this
+                // run's span, per symbol this sleeve holds (the stored T-1 book: no fill happened
+                // between the confirming bar and this run), ahead of the day's fills (closing leg,
+                // opening leg, then STRATEGY), priced by the execution manager's cost model, STRICT
+                // (a leg without a usable close refuses the run), ids EXEC_<symbol>_<confirming
+                // bar YYYYMMDD>_RC / _RO; realised 0; outside netting; the cost in both totals.
+                {
+                    std::vector<ExecutionReport> roll_legs;
+                    const std::string run_date = trade_ngin::core::format_utc_date(now);
+                    // The cost model's inputs on each ROLL_LEG line (ADV, volatility multiplier), so
+                    // a reader can recompute the leg's implicit cost.
+                    auto& roll_cost_model = execution_manager->get_transaction_cost_manager();
+                    auto model_input = [](double x) {
+                        std::ostringstream o;
+                        o << std::setprecision(12) << x;
+                        return o.str();
+                    };
+                    for (const auto& r : confirmed_rolls) {
+                        if (r.price_source_change) continue;  // no legs, no cost
+                        const auto held = prev_positions_map.find(r.symbol);
+                        if (held == prev_positions_map.end()) continue;
+                        const double q = held->second.quantity.as_double();
+                        if (std::abs(q) < 1e-9) continue;
+                        const std::string tag = r.symbol + "_" + compact_date(r.confirm_date);
+                        std::vector<ExecutionReport> legs;
+                        try {
+                            legs = roll_series::make_roll_legs(
+                                r.symbol, q, r.closing_price, r.opening_price, r.outgoing_id,
+                                r.incoming_id, now, "EXEC_" + tag + "_RC", "ROLL_" + tag + "_RC",
+                                "EXEC_" + tag + "_RO", "ROLL_" + tag + "_RO",
+                                [&](const std::string& s, double signed_q, double px) {
+                                    const auto c = roll_cost_model.calculate_costs(s, signed_q, px);
+                                    return roll_series::RollLegCost{c.commissions_fees,
+                                                                    c.implicit_price_impact,
+                                                                    c.slippage_market_impact,
+                                                                    c.total_transaction_costs};
+                                });
+                        } catch (const std::exception& e) {
+                            ERROR(std::string("ROLL_LEG STOP ") + r.symbol + " (" + strategy_name +
+                                  "): " + e.what() + ". Refusing to run: a leg without a usable close");
+                            std::cerr << "ROLL_LEG STOP " << r.symbol << ": " << e.what() << std::endl;
+                            return 1;
+                        }
+                        // A per-contract roll's split (migration 040), on its closing leg.
+                        if (r.roll_bar_points) {
+                            const double point_value = pnl_manager->get_point_value(r.symbol);
+                            roll_series::attach_roll_split(legs, q, *r.roll_bar_points, point_value);
+                            if (!legs.empty()) {
+                                INFO("ROLL_SPLIT " + strategy_name + " " + r.symbol + " date=" +
+                                     run_date + " confirmed=" + r.confirm_date + " qty=" +
+                                     model_input(q) + " points=" + model_input(*r.roll_bar_points) +
+                                     " multiplier=" + model_input(point_value) + " roll_bar_move=" +
+                                     model_input(*legs.front().roll_bar_move) + " roll_gap_points=" +
+                                     model_input(*legs.front().roll_gap_points) + " roll_gap_value=" +
+                                     model_input(*legs.front().roll_gap_value) + " (the gap is not P&L)");
+                            }
+                        }
+                        for (const auto& leg : legs) {
+                            const bool closing = leg.exec_id == "EXEC_" + tag + "_RC";
+                            INFO("ROLL_LEG " + strategy_name + " " + r.symbol + " " +
+                                 (closing ? "RC" : "RO") + " " +
+                                 (leg.side == Side::BUY ? "BUY" : "SELL") + " qty=" +
+                                 std::to_string(leg.filled_quantity.as_double()) + " px=" +
+                                 std::to_string(leg.fill_price.as_double()) + " instrument=" +
+                                 leg.instrument_id + " cost=" +
+                                 std::to_string(leg.total_transaction_costs.as_double()) + " adv=" +
+                                 model_input(roll_cost_model.get_adv(r.symbol)) + " vol_mult=" +
+                                 model_input(roll_cost_model.get_volatility_multiplier(r.symbol)) +
+                                 " date=" + run_date + " confirmed=" + r.confirm_date +
+                                 " (an upper bound: two outright legs; realised 0; outside netting)");
+                            total_daily_roll_costs += leg.total_transaction_costs.as_double();
+                        }
+                        roll_legs.insert(roll_legs.end(), legs.begin(), legs.end());
+                    }
+                    if (!roll_legs.empty()) {
+                        strategy_executions.insert(strategy_executions.begin(), roll_legs.begin(),
+                                                   roll_legs.end());
+                    }
+                }
 
                 INFO("DEBUG PHASE 4: Strategy '" + strategy_name + "' generated " +
                      std::to_string(strategy_executions.size()) + " executions");
@@ -1440,17 +3206,140 @@ int main(int argc, char* argv[]) {
                          std::to_string(exec.filled_quantity.as_double()) + " @ " +
                          std::to_string(exec.fill_price) + " commission=$" +
                          std::to_string(exec.total_transaction_costs.as_double()));
-
-                    total_daily_transaction_costs += exec.total_transaction_costs.as_double();
                 }
 
                 all_strategy_executions[strategy_name] = strategy_executions;
+                sleeves_filled.push_back(strategy_name);
                 total_executions += strategy_executions.size();
             } else {
                 ERROR("Failed to generate executions for strategy " + strategy_name + ": " +
                       std::string(exec_result.error()->what()));
+                // This sleeve books no leg today, and the stored state moves on,
+                // so a roll owed to it would never be legged. A STOP, never a loss.
+                for (const auto& r : confirmed_rolls) {
+                    if (r.price_source_change) continue;  // nothing to leg
+                    const auto held = prev_positions_map.find(r.symbol);
+                    if (held == prev_positions_map.end() ||
+                        std::abs(held->second.quantity.as_double()) < 1e-9) {
+                        continue;
+                    }
+                    ERROR("ROLL_LEG STOP " + r.symbol + " (" + strategy_name +
+                          "): the sleeve's executions could not be generated, so its roll confirmed " +
+                          r.confirm_date + " would not be legged. Refusing to run");
+                    std::cerr << "ROLL_LEG STOP " << r.symbol << ": no executions for "
+                              << strategy_name << std::endl;
+                    return 1;
+                }
                 all_strategy_executions[strategy_name] = {};
             }
+        }
+
+        if (!strict_rolled_back.empty()) {
+            // The combined rows of the rolled-back symbols, restated as STEP 2 writes them.
+            for (const auto& s : strict_rolled_back) {
+                Position combined;
+                bool any = false;
+                for (const auto& [_, pos_map] : strategy_positions_map) {
+                    auto it = pos_map.find(s);
+                    if (it == pos_map.end()) continue;
+                    if (!any) {
+                        combined = it->second;
+                        any = true;
+                    } else {
+                        combined.quantity += it->second.quantity;
+                    }
+                }
+                if (!any) {
+                    positions.erase(s);
+                    continue;
+                }
+                auto px = day_t_mark_prices.find(s);
+                if (px != day_t_mark_prices.end()) {
+                    combined.average_price = Decimal(px->second);
+                }
+                combined.realized_pnl = Decimal(0.0);
+                combined.unrealized_pnl = Decimal(0.0);
+                combined.last_update = now;
+                positions[s] = combined;
+            }
+        }
+        {
+            const auto unpriced_changes = unpriced_book_changes(
+                strategy_positions_map, previous_strategy_positions, previous_day_close_prices);
+            if (!unpriced_changes.empty()) {
+                std::string list;
+                for (const auto& s : unpriced_changes) list += (list.empty() ? "" : ", ") + s;
+                ERROR("STRICT_ASSERTION failed: book change(s) with no T-1 price and no execution "
+                      "remain after the rollback: " + list + ". Refusing to store this book.");
+                // Today's live_run_metadata row was written
+                // above, before the book existed. The run happened and stored nothing, so the row
+                // is marked, as a portfolio risk REFUSE marks it, and the
+                // watchdog (scripts/check_live_trading.py) reports the mark. The mark is merged
+                // into the row's JSON as written so far, so a same-day risk_refusal mark stays.
+                auto strict_mark_result = !qt_model_records ? Result<void>() : db->store_live_run_metadata(
+                    now, combined_strategy_id, portfolio_id, strategy_alloc_json,
+                    mark_strict_assertion(portfolio_config_json, unpriced_changes),
+                    strategy_configs);
+                if (strict_mark_result.is_error()) {
+                    ERROR("Failed to mark today's live_run_metadata row with the STRICT "
+                          "assertion: " + std::string(strict_mark_result.error()->what()));
+                } else {
+                    INFO("Marked today's live_run_metadata row with the STRICT assertion");
+                }
+                return 1;
+            }
+        }
+
+        // K3, the netting adjustment.
+        // Every sleeve row keeps its own cost; for a symbol two or more sleeves trade today the
+        // account sends ONE order, the signed sum Q, so each row's netting_adjustment is its
+        // pro-rata share of sum C(q_i) - C(Q), priced by the same cost manager and state the
+        // fills used (C(0) = 0: no order). Written into the rows before they are stored and
+        // before the day's cost is added up below.
+        // The sleeves' forecast-sign closes of one symbol are one account order and
+        // their other fills another; a close is never netted against the fill that follows it.
+        for (const bool sign_close_group : {true, false}) {
+            std::vector<transaction_cost::SleeveExecution> sleeve_rows;
+            for (auto& [netting_sleeve, netting_execs] : all_strategy_executions) {
+                for (auto& e : netting_execs) {
+                    // ROLL legs never enter the netting (two legs at two prices would
+                    // read as a mixed-price cross); their adjustment stays 0.
+                    if (e.execution_type != ExecutionType::STRATEGY) continue;
+                    if (is_sign_close(e) != sign_close_group) continue;
+                    sleeve_rows.push_back({netting_sleeve, &e});
+                }
+            }
+            const auto netting = transaction_cost::apply_netting_adjustments(
+                sleeve_rows, [&](const std::string& s, double q, double px) {
+                    return execution_manager->get_transaction_cost_manager().calculate_costs(
+                        s, q, px).total_transaction_costs;
+                });
+            for (const auto& line : netting.info_lines) INFO(line);
+            for (const auto& line : netting.warn_lines) WARN(line);
+        }
+
+        // The day's transaction cost: every fill at its cost AFTER netting, its
+        // own cost minus the signed adjustment just written on it, so the day's P&L, the account
+        // value and the cumulative total charge what the account's orders cost. Taken here, after
+        // the netting, from the rows that are stored below; a ROLL leg and a symbol one sleeve
+        // trades carry an adjustment of 0 and are charged their own cost.
+        for (const auto& sleeve : sleeves_filled) {
+            total_daily_transaction_costs = transaction_cost::add_net_costs(
+                total_daily_transaction_costs, all_strategy_executions.at(sleeve));
+        }
+        // The one line of the day that adds up (the per-fill lines above print each fill's OWN
+        // cost): the same rows' own costs, their adjustments, and what the day is charged.
+        {
+            Decimal day_own_costs, day_netting_adjustments;
+            for (const auto& sleeve : sleeves_filled) {
+                for (const auto& e : all_strategy_executions.at(sleeve)) {
+                    day_own_costs += e.total_transaction_costs;
+                    day_netting_adjustments += e.netting_adjustment;
+                }
+            }
+            INFO("DAY_COST own_costs=" + day_own_costs.to_string() + " netting_adjustments=" +
+                 day_netting_adjustments.to_string() + " cost_after_netting=" +
+                 (day_own_costs - day_netting_adjustments).to_string());
         }
 
         INFO("PHASE 4: Total executions across all strategies: " +
@@ -1458,81 +3347,151 @@ int main(int argc, char* argv[]) {
         INFO("PHASE 4: Total daily transaction costs: $" +
              std::to_string(total_daily_transaction_costs));
 
-        // Store executions for each strategy
-        for (const auto& [strategy_name, executions] : all_strategy_executions) {
-            if (!executions.empty()) {
-                // Before inserting, delete any stale executions for today with the same order_ids
-                try {
-                    // Build unique order_id list
-                    std::set<std::string> unique_order_ids;
-                    for (const auto& exec : executions) {
-                        unique_order_ids.insert(exec.order_id);
-                    }
-
-                    if (!unique_order_ids.empty()) {
-                        // Convert set to vector for the delete method
-                        std::vector<std::string> order_ids_vector(unique_order_ids.begin(),
-                                                                  unique_order_ids.end());
-
-                        INFO("Deleting stale executions for strategy " + strategy_name + " with " +
-                             std::to_string(order_ids_vector.size()) + " order_ids");
-
-                        // Use the delete_stale_executions method with strategy name
-                        auto del_res = db->delete_stale_executions(
-                            order_ids_vector, now, strategy_name, "trading.executions");
-                        if (del_res.is_error()) {
-                            WARN("Failed to delete stale executions for strategy " + strategy_name +
-                                 ": " + std::string(del_res.error()->what()));
-                        } else {
-                            INFO("Stale executions (if any) deleted successfully for strategy: " +
-                                 strategy_name);
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    WARN("Exception while deleting stale executions for strategy " + strategy_name +
-                         ": " + std::string(e.what()));
+        // Master document, final schema: the order id carries the book. A system order id is
+        // unchanged; every other book's ids are prefixed with the book.
+        if (qt_write_book != "system") {
+            for (auto& [sleeve, executions] : all_strategy_executions) {
+                (void)sleeve;
+                for (auto& execution : executions) {
+                    execution.order_id = qt_write_book + "-" + execution.order_id;
                 }
+            }
+        }
 
-                // Store executions with combined strategy_id and individual strategy_name
-                auto save_result =
-                    db->store_executions(executions,
-                                         combined_strategy_id,  // Combined strategy_id for tier 2
-                                         strategy_name,  // Individual strategy_name for tier 3
-                                         portfolio_id,   // Portfolio identifier
-                                         "trading.executions");
-
-                if (save_result.is_error()) {
-                    ERROR("Failed to store executions for strategy " + strategy_name + ": " +
-                          std::string(save_result.error()->what()));
-                } else {
+        // Review E#2 (item 2): a desk or override run replaces the qt day. Every non-ROLL qt
+        // execution of the date (the model's copied fills, or an earlier save's) is deleted before
+        // this run's own are stored, so a fill the desk's book no longer makes cannot survive; the
+        // ROLL rows are swept per sleeve below. The day's completion marker (book_source) is
+        // cleared with them and set again by mark_qt_day, last.
+        if (qt_mode == qt::Mode::DESK || qt_mode == qt::Mode::OVERRIDE) {
+            auto cleared = qt::clear_desk_day(*db, portfolio_id, combined_strategy_id, qt_date);
+            if (cleared.is_error()) {
+                return qt_fail("the qt day could not be cleared before the run wrote it: " +
+                               std::string(cleared.error()->what()));
+            }
+        }
+        // The re-run sweep by type. Every sleeve's ROLL rows dated today are deleted
+        // before this run's legs are stored, so a re-run that no longer rolls leaves none.
+        // A sleeve that stores ROLL legs on this run is swept inside the
+        // transaction that stores them (below), so its legs are never deleted and not re-stored.
+        auto roll_legs_of = [&](const std::string& sleeve) {
+            const auto it = all_strategy_executions.find(sleeve);
+            if (it == all_strategy_executions.end()) return std::ptrdiff_t{0};
+            return std::count_if(it->second.begin(), it->second.end(), [](const ExecutionReport& e) {
+                return e.execution_type == ExecutionType::ROLL;
+            });
+        };
+        // The sleeves with ROLL legs are stored FIRST, in
+        // name order, ALL in ONE transaction (per sleeve the ROLL sweep, the stale-order-id delete,
+        // the insert), and a failure is a STOP before any execution, position or result of ANY
+        // sleeve is written: the legs' costs are in today's totals and the Day T-1 rows below would
+        // move the state the legs are owed from.
+        {
+            std::vector<std::pair<std::string, std::vector<ExecutionReport>>> leg_sleeves;
+            for (const auto& [strategy_name, executions] : all_strategy_executions) {
+                if (roll_legs_of(strategy_name) > 0) leg_sleeves.emplace_back(strategy_name, executions);
+            }
+            std::sort(leg_sleeves.begin(), leg_sleeves.end(),
+                      [](const auto& a, const auto& b) { return a.first < b.first; });
+            if (!leg_sleeves.empty()) {
+                std::ptrdiff_t roll_legs_owed = 0;
+                for (const auto& [strategy_name, executions] : leg_sleeves) {
+                    const auto roll_legs = roll_legs_of(strategy_name);
+                    roll_legs_owed += roll_legs;
+                    INFO("ROLL_LEG store " + strategy_name + ": " + std::to_string(executions.size()) +
+                         " executions (" + std::to_string(roll_legs) +
+                         " ROLL legs) replace the sleeve's ROLL rows of the day and its rows of the "
+                         "same order ids in one transaction, before the Day T-1 rows are re-written");
+                }
+                auto replaced = !qt_write_day ? Result<void>() : db->replace_roll_day_executions(
+                    leg_sleeves, combined_strategy_id, portfolio_id, now, "trading.executions", qt_write_book);
+                if (replaced.is_error()) {
+                    ERROR("ROLL_LEG STOP: the day's executions could not be stored (" +
+                          std::string(replaced.error()->what()) + ") and " +
+                          std::to_string(roll_legs_owed) +
+                          " ROLL legs are owed. Refusing to run: no execution, no position and no "
+                          "result is written; the stored state is the state before this run, so "
+                          "running this date again legs the same rolls");
+                    std::cerr << "ROLL_LEG STOP: the day's executions could not be stored"
+                              << std::endl;
+                    return 1;
+                }
+                for (const auto& [strategy_name, executions] : leg_sleeves) {
                     INFO("Successfully stored " + std::to_string(executions.size()) +
                          " executions for strategy: " + strategy_name);
                 }
+            }
+        }
+
+        // A sleeve without ROLL legs. Its rows of the day are swept (every row, not
+        // only ROLL rows: a re-run of a date leaves no order an earlier run of the date made and
+        // this run does not) and this run's rows stored in ONE transaction, sleeve by sleeve, so a
+        // store that fails leaves the sleeve's rows of the day as they were. A sleeve the run
+        // makes no order for is swept the same way.
+        auto replace_sleeve_day = [&](const std::string& strategy_name,
+                                      const std::vector<ExecutionReport>& executions) {
+            // QT: written only on a day this run writes, to the run's book (migration 021).
+            auto save_result = !qt_write_day ? Result<void>() : db->replace_roll_day_executions(
+                {{strategy_name, executions}}, combined_strategy_id, portfolio_id, now,
+                "trading.executions", qt_write_book);
+            if (save_result.is_error()) {
+                ERROR("Failed to store executions for strategy " + strategy_name + ": " +
+                      std::string(save_result.error()->what()) +
+                      "; the sleeve's stored executions of the day are left as they were");
+                qt_store_failed("executions of " + strategy_name);
+            } else if (!executions.empty()) {
+                INFO("Successfully stored " + std::to_string(executions.size()) +
+                     " executions for strategy: " + strategy_name);
             } else {
                 INFO("No executions to store for strategy: " + strategy_name);
+            }
+        };
+        for (const auto& strategy_name_rl : strategy_names) {
+            if (all_strategy_executions.count(strategy_name_rl) > 0) continue;  // stored below
+            replace_sleeve_day(strategy_name_rl, {});
+        }
+        // Store executions for each strategy without ROLL legs
+        for (const auto& [strategy_name, executions] : all_strategy_executions) {
+            if (roll_legs_of(strategy_name) > 0) continue;  // stored above
+            replace_sleeve_day(strategy_name, executions);
+        }
+
+        // The Day T-1 rows PHASE 5 finalized, written now that the day's
+        // executions (the ROLL legs first of all) are stored.
+        for (const auto& [strategy_name, finalized_positions] : t1_position_rewrites) {
+            auto update_result =
+                !qt_write_t1 ? Result<void>()
+                             : db->store_positions(finalized_positions,
+                                    combined_strategy_id,  // Combined strategy_id
+                                    strategy_name,         // Individual strategy_name
+                                    portfolio_id,          // Portfolio identifier
+                                    "trading.positions", qt_read_book);
+
+            if (update_result.is_error()) {
+                ERROR("Failed to update Day T-1 positions for strategy " + strategy_name + ": " +
+                      std::string(update_result.error()->what()));
+                qt_store_failed("Day T-1 positions of " + strategy_name);
+            } else {
+                INFO("Successfully updated " + std::to_string(finalized_positions.size()) +
+                     " Day T-1 positions with finalized PnL for strategy: " + strategy_name);
             }
         }
 
         std::cout << "\n======= Daily Position Report =======" << std::endl;
-        std::cout << "Date: " << (now_tm->tm_year + 1900) << "-" << std::setfill('0')
-                  << std::setw(2) << (now_tm->tm_mon + 1) << "-" << std::setfill('0')
-                  << std::setw(2) << now_tm->tm_mday << std::endl;
-        std::cout << "Total Positions: " << positions.size() << std::endl;
-        std::cout << std::endl;
-
-        // Add header for position table
-        std::cout << std::setw(10) << "Symbol"
-                  << " | " << std::setw(10) << "Quantity"
-                  << " | " << std::setw(10) << "Mkt Price"
-                  << " | " << std::setw(12) << "Notional"
-                  << " | " << std::setw(10) << "Unreal PnL" << std::endl;
-        std::cout << std::string(60, '-') << std::endl;
+        // The date and the count of symbols in the book map, as text (the stream's
+        // fill is left alone). No table follows.
+        std::cout << trade_ngin::position_report_head_console(now_tm->tm_year + 1900,
+                                                              now_tm->tm_mon + 1, now_tm->tm_mday,
+                                                              positions.size())
+                  << std::endl;
 
         // Use MarginManager for margin calculations
         INFO("Using MarginManager to calculate margin requirements...");
 
+        // The stored exposure cells value a held symbol at the Day T mark: its last consumed
+        // close when its T-1 print is withheld (day_t_mark_prices), never the withheld print.
         auto margin_result = margin_manager->calculate_margin_requirements(
-            positions, previous_day_close_prices, initial_capital);
+            positions, day_t_mark_prices, initial_capital);
 
         double gross_notional = 0.0;
         double net_notional = 0.0;
@@ -1549,51 +3508,39 @@ int main(int argc, char* argv[]) {
             // Σ qᵢ × allocᵢ, double-applying the allocation factor that strategies
             // already account for when sizing. Per-strategy summation restores the
             // additive invariant for both notional and posted margin.
-            gross_notional = 0.0;
-            net_notional = 0.0;
-            total_posted_margin = 0.0;
-            maintenance_requirement_today = 0.0;
-            int true_active_positions = 0;
-            bool recompute_fallback = false;
-            for (const auto& [strategy_id, pos_map] : strategy_positions_map) {
-                if (recompute_fallback)
-                    break;
-                for (const auto& [symbol, pos] : pos_map) {
-                    double qty = pos.quantity.as_double();
-                    if (std::abs(qty) < 1e-6)
-                        continue;
-                    true_active_positions++;
-
-                    double price = previous_day_close_prices.count(symbol)
-                                       ? previous_day_close_prices.at(symbol)
-                                       : pos.average_price.as_double();
-
-                    auto notional_result =
-                        margin_manager->calculate_position_notional(symbol, qty, price);
-                    auto margin_result_per =
-                        margin_manager->calculate_position_margin(symbol, qty, price);
-
-                    if (notional_result.is_ok() && margin_result_per.is_ok()) {
-                        double signed_notional = notional_result.value();
-                        gross_notional += std::abs(signed_notional);
-                        net_notional += signed_notional;
-                        auto [initial_m, maint_m] = margin_result_per.value();
-                        total_posted_margin += initial_m;
-                        maintenance_requirement_today += maint_m;
-                    } else {
-                        WARN("Failed per-strategy notional/margin for " + symbol +
-                             " in strategy " + strategy_id +
-                             ", falling back to MarginManager combined values");
-                        gross_notional = metrics.gross_notional;
-                        net_notional = metrics.net_notional;
-                        total_posted_margin = metrics.total_posted_margin;
-                        maintenance_requirement_today = metrics.maintenance_requirement;
-                        recompute_fallback = true;
-                        break;
-                    }
-                }
+            // The account's exposure from the sleeves' books (live/book_exposure.hpp).
+            // A symbol the sleeves hold on the same side is summed per sleeve;
+            // a symbol they hold on OPPOSITE sides is taken once, on the net, because the account
+            // holds the net and posts margin on it.
+            const BookExposure exposure = account_book_exposure(
+                strategy_positions_map,
+                [&](const std::string& symbol, const Position& pos) {
+                    return day_t_mark_prices.count(symbol)
+                               ? day_t_mark_prices.at(symbol)
+                               : pos.average_price.as_double();
+                },
+                [&](const std::string& symbol, double qty, double price) {
+                    return margin_manager->calculate_position_notional(symbol, qty, price);
+                },
+                [&](const std::string& symbol, double qty, double price) {
+                    return margin_manager->calculate_position_margin(symbol, qty, price);
+                });
+            if (exposure.failed) {
+                WARN("Failed per-strategy notional/margin for " + exposure.failed_symbol +
+                     " in strategy " + exposure.failed_strategy +
+                     ", falling back to MarginManager combined values");
+                gross_notional = metrics.gross_notional;
+                net_notional = metrics.net_notional;
+                total_posted_margin = metrics.total_posted_margin;
+                maintenance_requirement_today = metrics.maintenance_requirement;
+            } else {
+                gross_notional = exposure.gross_notional;
+                net_notional = exposure.net_notional;
+                total_posted_margin = exposure.posted_margin;
+                maintenance_requirement_today = exposure.maintenance_margin;
+                for (const auto& line : exposure.net_lines) INFO(line);
             }
-            active_positions = true_active_positions;
+            active_positions = exposure.active_positions;
 
             INFO("Per-strategy recompute: gross=$" + std::to_string(gross_notional) +
                  ", net=$" + std::to_string(net_notional) +
@@ -1615,8 +3562,15 @@ int main(int argc, char* argv[]) {
                   << std::endl;
         std::cout << "Net Notional: $" << std::fixed << std::setprecision(2) << net_notional
                   << std::endl;
-        std::cout << "Gross Leverage: " << std::fixed << std::setprecision(2)
-                  << (gross_notional / initial_capital) << "x" << std::endl;
+        // On the day's sizing capital E_t, the capital and the rule of the
+        // row's config gross_leverage below (risk_detail's on a row that stores it, else the
+        // capital this run read; no figure on a sizing hold).
+        std::cout << trade_ngin::gross_leverage_console_on_sizing_capital(
+                         gross_notional,
+                         trade_ngin::stored_config_sizing_capital(
+                             one_pass_day.stores_detail(), one_pass_day.sizing_capital,
+                             !sizing_hold, sizing_capital_read.capital.capital))
+                  << std::flush;
         // Posted margin should never be zero if there are active positions; enforce and warn
         if (active_positions > 0 && total_posted_margin <= 0.0) {
             ERROR(
@@ -1624,17 +3578,22 @@ int main(int argc, char* argv[]) {
                 "instrument metadata.");
         }
         // Equity-to-Margin Ratio = portfolio_equity / total_posted_margin.
-        // Higher = safer (more equity per dollar of margin posted). The prior
-        // formula here used gross_notional in the numerator, which is a
-        // leverage-to-margin metric, not equity-to-margin. We use
-        // initial_capital as the equity proxy (matches MarginManager's
-        // gross_leverage convention).
-        double equity_to_margin_ratio =
-            (total_posted_margin > 0.0) ? (initial_capital / total_posted_margin) : 0.0;
-        if (equity_to_margin_ratio <= 1.0 && active_positions > 0) {
-            WARN("Equity-to-Margin Ratio is <= 1.0 (account equity at or below "
-                 "posted margin); verify margins and sizing.");
-        }
+        // Higher = safer (more equity per dollar of margin posted).
+        //
+        // The numerator is current_portfolio_value, the account's equity, never
+        // initial_capital: a constant would never move as the book gains or loses money,
+        // and the ratio would disagree with the two other producers of the same quantity,
+        // LiveMetricsCalculator and MarginManager. That value is not known yet at this
+        // point in the run, so the computation sits below its own INFO block. Only the
+        // declaration is here, so the value is in scope for the storage and email sites
+        // further down that read it.
+        //
+        // The <= 1.0 alarm sits with the computation: an alarm here would fire on a number
+        // that has not been computed yet.
+        //
+        // No value on a day with no posted margin: the cell is stored NULL
+        // (live/margin_columns.hpp).
+        std::optional<double> equity_to_margin_ratio;
 
         // ========================================
         // PHASE 4: PER-STRATEGY POSITIONS STORAGE
@@ -1652,13 +3611,30 @@ int main(int argc, char* argv[]) {
 
             INFO("DEBUG PHASE 4: Strategy '" + strategy_name + "' has " +
                  std::to_string(positions_map.size()) + " positions");
+            // Ruling 16: a closed (sleeve, symbol) the PM no longer lists is still stored at 0.
+            for (const auto& key : qt_zero_keep) {
+                const auto bar = key.find('|');
+                if (key.substr(0, bar) != strategy_name) continue;
+                const std::string symbol = key.substr(bar + 1);
+                if (positions_map.count(symbol) != 0) continue;
+                Position zero;
+                zero.symbol = symbol;
+                zero.quantity = Decimal(0.0);
+                zero.last_update = now;
+                zero.realized_pnl = Decimal(0.0);
+                zero.unrealized_pnl = Decimal(0.0);
+                zero.average_price = Decimal(previous_day_close_prices.count(symbol) != 0
+                                                 ? previous_day_close_prices[symbol]
+                                                 : 0.0);
+                strategy_positions_vec.push_back(zero);
+            }
 
             for (const auto& [symbol, pos] : positions_map) {
                 // Only save positions with non-zero quantity
                 // Zero-quantity positions (closed positions) should NOT be stored
                 bool has_quantity = std::abs(pos.quantity.as_double()) > 1e-10;
 
-                if (!has_quantity) {
+                if (!has_quantity && qt_zero_keep.count(strategy_name + "|" + symbol) == 0) {
                     DEBUG("Skipping zero-quantity position: " + symbol);
                     continue;
                 }
@@ -1676,6 +3652,11 @@ int main(int argc, char* argv[]) {
                 validated_position.realized_pnl =
                     Decimal(0.0);  // PLACEHOLDER - will be finalized tomorrow
                 validated_position.unrealized_pnl = Decimal(0.0);  // Always 0 for futures
+                // The contract held after the symbol's last
+                // consumed bar; tomorrow's T-1 finalize re-writes it after this day's bar.
+                if (const auto rs = roll_status.find(symbol); rs != roll_status.end()) {
+                    validated_position.instrument_id = rs->second.held_id;
+                }
 
                 // For Day T positions, average_price should be Day T-1 close (entry price)
                 // This is the price at which positions were "executed" (opened at yesterday's
@@ -1714,6 +3695,15 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
+                if (!has_quantity && previous_day_close_prices.count(symbol) != 0) {
+                    // Ruling 16: the close's row is priced at the latest known price.
+                    validated_position.average_price = Decimal(previous_day_close_prices[symbol]);
+                }
+                // Migration 041: the row's Day T mark, unset when the symbol printed no bar.
+                if (const auto mark = day_t_mark_prices.find(symbol);
+                    mark != day_t_mark_prices.end()) {
+                    validated_position.mark_price = mark->second;
+                }
                 strategy_positions_vec.push_back(validated_position);
 
                 INFO("DEBUG PHASE 4: " + strategy_name + " - " + symbol + " qty=" +
@@ -1731,15 +3721,17 @@ int main(int argc, char* argv[]) {
 
                 // Store with combined strategy_id and individual strategy_name
                 auto save_result =
-                    db->store_positions(strategy_positions_vec,
+                    !qt_write_day ? Result<void>()
+                                  : db->store_positions(strategy_positions_vec,
                                         combined_strategy_id,  // Combined strategy_id for tier 2
                                         strategy_name,  // Individual strategy_name for tier 3
                                         portfolio_id,   // Portfolio identifier
-                                        "trading.positions");
+                                        "trading.positions", qt_write_book);
 
                 if (save_result.is_error()) {
                     ERROR("Failed to store positions for strategy " + strategy_name + ": " +
                           std::string(save_result.error()->what()));
+                    qt_store_failed("positions of " + strategy_name);
                 } else {
                     INFO("Successfully stored " + std::to_string(strategy_positions_vec.size()) +
                          " positions for strategy: " + strategy_name);
@@ -1755,40 +3747,85 @@ int main(int argc, char* argv[]) {
 
         // Compute portfolio-level snapshot metrics using RiskManager on today's state
         INFO("Retrieving strategy metrics...");
-        trade_ngin::RiskManager snapshot_rm(risk_config);
-        auto market_data_snapshot = snapshot_rm.create_market_data(all_bars);
+        // The reporter reads the book against the capital it was sized on, as the gate
+        // does (its leverage term divides by it).
+        RiskConfig snapshot_risk_config = risk_config;
+        snapshot_risk_config.capital = Decimal(portfolio->sizing_capital());
+        trade_ngin::RiskManager snapshot_rm(snapshot_risk_config);
+        // K-01: the snapshot reads the consumed bars, as every return consumer does.
+        auto market_data_snapshot = snapshot_rm.create_market_data(strategy_feed_bars);
         auto risk_eval = snapshot_rm.process_positions(positions, market_data_snapshot);
 
+        // The six overlay columns of today's row (migration 036): the overlay's
+        // own readings of the book this runner STORES (after its STRICT step), on the pass's gate
+        // window and the sizing capital, and the one-day VaR from the same covariance. A row
+        // with no risk_detail has none; on a blind window only the two leverage readings have a
+        // value. OVERLAY_STORED prints them beside the pass's readings of its own stored book.
+        const bool overlay_answered = one_pass_day.stores_detail();
+        const trade_ngin::StoredBookReadings stored_book_readings =
+            overlay_answered ? portfolio->overlay_readings_for_book(
+                                   trade_ngin::account_book_of(strategy_positions_map))
+                             : trade_ngin::StoredBookReadings{};
+        const trade_ngin::OverlayColumns overlay_columns = trade_ngin::overlay_columns_of(
+            overlay_answered, stored_book_readings.readings, one_pass_day.window_bars_per_year,
+            one_pass_day.sizing_capital);
+        if (overlay_answered) {
+            INFO(trade_ngin::overlay_stored_line(core::format_utc_date(now), one_pass_day,
+                                                 stored_book_readings, overlay_columns,
+                                                 strict_rolled_back.size()));
+        }
+
+        // The report and the console print the overlay's expected risk of the
+        // stored book as a percent of the sizing capital beside the risk target, and the
+        // one-day 95 percent VaR in dollars, in place of portfolio_var (a price-weighted figure
+        // with no contract multiplier: not a VaR and not the book's risk; still stored).
+        const std::map<std::string, double> report_risk = trade_ngin::report_risk_metrics(
+            overlay_columns.overlay_risk, portfolio_config.overlay_tau, overlay_columns.var_95_1d,
+            stored_book_readings.contracts_in_risk, stored_book_readings.contracts_held);
+
         std::cout << "\n======= Strategy Metrics =======" << std::endl;
+        std::cout << trade_ngin::report_risk_console(report_risk);
+        // The reporter's lines, named as the reporter's; its leverage is over the
+        // sizing capital the snapshot was given above.
+        std::optional<trade_ngin::ReporterConsoleFigures> reporter_figures;
         if (risk_eval.is_ok()) {
             const auto& r = risk_eval.value();
-            // Use portfolio_var as annualized volatility proxy
-            std::cout << "Volatility: " << std::fixed << std::setprecision(2)
-                      << (r.portfolio_var * 100.0) << "%" << std::endl;
-            std::cout << "Gross Leverage (Risk): " << std::fixed << std::setprecision(2)
-                      << r.gross_leverage << std::endl;
-            std::cout << "Net Leverage: " << std::fixed << std::setprecision(2) << r.net_leverage
-                      << std::endl;
-            std::cout << "Max Correlation: " << std::fixed << std::setprecision(2)
-                      << r.correlation_risk << std::endl;
-            std::cout << "Jump Risk (99th): " << std::fixed << std::setprecision(2) << r.jump_risk
-                      << std::endl;
-            std::cout << "Risk Scale: " << std::fixed << std::setprecision(2) << r.recommended_scale
-                      << std::endl;
-        } else {
-            std::cout << "Volatility: N/A" << std::endl;
-            std::cout << "Gross Leverage (Risk): N/A" << std::endl;
-            std::cout << "Net Leverage: N/A" << std::endl;
-            std::cout << "Max Correlation: N/A" << std::endl;
-            std::cout << "Jump Risk (99th): N/A" << std::endl;
-            std::cout << "Risk Scale: N/A" << std::endl;
+            reporter_figures = trade_ngin::ReporterConsoleFigures{
+                r.portfolio_var, r.gross_leverage, r.net_leverage, r.correlation_risk, r.jump_risk};
         }
+        std::cout << trade_ngin::reporter_console(reporter_figures, "the sizing capital", false)
+                  << std::flush;
+        // The row's risk_scale (the delivered scale, the same reading of the same
+        // stored book as the column below) and the request m_t (risk_detail.risk_requested), each
+        // labelled. The reporter's recommended scale stays on RISK_SCALE_REPORT.
+        std::cout << trade_ngin::risk_scale_console(
+            overlay_answered ? portfolio->delivered_scale_for_book(
+                                   trade_ngin::account_book_of(strategy_positions_map))
+                             : 1.0,
+            overlay_answered, one_pass_day.risk_requested);
+        // The reporter's scale beside the scale that actually moved the book.
+        // reporter = the snapshot's recommended_scale (1.0 when its evaluation failed). It is NOT
+        // the stored live_results.risk_scale: that column is the DELIVERED scale, set below. The
+        // other four fields are the PortfolioManager's own record of this run's rebalance,
+        // last_risk_decisions(), each defined in risk_scale_report.hpp. Log only: nothing stored
+        // reads it.
+        INFO(trade_ngin::format_risk_scale_report(
+            risk_eval.is_ok() ? risk_eval.value().recommended_scale : 1.0,
+            trade_ngin::summarize_applied_risk(portfolio->last_risk_decisions())));
+        // The delivered scale beside the request: the stored book's gross notional over the capped
+        // target's (the held rows counted in both), the PortfolioManager's measurement of the same
+        // rebalance (risk_scale_report.hpp defines each field). Log only. final_gross is the book
+        // this runner stores.
+        INFO(trade_ngin::format_risk_delivered(
+            trade_ngin::summarize_applied_risk(portfolio->last_risk_decisions()),
+            portfolio->delivered_cut_for_book(trade_ngin::account_book_of(strategy_positions_map)),
+            std::string(), "capped_target_gross"));
         // ========================================
         // STEP 3: CALCULATE TRANSACTION COSTS AND Day T PnL (ZERO)
         // ========================================
         INFO("STEP 3: Calculating transaction costs and Day T PnL...");
 
-        // total_daily_transaction_costs already calculated in per-strategy executions loop above
+        // total_daily_transaction_costs was added up in PHASE 4, after the netting: the fills' net costs
         INFO("Total daily transaction costs (from per-strategy executions): $" +
              std::to_string(total_daily_transaction_costs));
 
@@ -1817,13 +3854,75 @@ int main(int argc, char* argv[]) {
              std::all_of(previous_positions.begin(), previous_positions.end(),
                          [](const auto& p) { return p.second.quantity.as_double() == 0.0; }));
 
+        // settled_at (migration 035): the stamp below is written only when the finalize of Day T-1
+        // finished without error. The no-prices skip withholds it here, on the sizing read's two
+        // tests (no Day T-1 closes with a book held; no Day T-2 closes); a finalize warning
+        // withholds it where it is logged.
+        SettledStampGate settled_stamp;
+        if (previous_day_close_prices.empty() && !is_first_trading_day) {
+            settled_stamp.withhold("no T-1 closes");
+        }
+        if (two_days_ago_close_prices.empty()) {
+            settled_stamp.withhold("no T-2 closes");
+        }
+
         // Declare yesterday's daily metrics outside the block so they're available for email
         double yesterday_daily_return_for_email = 0.0;
         double yesterday_daily_pnl_for_email = 0.0;
         double yesterday_realized_pnl_for_email = 0.0;
         double yesterday_unrealized_pnl_for_email = 0.0;
 
-        if (!two_days_ago_close_prices.empty() && aggregate_yesterday_total_pnl != 0.0 &&
+        // The Day T-1 calendar count of trading.get_trading_days, read whether or not STEP 4
+        // finalizes the row: the statistics block after STEP 4 needs it on every day.
+        // Uses trading.strategy_trading_days_metadata table for live_start_date
+        const std::string t1_date_str = core::format_utc_date(previous_date);
+        int t1_trading_days_count = 1;
+        try {
+            // The portfolio-scoped (3-arg) form. The 2-arg overload keys on
+            // strategy_id alone with `ORDER BY live_start_date LIMIT 1` and NO portfolio
+            // predicate, so it takes the earliest row across ALL portfolios.
+            // LIVE_TREND_FOLLOWING has a metadata row under both BASE_PORTFOLIO and
+            // CONSERVATIVE_PORTFOLIO; they agree only because both carry
+            // live_start_date = 2025-10-05. Add or edit a BASE row with an earlier date
+            // and the conservative book's annualization changes silently -- no error, no
+            // log line. Definition is versioned in migrations/004.
+            std::string trading_days_query = "SELECT trading.get_trading_days('" +
+                                             combined_strategy_id + "', DATE '" + t1_date_str +
+                                             "', '" + portfolio_id + "')";
+
+            INFO("TRADING_DAYS_CALC [Day T-1]: Querying trading days...");
+            INFO("TRADING_DAYS_CALC [Day T-1]: Query: " + trading_days_query);
+            INFO("TRADING_DAYS_CALC [Day T-1]: Strategy ID: " + combined_strategy_id);
+            INFO("TRADING_DAYS_CALC [Day T-1]: Target Date: " + t1_date_str);
+
+            auto trading_days_result = db->execute_query(trading_days_query);
+
+            if (trading_days_result.is_ok()) {
+                auto table = trading_days_result.value();
+                if (table && table->num_rows() > 0 && table->num_columns() > 0) {
+                    // execute_query returns StringArray for all columns
+                    auto arr =
+                        std::static_pointer_cast<arrow::StringArray>(table->column(0)->chunk(0));
+                    if (arr && arr->length() > 0 && !arr->IsNull(0)) {
+                        t1_trading_days_count = std::max<int>(1, std::stoi(arr->GetString(0)));
+                        INFO("TRADING_DAYS_CALC [Day T-1]: Result from DB: " +
+                             std::to_string(t1_trading_days_count) + " trading days");
+                        INFO(
+                            "TRADING_DAYS_CALC [Day T-1]: This value comes from "
+                            "strategy_trading_days_metadata.live_start_date");
+                    }
+                }
+            } else {
+                WARN("TRADING_DAYS_CALC [Day T-1]: Could not call get_trading_days function: " +
+                     std::string(trading_days_result.error()->what()));
+            }
+        } catch (const std::exception& e) {
+            WARN("TRADING_DAYS_CALC [Day T-1]: Failed to get trading days: " +
+                 std::string(e.what()));
+        }
+
+        if (!two_days_ago_close_prices.empty() &&
+            (aggregate_yesterday_total_pnl != 0.0 || t1_zero_pnl_held) &&
             !is_first_trading_day) {
             INFO("STEP 4: Updating Day T-1 live_results with finalized PnL: $" +
                  std::to_string(aggregate_yesterday_total_pnl));
@@ -1860,9 +3959,11 @@ int main(int argc, char* argv[]) {
                     WARN("LiveDataLoader failed to get yesterday's metrics: " +
                          std::string(live_results.error()->what()));
                     INFO("Using default values (0) for yesterday's metrics");
+                    settled_stamp.withhold("Day T-1's live_results row could not be read");
                 }
             } catch (const std::exception& e) {
                 WARN("Failed to get yesterday's metrics: " + std::string(e.what()));
+                settled_stamp.withhold("Day T-1's live_results row could not be read");
             }
 
             // Use the commission value already loaded from LiveDataLoader
@@ -1892,7 +3993,7 @@ int main(int argc, char* argv[]) {
                 if (db_ptr) {
                     auto prev_agg = db_ptr->get_previous_live_aggregates(
                         combined_strategy_id, coordinator_config.portfolio_id, previous_date,
-                        "trading.live_results");
+                        "trading.live_results", qt_read_book);
                     if (prev_agg.is_ok()) {
                         std::tie(day_before_yesterday_portfolio_value,
                                  day_before_aggregate_yesterday_total_pnl,
@@ -1929,110 +4030,51 @@ int main(int argc, char* argv[]) {
             double yesterday_total_cumulative_return = metrics_calculator->calculate_total_return(
                 yesterday_portfolio_value_finalized, initial_capital);
 
-            double yesterday_total_return_decimal = 0.0;
-            if (initial_capital > 0.0) {
-                yesterday_total_return_decimal =
-                    (yesterday_portfolio_value_finalized - initial_capital) / initial_capital;
-            }
             double yesterday_total_cumulative_return_pct =
                 yesterday_total_cumulative_return;  // Already in %
 
-            // Get trading days count for annualization using PostgreSQL function
-            // This avoids issues with row multiplication/duplication in the database
-            // Uses trading.strategy_trading_days_metadata table for live_start_date
-            int trading_days_count = 1;
-            try {
-                // Call PostgreSQL function to calculate trading days
-                std::string trading_days_query = "SELECT trading.get_trading_days('" +
-                                                 combined_strategy_id + "', DATE '" +
-                                                 yesterday_date_ss.str() + "')";
-
-                INFO("TRADING_DAYS_CALC [Day T-1]: Querying trading days...");
-                INFO("TRADING_DAYS_CALC [Day T-1]: Query: " + trading_days_query);
-                INFO("TRADING_DAYS_CALC [Day T-1]: Strategy ID: " + combined_strategy_id);
-                INFO("TRADING_DAYS_CALC [Day T-1]: Target Date: " + yesterday_date_ss.str());
-
-                auto trading_days_result = db->execute_query(trading_days_query);
-
-                if (trading_days_result.is_ok()) {
-                    auto table = trading_days_result.value();
-                    if (table && table->num_rows() > 0 && table->num_columns() > 0) {
-                        // execute_query returns StringArray for all columns
-                        auto arr = std::static_pointer_cast<arrow::StringArray>(
-                            table->column(0)->chunk(0));
-                        if (arr && arr->length() > 0 && !arr->IsNull(0)) {
-                            trading_days_count = std::max<int>(1, std::stoi(arr->GetString(0)));
-                            INFO("TRADING_DAYS_CALC [Day T-1]: Result from DB: " +
-                                 std::to_string(trading_days_count) + " trading days");
-                            INFO(
-                                "TRADING_DAYS_CALC [Day T-1]: This value comes from "
-                                "strategy_trading_days_metadata.live_start_date");
-                        }
-                    }
-                } else {
-                    WARN("TRADING_DAYS_CALC [Day T-1]: Could not call get_trading_days function: " +
-                         std::string(trading_days_result.error()->what()));
-                }
-            } catch (const std::exception& e) {
-                WARN("TRADING_DAYS_CALC [Day T-1]: Failed to get trading days: " +
-                     std::string(e.what()));
+            // The four cells of the Day T-1 row that divide by the portfolio value
+            // (equity_to_margin_ratio, margin_cushion, net_leverage, portfolio_leverage) are
+            // recomputed by the UPDATE below on the finalised value, from the row's own stored
+            // margin_posted, gross_notional and net_notional (live/margin_columns.hpp), so the
+            // row ends on one basis with its cash_available. The maintenance requirement is not
+            // a stored cell: it is taken from the stored Day T-1 book, as that day's own run
+            // took it (margin on futures is a figure per contract, whatever the price).
+            const BookExposure yesterday_exposure = account_book_exposure(
+                previous_strategy_positions,
+                [](const std::string&, const Position& pos) {
+                    return pos.average_price.as_double();
+                },
+                [&](const std::string& symbol, double qty, double price) {
+                    return margin_manager->calculate_position_notional(symbol, qty, price);
+                },
+                [&](const std::string& symbol, double qty, double price) {
+                    return margin_manager->calculate_position_margin(symbol, qty, price);
+                });
+            std::string yesterday_maintenance_sql =
+                std::to_string(yesterday_exposure.maintenance_margin);
+            if (yesterday_exposure.failed) {
+                // The requirement the stored cushion was written on, read back out of the row.
+                WARN("Day T-1 maintenance requirement could not be taken from the stored book (" +
+                     yesterday_exposure.failed_symbol +
+                     "); the cushion is recomputed on the requirement the stored cells imply");
+                yesterday_maintenance_sql = "current_portfolio_value * (1.0 - margin_cushion)";
+            } else {
+                INFO("Day T-1 margin of the stored book: maintenance=$" +
+                     std::to_string(yesterday_exposure.maintenance_margin) + ", initial=$" +
+                     std::to_string(yesterday_exposure.posted_margin) +
+                     " (the row's margin_posted=$" + std::to_string(yesterday_margin_posted) +
+                     ")");
             }
-
-            // Calculate yesterday's annualized return using LiveMetricsCalculator
-            // Formula: annualized_return = ((1 + total_return)^(252/trading_days) - 1) * 100
-            INFO("ANNUALIZED_RETURN_CALC [Day T-1]: Calculating annualized return...");
-            INFO("ANNUALIZED_RETURN_CALC [Day T-1]: Input: total_return_decimal = " +
-                 std::to_string(yesterday_total_return_decimal) + " (" +
-                 std::to_string(yesterday_total_return_decimal * 100.0) + "%)");
-            INFO("ANNUALIZED_RETURN_CALC [Day T-1]: Input: trading_days_count = " +
-                 std::to_string(trading_days_count));
-            INFO("ANNUALIZED_RETURN_CALC [Day T-1]: Formula: ((1 + " +
-                 std::to_string(yesterday_total_return_decimal) + ")^(252/" +
-                 std::to_string(trading_days_count) + ") - 1) * 100");
-
-            double yesterday_total_return_annualized =
-                metrics_calculator->calculate_annualized_return(yesterday_total_return_decimal,
-                                                                trading_days_count);
-
-            INFO("ANNUALIZED_RETURN_CALC [Day T-1]: Result: " +
-                 std::to_string(yesterday_total_return_annualized) + "%");
-
-            // Calculate yesterday's leverage and risk metrics
-            // IMPORTANT: We MUST preserve existing values from the database
-            // These were calculated correctly when Day T-1 was originally processed
-            double yesterday_gross_leverage = 0.0;
-            double yesterday_equity_to_margin_ratio = 0.0;
-
-            // Load existing values from database using LiveDataLoader - DO NOT RECALCULATE
-            try {
-                auto margin_metrics = data_loader->load_margin_metrics(
-                    combined_strategy_id, coordinator_config.portfolio_id, previous_date);
-                if (margin_metrics.is_ok() && margin_metrics.value().valid) {
-                    auto& metrics = margin_metrics.value();
-                    yesterday_gross_leverage = metrics.gross_leverage;
-                    yesterday_equity_to_margin_ratio = metrics.equity_to_margin_ratio;
-
-                    // Also update the gross_notional and margin_posted if available
-                    yesterday_gross_notional = metrics.gross_notional;
-                    yesterday_margin_posted = metrics.margin_posted;
-
-                    INFO("Preserved existing metrics from database via LiveDataLoader: leverage=" +
-                         std::to_string(yesterday_gross_leverage) +
-                         ", equity_to_margin=" + std::to_string(yesterday_equity_to_margin_ratio) +
-                         ", gross_notional=" + std::to_string(yesterday_gross_notional) +
-                         ", margin_posted=" + std::to_string(yesterday_margin_posted));
-                } else {
-                    INFO("No existing margin metrics found for yesterday via LiveDataLoader");
-                }
-            } catch (const std::exception& e) {
-                WARN("Failed to load existing metrics: " + std::string(e.what()));
-            }
+            // The expression the UPDATE assigns to current_portfolio_value.
+            const std::string yesterday_finalised_value_sql =
+                "COALESCE((SELECT portfolio FROM day_before), " + std::to_string(initial_capital) +
+                ") + (" + std::to_string(aggregate_yesterday_total_pnl) +
+                " - COALESCE(daily_transaction_costs, 0.0))";
 
             // UPDATE yesterday's live_results with ALL recalculated metrics
             // Note: We calculate daily_pnl, total_pnl, and current_portfolio_value in SQL
             // to properly incorporate the EXISTING daily_transaction_costs value
-            // IMPORTANT: Only update portfolio_leverage and equity_to_margin_ratio if they are NULL
-            // or 0
             std::string update_query =
                 "WITH day_before AS ("
                 "  SELECT COALESCE(current_portfolio_value, " +
@@ -2044,7 +4086,7 @@ int main(int argc, char* argv[]) {
                 "  WHERE strategy_id = '" +
                 combined_strategy_id + "' AND portfolio_id = '" + coordinator_config.portfolio_id +
                 "' AND DATE(date) < '" + yesterday_date_ss.str() +
-                "' "
+                "'" + qt_read_sql + " "  // migration 021: the book the day started from
                 "  ORDER BY date DESC LIMIT 1"
                 ") "
                 "UPDATE trading.live_results SET "
@@ -2075,34 +4117,39 @@ int main(int argc, char* argv[]) {
                 ")) * 100.0 "
                 "               ELSE 0.0 END, "
                 "total_cumulative_return = " +
-                std::to_string(yesterday_total_cumulative_return_pct) +
-                ", "
-                "total_annualized_return = " +
-                std::to_string(yesterday_total_return_annualized) +
-                ", "
-                "portfolio_leverage = CASE WHEN portfolio_leverage IS NULL OR portfolio_leverage = "
-                "0 THEN " +
-                std::to_string(yesterday_gross_leverage) +
-                " ELSE portfolio_leverage END, "
-                "equity_to_margin_ratio = CASE WHEN equity_to_margin_ratio IS NULL OR "
-                "equity_to_margin_ratio = 0 THEN " +
-                std::to_string(yesterday_equity_to_margin_ratio) +
-                " ELSE equity_to_margin_ratio END, "
+                std::to_string(yesterday_total_cumulative_return_pct) + ", " +
+                finalize_margin_columns_sql(yesterday_finalised_value_sql,
+                                            yesterday_maintenance_sql) +
                 "cash_available = COALESCE((SELECT portfolio FROM day_before), " +
                 std::to_string(initial_capital) + ") + (" +
                 std::to_string(aggregate_yesterday_total_pnl) +
                 " - COALESCE(daily_transaction_costs, 0.0)) - COALESCE(margin_posted, 0.0) "
                 "WHERE strategy_id = '" +
                 combined_strategy_id + "' AND portfolio_id = '" + coordinator_config.portfolio_id +
-                "' AND DATE(date) = '" + yesterday_date_ss.str() + "'";
+                "' AND DATE(date) = '" + yesterday_date_ss.str() +
+                "'" + qt_read_sql;  // migration 021: the book the day started from
 
             INFO("Executing UPDATE query for Day T-1 live_results...");
             INFO("UPDATE will set current_portfolio_value for date: " + yesterday_date_ss.str());
 
-            auto update_result = db->execute_direct_query(update_query);
+            auto update_result = !qt_write_t1 ? Result<size_t>(size_t{1})
+                                              : db->execute_direct_query(update_query);
             if (update_result.is_error()) {
+                // A level UPDATE that did not apply leaves the Day T-1 row as
+                // written (the day's costs only) with a later row beside it, and every level of
+                // today's row is built on it, so the run stops here, as the equity runner does.
                 ERROR("Failed to update Day T-1 live_results: " +
                       std::string(update_result.error()->what()));
+                qt_store_failed("Day T-1 live_results");
+                ERROR("Day T-1 aggregates could not be finalized. Refusing to exit 0 with an "
+                      "unfinalized row on " + yesterday_date_ss.str() + ".");
+                return 1;
+            } else if (update_result.value() == 0) {
+                // The statement succeeded and matched no row, so nothing was finalized.
+                WARN("Day T-1 live_results UPDATE matched 0 rows for " + yesterday_date_ss.str() +
+                     ": no live_results row exists for that date, so its finalized PnL and "
+                     "metrics were NOT stored");
+                settled_stamp.withhold("the Day T-1 level UPDATE matched no row");
             } else {
                 INFO(
                     "Successfully updated Day T-1 live_results with finalized PnL and all metrics");
@@ -2119,13 +4166,15 @@ int main(int argc, char* argv[]) {
 
             // UPDATE yesterday's equity_curve using LiveResultsManager
             INFO("Updating Day T-1 equity_curve...");
+            bool t1_curve_point_written = false;
 
             // Query the current portfolio value from updated live_results
             std::string get_equity_query =
                 "SELECT current_portfolio_value FROM trading.live_results "
                 "WHERE strategy_id = '" +
                 combined_strategy_id + "' AND portfolio_id = '" + coordinator_config.portfolio_id +
-                "' AND DATE(date) = '" + yesterday_date_ss.str() + "'";
+                "' AND DATE(date) = '" + yesterday_date_ss.str() +
+                "'" + qt_read_sql;  // migration 021: the book the day started from
 
             INFO("Querying for portfolio value with date: " + yesterday_date_ss.str());
 
@@ -2187,8 +4236,8 @@ int main(int argc, char* argv[]) {
                                 "' "
                                 "AND DATE(timestamp) = '" +
                                 yesterday_date_ss.str() +
-                                "' "
-                                "ORDER BY timestamp";
+                                "'" + qt_read_sql +
+                                " ORDER BY timestamp";
                             auto debug_result = db->execute_query(debug_eq_query);
                             if (debug_result.is_ok() && debug_result.value()->num_rows() > 0) {
                                 INFO("DEBUG: Existing equity_curve entries for " +
@@ -2214,16 +4263,20 @@ int main(int argc, char* argv[]) {
                             // Create a temporary LiveResultsManager for Day T-1 equity update
                             auto yesterday_manager = std::make_unique<LiveResultsManager>(
                                 db, true, combined_strategy_id, coordinator_config.portfolio_id);
+                            (void)yesterday_manager->set_book(qt_read_book);
                             yesterday_manager->set_equity(portfolio_value);
 
                             auto update_equity_result =
-                                yesterday_manager->save_equity_curve(previous_date);
+                                !qt_write_t1 ? Result<void>()
+                                             : yesterday_manager->save_equity_curve(previous_date);
                             if (update_equity_result.is_error()) {
                                 ERROR("Failed to update Day T-1 equity_curve: " +
                                       std::string(update_equity_result.error()->what()));
+                                qt_store_failed("Day T-1 equity_curve");
                             } else {
                                 INFO("Successfully updated Day T-1 equity_curve with value: " +
                                      std::to_string(portfolio_value));
+                                t1_curve_point_written = true;
 
                                 // DEBUG: Verify what was actually saved
                                 auto verify_result = db->execute_query(debug_eq_query);
@@ -2253,110 +4306,8 @@ int main(int argc, char* argv[]) {
                          ", skipping equity_curve update");
                 }
             }
-
-            // Recalculate historical performance metrics for Day T-1 and update live_results
-            try {
-                HistoricalMetrics yesterday_hist_metrics;
-
-                if (data_loader && data_loader->is_connected()) {
-                    auto returns_hist_res = data_loader->load_daily_returns_history(
-                        combined_strategy_id, coordinator_config.portfolio_id, previous_date);
-                    auto pnl_hist_res = data_loader->load_daily_pnl_history(
-                        combined_strategy_id, coordinator_config.portfolio_id, previous_date);
-                    auto equity_hist_res = data_loader->load_equity_curve_history(
-                        combined_strategy_id, coordinator_config.portfolio_id, previous_date);
-                    auto trades_hist_res = data_loader->load_total_trades_count(
-                        combined_strategy_id, coordinator_config.portfolio_id, previous_date);
-
-                    std::vector<double> returns_hist;
-                    std::vector<double> pnl_hist;
-                    std::vector<double> equity_hist;
-                    int total_trades_hist = 0;
-
-                    if (returns_hist_res.is_ok()) {
-                        returns_hist = returns_hist_res.value();
-                    }
-                    if (pnl_hist_res.is_ok()) {
-                        pnl_hist = pnl_hist_res.value();
-                    }
-                    if (equity_hist_res.is_ok()) {
-                        equity_hist = equity_hist_res.value();
-                    }
-                    if (trades_hist_res.is_ok()) {
-                        total_trades_hist = trades_hist_res.value();
-                    }
-
-                    LiveHistoricalMetricsCalculator hist_calc;
-                    // NOTE: returns_hist is already loaded in PERCENT units (e.g., 0.11 = 0.11%,
-                    // not 11%) because daily_return is computed in SQL as `... * 100.0`. Do NOT
-                    // multiply by 100 here — that produced a 100x volatility / 100x lower sharpe.
-                    yesterday_hist_metrics =
-                        hist_calc.calculate(returns_hist, pnl_hist, equity_hist,
-                                            yesterday_total_return_annualized, total_trades_hist);
-
-                    // Override total_days with authoritative trading days count
-                    yesterday_hist_metrics.total_days = trading_days_count;
-                    if (trading_days_count > 0) {
-                        yesterday_hist_metrics.win_rate =
-                            static_cast<double>(yesterday_hist_metrics.winning_days) /
-                            static_cast<double>(trading_days_count) * 100.0;
-                    }
-
-                    INFO("HIST_METRICS [Day T-1]: volatility=" +
-                         std::to_string(yesterday_hist_metrics.volatility) +
-                         " sharpe=" + std::to_string(yesterday_hist_metrics.sharpe_ratio) +
-                         " winning_days=" + std::to_string(yesterday_hist_metrics.winning_days) +
-                         " losing_days=" + std::to_string(yesterday_hist_metrics.losing_days) +
-                         " total_days=" + std::to_string(yesterday_hist_metrics.total_days) +
-                         " best_day=" + std::to_string(yesterday_hist_metrics.best_day) +
-                         " worst_day=" + std::to_string(yesterday_hist_metrics.worst_day) +
-                         " avg_win=" + std::to_string(yesterday_hist_metrics.avg_win) +
-                         " avg_loss=" + std::to_string(yesterday_hist_metrics.avg_loss) +
-                         " gross_profit=" + std::to_string(yesterday_hist_metrics.gross_profit) +
-                         " gross_loss=" + std::to_string(yesterday_hist_metrics.gross_loss));
-
-                    std::unordered_map<std::string, double> metric_updates = {
-                        {"sharpe_ratio", yesterday_hist_metrics.sharpe_ratio},
-                        {"sortino_ratio", yesterday_hist_metrics.sortino_ratio},
-                        {"max_drawdown", yesterday_hist_metrics.max_drawdown},
-                        {"volatility", yesterday_hist_metrics.volatility},
-                        {"downside_deviation", yesterday_hist_metrics.downside_deviation},
-                        {"win_rate", yesterday_hist_metrics.win_rate},
-                        {"avg_win", yesterday_hist_metrics.avg_win},
-                        {"avg_loss", yesterday_hist_metrics.avg_loss},
-                        {"profit_factor", yesterday_hist_metrics.profit_factor},
-                        {"best_day", yesterday_hist_metrics.best_day},
-                        {"worst_day", yesterday_hist_metrics.worst_day},
-                        {"gross_profit", yesterday_hist_metrics.gross_profit},
-                        {"gross_loss", yesterday_hist_metrics.gross_loss},
-                        // Note: total_trades column was dropped from trading.live_results;
-                        // the count still lives on yesterday_hist_metrics for in-memory use.
-                        {"winning_days", static_cast<double>(yesterday_hist_metrics.winning_days)},
-                        {"losing_days", static_cast<double>(yesterday_hist_metrics.losing_days)},
-                        // flat_days NOT written to DB — column doesn't exist on trading.live_results
-                        // and is trivially derivable as total - winning - losing on read.
-                        {"total_days", static_cast<double>(yesterday_hist_metrics.total_days)}};
-
-                    auto yesterday_metrics_manager = std::make_unique<LiveResultsManager>(
-                        db, true, combined_strategy_id, coordinator_config.portfolio_id);
-                    auto update_metrics_result = yesterday_metrics_manager->update_live_results(
-                        previous_date, metric_updates);
-                    if (update_metrics_result.is_error()) {
-                        WARN("Failed to update historical performance metrics for Day T-1: " +
-                             std::string(update_metrics_result.error()->what()));
-                    } else {
-                        INFO(
-                            "Successfully updated historical performance metrics for Day T-1 in "
-                            "trading.live_results");
-                    }
-                } else {
-                    WARN(
-                        "LiveDataLoader not available or not connected; skipping Day T-1 "
-                        "historical metrics update.");
-                }
-            } catch (const std::exception& e) {
-                WARN("Exception while updating historical performance metrics for Day T-1: " +
-                     std::string(e.what()));
+            if (!t1_curve_point_written) {
+                settled_stamp.withhold("the Day T-1 equity_curve point was not rewritten");
             }
 
             // Load updated metrics from database for email - MUST do this AFTER the UPDATE
@@ -2368,7 +4319,7 @@ int main(int argc, char* argv[]) {
                     "WHERE strategy_id = '" +
                     combined_strategy_id + "' AND portfolio_id = '" +
                     coordinator_config.portfolio_id + "' AND DATE(date) = '" +
-                    yesterday_date_ss.str() + "'";
+                    yesterday_date_ss.str() + "'" + qt_read_sql;
 
                 INFO("Loading yesterday's metrics from database with query: " + metrics_query);
                 auto metrics_result = db->execute_query(metrics_query);
@@ -2376,30 +4327,80 @@ int main(int argc, char* argv[]) {
                 if (metrics_result.is_ok() && metrics_result.value()->num_rows() > 0) {
                     auto table = metrics_result.value();
                     if (table->num_columns() >= 4) {
-                        auto daily_return_arr = std::static_pointer_cast<arrow::DoubleArray>(
-                            table->column(0)->chunk(0));
-                        auto daily_pnl_arr = std::static_pointer_cast<arrow::DoubleArray>(
-                            table->column(1)->chunk(0));
-                        auto daily_realized_arr = std::static_pointer_cast<arrow::DoubleArray>(
-                            table->column(2)->chunk(0));
-                        auto daily_unrealized_arr = std::static_pointer_cast<arrow::DoubleArray>(
-                            table->column(3)->chunk(0));
+                        // These four columns are read by the array's actual type (the C++ chart
+                        // code, since deleted, did the same). execute_query goes through
+                        // convert_generic_to_arrow, which builds a StringBuilder for every column
+                        // and stamps utf8 on the field (postgres_database.cpp, "Build a string
+                        // array for all columns"), so every one of these is a StringArray. A
+                        // static_pointer_cast<arrow::DoubleArray> would not check, and Value(0)
+                        // would read the string array's OFFSETS buffer as if it were a double
+                        // (undefined behaviour). Dispatching rather than assuming utf8 keeps this
+                        // correct if convert_generic_to_arrow is ever given real column types.
+                        auto numeric_cell = [](const std::shared_ptr<arrow::Table>& t, int col,
+                                               double& out) -> bool {
+                            if (!t || col >= t->num_columns()) return false;
+                            auto column = t->column(col);
+                            if (!column || column->num_chunks() == 0) return false;
+                            auto chunk = column->chunk(0);
+                            if (!chunk || chunk->length() == 0 || chunk->IsNull(0)) return false;
+                            switch (chunk->type_id()) {
+                                case arrow::Type::STRING: {
+                                    auto a = std::static_pointer_cast<arrow::StringArray>(chunk);
+                                    try {
+                                        out = std::stod(a->GetString(0));
+                                    } catch (const std::exception&) {
+                                        return false;
+                                    }
+                                    return true;
+                                }
+                                case arrow::Type::LARGE_STRING: {
+                                    auto a =
+                                        std::static_pointer_cast<arrow::LargeStringArray>(chunk);
+                                    try {
+                                        out = std::stod(a->GetString(0));
+                                    } catch (const std::exception&) {
+                                        return false;
+                                    }
+                                    return true;
+                                }
+                                case arrow::Type::DOUBLE: {
+                                    auto a = std::static_pointer_cast<arrow::DoubleArray>(chunk);
+                                    out = a->Value(0);
+                                    return true;
+                                }
+                                case arrow::Type::FLOAT: {
+                                    auto a = std::static_pointer_cast<arrow::FloatArray>(chunk);
+                                    out = static_cast<double>(a->Value(0));
+                                    return true;
+                                }
+                                case arrow::Type::INT64: {
+                                    auto a = std::static_pointer_cast<arrow::Int64Array>(chunk);
+                                    out = static_cast<double>(a->Value(0));
+                                    return true;
+                                }
+                                case arrow::Type::INT32: {
+                                    auto a = std::static_pointer_cast<arrow::Int32Array>(chunk);
+                                    out = static_cast<double>(a->Value(0));
+                                    return true;
+                                }
+                                default:
+                                    return false;
+                            }
+                        };
 
-                        if (daily_return_arr && daily_return_arr->length() > 0 &&
-                            !daily_return_arr->IsNull(0)) {
-                            yesterday_daily_return_for_email = daily_return_arr->Value(0);
+                        double cell = 0.0;
+                        if (numeric_cell(table, 0, cell)) {
+                            yesterday_daily_return_for_email = cell;
                             INFO("Loaded yesterday's daily_return: " +
                                  std::to_string(yesterday_daily_return_for_email));
                         }
-                        if (daily_pnl_arr && daily_pnl_arr->length() > 0 &&
-                            !daily_pnl_arr->IsNull(0)) {
-                            yesterday_daily_pnl_for_email = daily_pnl_arr->Value(0);
+                        if (numeric_cell(table, 1, cell)) {
+                            yesterday_daily_pnl_for_email = cell;
                             INFO("Loaded yesterday's daily_pnl: " +
                                  std::to_string(yesterday_daily_pnl_for_email));
                         }
-                        if (daily_realized_arr && daily_realized_arr->length() > 0 &&
-                            !daily_realized_arr->IsNull(0)) {
-                            yesterday_realized_pnl_for_email = daily_realized_arr->Value(0);
+                        if (numeric_cell(table, 2, cell)) {
+                            yesterday_realized_pnl_for_email = cell;
                             INFO("Loaded yesterday's daily_realized_pnl: " +
                                  std::to_string(yesterday_realized_pnl_for_email));
                         } else {
@@ -2410,9 +4411,8 @@ int main(int argc, char* argv[]) {
                                 "Using calculated aggregate_yesterday_total_pnl as realized PnL: " +
                                 std::to_string(yesterday_realized_pnl_for_email));
                         }
-                        if (daily_unrealized_arr && daily_unrealized_arr->length() > 0 &&
-                            !daily_unrealized_arr->IsNull(0)) {
-                            yesterday_unrealized_pnl_for_email = daily_unrealized_arr->Value(0);
+                        if (numeric_cell(table, 3, cell)) {
+                            yesterday_unrealized_pnl_for_email = cell;
                             INFO("Loaded yesterday's daily_unrealized_pnl: " +
                                  std::to_string(yesterday_unrealized_pnl_for_email));
                         }
@@ -2449,6 +4449,204 @@ int main(int argc, char* argv[]) {
         }
 
         // ========================================
+        // STEP 4b: THE STATISTICS THROUGH THE LAST SETTLED ROW (Day T-1)
+        // ========================================
+        // The row this run writes for its own date carries the statistics through the
+        // last settled row, Day T-1, so its sixteen statistic columns are the figures computed
+        // here and never include the day's own costs-only return. The Day T-1 row's
+        // statistics are refreshed from the same figures whenever that row exists, whether or
+        // not STEP 4 finalized its levels (a Day T-1 whose book did not move keeps levels that
+        // were already settled). Statistic columns only: no level column is written here.
+        HistoricalMetrics settled_statistics;
+        // Migration 036: the statistics that are not plain numbers (dates, symbols, the
+        // calendar years) or may have no value, as typed cells; the same two writes.
+        std::vector<LiveResultsCell> settled_statistics_cells;
+        bool t1_statistics_refreshed = false;
+        try {
+            if (data_loader && data_loader->is_connected()) {
+                auto trades_hist_res = data_loader->load_total_trades_count(
+                    combined_strategy_id, coordinator_config.portfolio_id, previous_date);
+                auto t1_row = data_loader->load_live_results(
+                    combined_strategy_id, coordinator_config.portfolio_id, previous_date);
+
+                int total_trades_hist = 0;
+                if (trades_hist_res.is_ok()) {
+                    total_trades_hist = trades_hist_res.value();
+                }
+
+                // The statistics grid: the Sunday-to-Friday dates on which
+                // enough of the book's universe printed a bar, from the bars alone, and the stored
+                // levels the returns are taken on. A book that also held equities would pass this
+                // same futures grid, the union of the two, with the futures sessions a year.
+                auto book_start_res =
+                    data_loader->load_book_start(combined_strategy_id, coordinator_config.portfolio_id);
+                auto levels_res = data_loader->load_statistics_levels(
+                    combined_strategy_id, coordinator_config.portfolio_id, previous_date);
+                auto grid_res = data_loader->load_futures_statistics_grid(
+                    symbols, combined_strategy_id, coordinator_config.portfolio_id, previous_date);
+                if (book_start_res.is_error() || levels_res.is_error() || grid_res.is_error()) {
+                    throw std::runtime_error("the statistics grid could not be loaded");
+                }
+                // What the statistics of migration 036 read beside the series: each symbol's stored
+                // P&L (the worst day's symbol), the sizing capital each row was sized on
+                // (risk_detail.sizing_capital), and the book's executions (the fill counts), all
+                // from the book's start through Day T-1.
+                auto symbol_pnl_res = data_loader->load_symbol_pnl_history(
+                    combined_strategy_id, coordinator_config.portfolio_id, previous_date);
+                auto sizing_capitals_res = data_loader->load_sizing_capital_history(
+                    combined_strategy_id, coordinator_config.portfolio_id, previous_date);
+                auto book_executions_res = data_loader->load_book_executions(
+                    combined_strategy_id, coordinator_config.portfolio_id, previous_date);
+                // A failed read of these costs this run its 036 statistics and nothing else:
+                // the statistics on the series, the Day T-1 refresh and the stamp go on.
+                const std::string failed_histories = failed_statistics_history_reads(
+                    {statistics_history_read("the per-symbol P&L history", symbol_pnl_res),
+                     statistics_history_read("the sizing capital history", sizing_capitals_res),
+                     statistics_history_read("the book's executions", book_executions_res)});
+                const double sessions_per_year = app_config.statistics.futures_sessions_per_year;
+                const StatisticsSeries statistics_series = build_statistics_series(
+                    levels_res.value(), grid_res.value(), book_start_res.value(), initial_capital,
+                    t1_date_str);
+                INFO("STATISTICS_CONVENTION series=futures K=" + std::to_string(sessions_per_year) +
+                     " grid=Sunday-to-Friday dates with at least " +
+                     std::to_string(kStatisticsGridMinSymbols) + " of " +
+                     std::to_string(symbols.size()) +
+                     " symbols printing a bar anchor=" + book_start_res.value() +
+                     " through=" + t1_date_str + " n=" +
+                     std::to_string(statistics_series.size()) + " calendar_days=" +
+                     std::to_string(t1_trading_days_count));
+
+                // Every statistic is taken on the series: its returns are in PERCENT and its
+                // P&L is the difference of two grid levels.
+                LiveHistoricalMetricsCalculator hist_calc;
+                settled_statistics =
+                    hist_calc.calculate(statistics_series, sessions_per_year, total_trades_hist);
+
+                if (const std::string days_warning =
+                        statistics_days_warning(settled_statistics, statistics_series);
+                    !days_warning.empty()) {
+                    WARN("STATISTICS_DAYS through " + t1_date_str + ": " + days_warning);
+                }
+
+                // Migration 036, on the same series and the same K: the worst day's date and
+                // symbol, the three statistics on the sizing capital, the monthly skew and tail
+                // ratio, the calendar years, and the account's fill counts.
+                if (!failed_histories.empty()) {
+                    ERROR("STATISTICS_COLUMNS through Day T-1 " + t1_date_str +
+                          ": could not be loaded: " + failed_histories +
+                          ". The statistics of migration 036 are NULL on the Day T-1 row and on "
+                          "the row this run writes; every other statistic, the Day T-1 refresh "
+                          "and the settled_at stamp are as on a good day");
+                    settled_statistics_cells = null_live_statistics_cells();
+                } else {
+                    LiveStatisticsColumns statistics_columns = live_statistics_columns(
+                        statistics_series, sessions_per_year, book_start_res.value(), t1_date_str,
+                        symbol_pnl_res.value(), sizing_capitals_res.value());
+                    if (const std::string fills_warning =
+                            set_fill_counts(statistics_columns, book_executions_res.value());
+                        !fills_warning.empty()) {
+                        WARN("STATISTICS_FILLS through " + t1_date_str +
+                             ": the fill counts stay NULL: " + fills_warning);
+                    }
+                    settled_statistics_cells = live_statistics_cells(statistics_columns);
+                    INFO("STATISTICS_COLUMNS [through Day T-1 " + t1_date_str +
+                         "]: " + live_statistics_log_line(statistics_columns));
+                }
+
+                INFO("HIST_METRICS [through Day T-1 " + t1_date_str +
+                     "]: volatility=" + std::to_string(settled_statistics.volatility) +
+                     " sharpe=" + std::to_string(settled_statistics.sharpe_ratio) +
+                     " winning_days=" + std::to_string(settled_statistics.winning_days) +
+                     " losing_days=" + std::to_string(settled_statistics.losing_days) +
+                     " total_days=" + std::to_string(settled_statistics.total_days) +
+                     " annualized_return=" +
+                     std::to_string(settled_statistics.total_annualized_return) +
+                     " best_day=" + std::to_string(settled_statistics.best_day) +
+                     " worst_day=" + std::to_string(settled_statistics.worst_day) +
+                     " avg_win=" + std::to_string(settled_statistics.avg_win) +
+                     " avg_loss=" + std::to_string(settled_statistics.avg_loss) +
+                     " gross_profit=" + std::to_string(settled_statistics.gross_profit) +
+                     " gross_loss=" + std::to_string(settled_statistics.gross_loss));
+
+                if (t1_row.is_ok()) {
+                    // One definition of the block, shared with the day-T write below and with
+                    // the equity runner. total_trades and flat_days are not columns of
+                    // trading.live_results; both stay on settled_statistics for in-memory use.
+                    auto metric_updates = historical_metrics_update_columns(settled_statistics);
+                    metric_updates["total_annualized_return"] =
+                        settled_statistics.total_annualized_return;
+                    if (const auto k = db->has_column("trading", "live_results",
+                                                      "statistics_sessions_per_year");
+                        k.is_ok() && k.value()) {  // migration 041
+                        metric_updates["statistics_sessions_per_year"] =
+                            app_config.statistics.futures_sessions_per_year;
+                    }
+
+                    auto t1_statistics_manager = std::make_unique<LiveResultsManager>(
+                        db, true, combined_strategy_id, coordinator_config.portfolio_id);
+                    (void)t1_statistics_manager->set_book(qt_read_book);  // migration 021
+                    size_t refreshed_rows = 0;
+                    auto update_metrics_result = !qt_write_t1 ? Result<void>() : t1_statistics_manager->update_live_results(
+                        previous_date, metric_updates, &refreshed_rows,
+                        settled_statistics_cells);
+                    if (!qt_write_t1) {
+                        INFO("Day T-1 statistics of the " + qt_read_book +
+                             " book are not written by this run (QT mode " +
+                             qt::mode_name(qt_mode) + ")");
+                    } else if (update_metrics_result.is_error()) {
+                        WARN("Failed to update historical performance metrics for Day T-1: " +
+                             std::string(update_metrics_result.error()->what()));
+                        qt_store_failed("Day T-1 live_results metrics");
+                    } else if (refreshed_rows == 0) {
+                        ERROR("Day T-1 statistics UPDATE matched 0 rows for " + t1_date_str +
+                              ": the live_results row of that date was read and is gone, so "
+                              "its statistic columns were NOT refreshed");
+                    } else {
+                        INFO(
+                            "Successfully updated historical performance metrics for Day T-1 in "
+                            "trading.live_results");
+                        t1_statistics_refreshed = true;
+                    }
+                } else {
+                    INFO("No Day T-1 live_results row for " + t1_date_str +
+                         ": no statistics to refresh");
+                }
+            } else {
+                WARN(
+                    "LiveDataLoader not available or not connected; the statistics through Day "
+                    "T-1 stay at their defaults and the Day T-1 row is not refreshed.");
+            }
+        } catch (const std::exception& e) {
+            WARN("Exception while computing the statistics through Day T-1: " +
+                 std::string(e.what()));
+        }
+        if (!t1_statistics_refreshed) {
+            settled_stamp.withhold("the Day T-1 statistics were not refreshed");
+        }
+
+        // ========================================
+        // STEP 4c: SETTLED_AT (migration 035)
+        // ========================================
+        // STEP 4 and the statistics refresh finished without error: every earlier row of the book
+        // that carries no stamp is settled, in one UPDATE (the Day T-1 row this run finalized, a
+        // row whose levels were already final, a row an earlier run left). A no-prices day and a
+        // finalize that warned stamp nothing. Today's row is inserted below with settled_at NULL,
+        // so a re-run of a date clears its stamp and the next run writes it again.
+        if (settled_stamp.open()) {
+            auto stamped = db->execute_direct_query(settled_stamp_sql(
+                combined_strategy_id, coordinator_config.portfolio_id, core::format_utc_date(now),
+                qt_read_book));
+            if (stamped.is_error()) {
+                ERROR("SETTLED_AT stamp failed: " + std::string(stamped.error()->what()) +
+                      "; the rows stay unsettled and the next run stamps them");
+            } else {
+                INFO(settled_stamp_log_line(core::format_utc_date(now), stamped.value()));
+            }
+        } else {
+            INFO(settled_stamp_withheld_log_line(core::format_utc_date(now), settled_stamp));
+        }
+
+        // ========================================
         // STEP 5: LOAD UPDATED PREVIOUS DAY AGGREGATES AND CALCULATE Day T CUMULATIVE VALUES
         // ========================================
         INFO(
@@ -2466,7 +4664,7 @@ int main(int argc, char* argv[]) {
             if (db_ptr) {
                 auto prev_agg = db_ptr->get_previous_live_aggregates(
                     combined_strategy_id, coordinator_config.portfolio_id, now,
-                    "trading.live_results");
+                    "trading.live_results", qt_read_book);
                 if (prev_agg.is_ok()) {
                     std::tie(previous_portfolio_value, previous_total_pnl,
                              previous_total_transaction_costs) = prev_agg.value();
@@ -2481,6 +4679,20 @@ int main(int argc, char* argv[]) {
         } catch (const std::exception& e) {
             INFO("Could not load previous day aggregates: " + std::string(e.what()));
         }
+        // After STEP 4, the Day T-1 net the sizing read rebuilt beside the
+        // one the finalize stored (Day T-1's stored value less the stored value of the row before
+        // it). On an unsettled Day T-1 nothing was added and nothing is compared.
+        {
+            const double rebuilt_t1_net = sizing_equity.t1_settlement - sizing_equity.t1_costs;
+            const double stored_t1_net = previous_portfolio_value - sizing_equity.day_before;
+            const bool compared = sizing_equity.t1_row && !sizing_capital_read.t1_unsettled;
+            INFO("SIZING_CAPITAL_CHECK date=" + core::format_utc_date(now) +
+                 " t1_settled=" + (compared ? "1" : "0") +
+                 " rebuilt_t1_net=" + std::to_string(compared ? rebuilt_t1_net : 0.0) +
+                 " finalized_t1_daily_pnl=" + std::to_string(compared ? stored_t1_net : 0.0) +
+                 " difference=" + std::to_string(compared ? rebuilt_t1_net - stored_t1_net : 0.0) +
+                 " sized_on=" + std::to_string(sizing_capital_read.capital.capital));
+        }
 
         // Calculate cumulative values for Day T
         double total_pnl = previous_total_pnl + daily_pnl_for_today;
@@ -2488,6 +4700,17 @@ int main(int argc, char* argv[]) {
         double daily_pnl = daily_pnl_for_today;  // Only transaction costs on Day T
         double total_transaction_costs_cumulative =
             previous_total_transaction_costs + total_daily_transaction_costs;
+        // Migration 017: the ROLL subset, cumulative (the previous row's total plus today's).
+        auto previous_roll_costs = db->get_previous_total_roll_costs(
+            combined_strategy_id, portfolio_id, now, "trading.live_results", "trading.executions",
+            qt_read_book);
+        if (previous_roll_costs.is_error()) {
+            ERROR("ROLL_LEG STOP: the previous total_roll_costs is unreadable (" +
+                  std::string(previous_roll_costs.error()->what()) + "); refusing to run");
+            return 1;
+        }
+        const double total_roll_costs_cumulative =
+            previous_roll_costs.value() + total_daily_roll_costs;
 
         // Since it's futures, all PnL is realized
         // total_realized_pnl = total_pnl + total_transaction_costs (GROSS)
@@ -2502,73 +4725,11 @@ int main(int argc, char* argv[]) {
         double total_cumulative_return =
             metrics_calculator->calculate_total_return(current_portfolio_value, initial_capital);
 
-        double total_return_decimal = 0.0;
-        if (initial_capital > 0.0) {
-            total_return_decimal = (current_portfolio_value - initial_capital) / initial_capital;
-        }
         double total_cumulative_return_pct = total_cumulative_return;  // Already in %
 
-        // Get n = number of trading days using PostgreSQL function (robust against row duplication)
-        // Uses trading.strategy_trading_days_metadata table for live_start_date
-        int trading_days_count = 1;  // Default to 1 to avoid division by zero on first day
-        try {
-            // Format today's date for SQL query
-            auto now_time_t_for_query = std::chrono::system_clock::to_time_t(now);
-            std::stringstream now_date_ss;
-            now_date_ss << std::put_time(std::gmtime(&now_time_t_for_query), "%Y-%m-%d");
-
-            // Call PostgreSQL function to calculate trading days
-            std::string trading_days_query = "SELECT trading.get_trading_days('" +
-                                             combined_strategy_id + "', DATE '" +
-                                             now_date_ss.str() + "')";
-
-            INFO("TRADING_DAYS_CALC [Day T]: Querying trading days...");
-            INFO("TRADING_DAYS_CALC [Day T]: Query: " + trading_days_query);
-            INFO("TRADING_DAYS_CALC [Day T]: Strategy ID: " + combined_strategy_id);
-            INFO("TRADING_DAYS_CALC [Day T]: Target Date: " + now_date_ss.str());
-
-            auto trading_days_result = db->execute_query(trading_days_query);
-
-            if (trading_days_result.is_ok()) {
-                auto table = trading_days_result.value();
-                if (table && table->num_rows() > 0 && table->num_columns() > 0) {
-                    // execute_query returns StringArray for all columns
-                    auto arr =
-                        std::static_pointer_cast<arrow::StringArray>(table->column(0)->chunk(0));
-                    if (arr && arr->length() > 0 && !arr->IsNull(0)) {
-                        trading_days_count = std::max<int>(1, std::stoi(arr->GetString(0)));
-                        INFO("TRADING_DAYS_CALC [Day T]: Result from DB: " +
-                             std::to_string(trading_days_count) + " trading days");
-                        INFO(
-                            "TRADING_DAYS_CALC [Day T]: This value comes from "
-                            "strategy_trading_days_metadata.live_start_date");
-                    }
-                }
-            } else {
-                WARN("TRADING_DAYS_CALC [Day T]: Could not call get_trading_days function: " +
-                     std::string(trading_days_result.error()->what()));
-            }
-        } catch (const std::exception& e) {
-            WARN("TRADING_DAYS_CALC [Day T]: Failed to get trading days: " + std::string(e.what()));
-        }
-
-        // Calculate annualized return using LiveMetricsCalculator
-        // Formula: annualized_return = ((1 + total_return)^(252/trading_days) - 1) * 100
-        INFO("ANNUALIZED_RETURN_CALC [Day T]: Calculating annualized return...");
-        INFO("ANNUALIZED_RETURN_CALC [Day T]: Input: total_return_decimal = " +
-             std::to_string(total_return_decimal) + " (" +
-             std::to_string(total_return_decimal * 100.0) + "%)");
-        INFO("ANNUALIZED_RETURN_CALC [Day T]: Input: trading_days_count = " +
-             std::to_string(trading_days_count));
-        INFO("ANNUALIZED_RETURN_CALC [Day T]: Formula: ((1 + " +
-             std::to_string(total_return_decimal) + ")^(252/" + std::to_string(trading_days_count) +
-             ") - 1) * 100");
-
-        double total_return_annualized = metrics_calculator->calculate_annualized_return(
-            total_return_decimal, trading_days_count);
-
-        INFO("ANNUALIZED_RETURN_CALC [Day T]: Result: " + std::to_string(total_return_annualized) +
-             "%");
+        // The annualised return of today's row is a statistic of the grid through the last
+        // settled row, computed in STEP 4b.
+        double total_return_annualized = settled_statistics.total_annualized_return;
 
         INFO("Portfolio value calculation:");
         INFO("  Previous portfolio value: $" + std::to_string(previous_portfolio_value));
@@ -2578,9 +4739,20 @@ int main(int argc, char* argv[]) {
         INFO("  Daily return: " + std::to_string(daily_return) + "%");
         INFO("  Annualized return: " + std::to_string(total_return_annualized) + "%");
 
+        // MAIN-post-#55: the equity-to-margin numerator, computed where the equity is
+        // known. Same formula and same guard as before, current_portfolio_value in place
+        // of the initial_capital constant, matching LiveMetricsCalculator's
+        // calculate_equity_to_margin_ratio(current_portfolio_value, margin_posted).
+        equity_to_margin_ratio =
+            equity_to_margin_ratio_of(current_portfolio_value, total_posted_margin);
+        if (equity_to_margin_ratio && *equity_to_margin_ratio <= 1.0 && active_positions > 0) {
+            WARN("Equity-to-Margin Ratio is <= 1.0 (account equity at or below "
+                 "posted margin); verify margins and sizing.");
+        }
+
         std::cout << "Total P&L: $" << std::fixed << std::setprecision(2) << total_pnl << std::endl;
-        std::cout << "Realized P&L: $" << std::fixed << std::setprecision(2) << total_realized_pnl
-                  << std::endl;
+        // total_realized_pnl is the cumulative P&L before costs.
+        std::cout << trade_ngin::realized_pnl_console(total_realized_pnl) << std::flush;
         std::cout << "Unrealized P&L: $" << std::fixed << std::setprecision(2)
                   << total_unrealized_pnl << std::endl;
         std::cout << "Current Portfolio Value: $" << std::fixed << std::setprecision(2)
@@ -2589,66 +4761,73 @@ int main(int argc, char* argv[]) {
                   << total_cumulative_return_pct << "%" << std::endl;
         std::cout << "Total Return (Annualized): " << std::fixed << std::setprecision(2)
                   << total_return_annualized << "%" << std::endl;
-        std::cout << "Daily Return: " << std::fixed << std::setprecision(2) << daily_return << "%"
-                  << std::endl;
-        std::cout << "Gross Leverage: " << std::fixed << std::setprecision(2)
-                  << (gross_notional / current_portfolio_value) << "x" << std::endl;
+        // The day-T return is today's costs only (daily_pnl above).
+        std::cout << trade_ngin::daily_return_console_costs_only(daily_return) << std::flush;
+        // The same notional over the day's account value V_t, named as that.
+        std::cout << trade_ngin::gross_leverage_console_on_account_value(gross_notional,
+                                                                         current_portfolio_value)
+                  << std::flush;
         std::cout << "Posted Margin (Initial×Contracts): $" << std::fixed << std::setprecision(2)
                   << total_posted_margin << std::endl;
-        std::cout << "Equity-to-Margin Ratio: " << std::fixed << std::setprecision(2)
-                  << equity_to_margin_ratio << "x" << std::endl;
-        double margin_cushion = 0.0;
-        if (maintenance_requirement_today > 0.0) {
-            // Correct formula: margin_cushion = (equity - maintenance) / equity
-            // This shows how much cushion we have above maintenance margin requirements
-            margin_cushion =
-                (current_portfolio_value - maintenance_requirement_today) / current_portfolio_value;
+        if (equity_to_margin_ratio) {
+            std::cout << "Equity-to-Margin Ratio: " << std::fixed << std::setprecision(2)
+                      << *equity_to_margin_ratio << "x" << std::endl;
         } else {
-            margin_cushion = -1.0;  // Invalid if no maintenance requirement
+            std::cout << "Equity-to-Margin Ratio: n/a (no margin posted)" << std::endl;
         }
+        // margin_cushion = (equity - maintenance) / equity: how far the account stands above
+        // its maintenance requirement. No value, and a NULL cell, on a day with no posted
+        // margin: there is no requirement to be above.
+        // Not const: a QT send replaces it with the stored day's figure.
+        std::optional<double> margin_cushion = margin_cushion_of(
+            current_portfolio_value, total_posted_margin, maintenance_requirement_today);
 
         // Warnings per thresholds
         if (total_posted_margin > current_portfolio_value) {
             WARN("Posted margin exceeds current portfolio value; check sizing and risk limits.");
         }
-        if (margin_cushion < 0.20) {
+        if (margin_cushion && *margin_cushion < 0.20) {
             WARN("Margin cushion below 20%.");
         }
-        // Old WARN fired on `e2m_ratio > 4.0` — sensible only under the prior
-        // (buggy) gross_notional/margin formula where high = more leverage.
-        // After the formula fix, high e2m means more equity per dollar of
-        // posted margin (safer). Replaced with a low-floor alarm.
-        if (equity_to_margin_ratio > 0.0 && equity_to_margin_ratio < 1.5) {
+        // A high equity-to-margin ratio means more equity per dollar of posted
+        // margin (safer), so the alarm is a low floor.
+        if (equity_to_margin_ratio && *equity_to_margin_ratio < 1.5) {
             WARN("Equity-to-Margin Ratio below 1.5x (low margin cushion).");
         }
 
         // Get forecasts for all symbols
         INFO("Retrieving current forecasts...");
-        std::cout << "\n======= Current Forecasts =======" << std::endl;
-        std::cout << std::setw(10) << "Symbol"
-                  << " | " << std::setw(12) << "Forecast"
-                  << " | " << std::setw(12) << "Position" << std::endl;
-        std::cout << std::string(40, '-') << std::endl;
-
-        // Collect signals for database storage
-        std::unordered_map<std::string, double> signals_to_store;
-
-        for (const auto& symbol : symbols) {
-            double forecast = tf_strategy_typed ? tf_strategy_typed->get_forecast(symbol) : 0.0;
-            double position = tf_strategy_typed ? tf_strategy_typed->get_position(symbol) : 0.0;
-
-            signals_to_store[symbol] = forecast;
-
-            std::cout << std::setw(10) << symbol << " | " << std::setw(12) << std::fixed
-                      << std::setprecision(4) << forecast << " | " << std::setw(12) << std::fixed
-                      << std::setprecision(2) << position << std::endl;
+        // Every sleeve, not the first one only. A row is the sleeve's own forecast
+        // and its own target (before the portfolio acts on it) beside the quantity of the
+        // sleeve's stored row of the day (strategy_positions_map, the book PHASE 4 stored).
+        std::vector<trade_ngin::ForecastConsoleRow> forecast_rows;
+        for (size_t i = 0; i < strategies.size(); ++i) {
+            const auto trend_sleeve =
+                std::dynamic_pointer_cast<trade_ngin::TrendFollowingStrategy>(strategies[i]);
+            const auto stored_sleeve = strategy_positions_map.find(strategy_names[i]);
+            for (const auto& symbol : symbols) {
+                trade_ngin::ForecastConsoleRow row;
+                row.sleeve = strategy_names[i];
+                row.symbol = symbol;
+                if (trend_sleeve) {
+                    row.signal = trend_sleeve->get_forecast(symbol);
+                    row.sleeve_target = trend_sleeve->get_position(symbol);
+                }
+                if (stored_sleeve != strategy_positions_map.end()) {
+                    const auto stored = stored_sleeve->second.find(symbol);
+                    if (stored != stored_sleeve->second.end())
+                        row.stored_quantity = stored->second.quantity.as_double();
+                }
+                forecast_rows.push_back(row);
+            }
         }
+        std::cout << trade_ngin::current_forecasts_console("Forecast", forecast_rows, 2)
+                  << std::flush;
 
         // NOTE: Signals are already stored per-strategy in PHASE 4 above.
         // Do NOT call results_manager->set_signals() here as it would cause duplicate
         // storage with the combined_strategy_id as both strategy_id AND strategy_name,
         // which creates incorrect duplicate entries in the signals table.
-        // The signals_to_store map is only used for display purposes above.
 
         // Save trading results to results table
         INFO("Saving trading results to database...");
@@ -2656,27 +4835,20 @@ int main(int argc, char* argv[]) {
             // Calculate current date for results (use override date if specified)
             auto current_date = now;
 
-            // Use the calculated returns from above
-            [[maybe_unused]] double volatility = 0.0;
-
-            // Get volatility from risk evaluation if available
-            if (risk_eval.is_ok()) {
-                const auto& r = risk_eval.value();
-                volatility = r.portfolio_var * 100.0;  // Convert to percentage
-            }
-
-            // Create configuration JSON
-            nlohmann::json report_config_json;
-            report_config_json["strategy_type"] = combined_strategy_id;  // From config (Phase 1)
-            report_config_json["capital_allocation"] = initial_capital;
-            report_config_json["max_leverage"] = base_strategy_config.max_leverage;
-            report_config_json["weight"] = 0.03;      // Default weight
-            report_config_json["risk_target"] = 0.2;  // Default risk target
-            report_config_json["idm"] = 2.5;          // Default IDM
-            report_config_json["active_positions"] = active_positions;
-            report_config_json["gross_notional"] = gross_notional;
-            report_config_json["net_notional"] = net_notional;
-            report_config_json["gross_leverage"] = gross_notional / initial_capital;
+            // Create configuration JSON (core/resolved_sleeves.hpp): strategy_type is the row's
+            // strategy_id; each sleeve's resolved values sit under "sleeves"; capital_allocation
+            // and gross_leverage are on the day's sizing capital E_t, risk_detail's on a row that
+            // stores it, else the capital this run read and set, and absent on a sizing hold
+            // (no capital was read).
+            nlohmann::json report_config_json = trade_ngin::futures_live_results_config_json(
+                combined_strategy_id, resolved_sleeves,
+                trade_ngin::stored_config_sizing_capital(
+                    one_pass_day.stores_detail(), one_pass_day.sizing_capital, !sizing_hold,
+                    sizing_capital_read.capital.capital),
+                active_positions, gross_notional, net_notional);
+            // The day's T-1 classification (counts, feed holes, held symbols).
+            report_config_json["t1_classification"] =
+                t1_classification.to_json(held_symbols(book_holds));
 
             // Create SQL insert for live_results table with correct schema
             std::stringstream date_ss;
@@ -2688,14 +4860,23 @@ int main(int argc, char* argv[]) {
             double net_leverage = 0.0;
             double max_correlation = 0.0;
             double jump_risk = 0.0;
-            double risk_scale = 1.0;
+            // risk_scale is the DELIVERED scale of today's
+            // rebalance, the STORED book's gross notional (the book this runner stores, after its
+            // STRICT step) over the capped target's gross notional at the raw signal closes. A day
+            // with no sized rebalance (no session, a sizing hold, a refused overlay) stores the
+            // held book against itself: 1, and so does a flat capped target. The request m_t is
+            // risk_detail.risk_requested, never this column.
+            double risk_scale =
+                one_pass_day.stores_detail()
+                    ? portfolio->delivered_scale_for_book(
+                          trade_ngin::account_book_of(strategy_positions_map))
+                    : 1.0;
 
             if (risk_eval.is_ok()) {
                 const auto& r = risk_eval.value();
                 portfolio_var = r.portfolio_var;
                 max_correlation = r.correlation_risk;
                 jump_risk = r.jump_risk;
-                risk_scale = r.recommended_scale;
             }
 
             // Use LiveMetricsCalculator for gross leverage (notional / portfolio value)
@@ -2706,97 +4887,9 @@ int main(int argc, char* argv[]) {
                 (current_portfolio_value > 0.0) ? (net_notional / current_portfolio_value) : 0.0;
             // equity_to_margin_ratio and margin_cushion already computed above
 
-            // Calculate since-inception performance metrics (Sharpe, Sortino, MaxDD, etc.)
-            HistoricalMetrics historical_metrics;
-            try {
-                if (data_loader && data_loader->is_connected()) {
-                    // Use previous_date so history comes from all fully finalized days (<= Day T-1)
-                    auto returns_hist_res = data_loader->load_daily_returns_history(
-                        combined_strategy_id, coordinator_config.portfolio_id, previous_date);
-                    auto pnl_hist_res = data_loader->load_daily_pnl_history(
-                        combined_strategy_id, coordinator_config.portfolio_id, previous_date);
-                    auto equity_hist_res = data_loader->load_equity_curve_history(
-                        combined_strategy_id, coordinator_config.portfolio_id, previous_date);
-                    auto trades_hist_res = data_loader->load_total_trades_count(
-                        combined_strategy_id, coordinator_config.portfolio_id, current_date);
-
-                    std::vector<double> returns_hist;
-                    std::vector<double> pnl_hist;
-                    std::vector<double> equity_hist;
-                    int total_trades_hist = 0;
-
-                    if (returns_hist_res.is_ok()) {
-                        returns_hist = returns_hist_res.value();
-                    }
-                    if (pnl_hist_res.is_ok()) {
-                        pnl_hist = pnl_hist_res.value();
-                    }
-                    if (equity_hist_res.is_ok()) {
-                        equity_hist = equity_hist_res.value();
-                    }
-                    if (trades_hist_res.is_ok()) {
-                        total_trades_hist = trades_hist_res.value();
-                    }
-
-                    // Append today's data so metrics are up-to-date as of Day T
-                    // Debug: dump raw returns before ×100 conversion
-                    {
-                        std::string raw_dump = "RETURNS_RAW [Day T]: [";
-                        for (size_t i = 0; i < returns_hist.size(); ++i) {
-                            if (i > 0)
-                                raw_dump += ", ";
-                            raw_dump += std::to_string(returns_hist[i]);
-                        }
-                        raw_dump += "] (size=" + std::to_string(returns_hist.size()) + ")";
-                        INFO(raw_dump);
-                    }
-                    // NOTE: returns_hist is already loaded in PERCENT units (daily_return SQL
-                    // computes `... * 100.0`). Do NOT multiply by 100 here — that produced a
-                    // 100x volatility / 100x lower sharpe. daily_return for today is also
-                    // already in percent (per the SQL UPDATE), so it's appended as-is.
-                    returns_hist.push_back(daily_return);
-                    pnl_hist.push_back(daily_pnl);
-                    equity_hist.push_back(current_portfolio_value);
-
-                    LiveHistoricalMetricsCalculator hist_calc;
-                    historical_metrics =
-                        hist_calc.calculate(returns_hist, pnl_hist, equity_hist,
-                                            total_return_annualized, total_trades_hist);
-
-                    // Keep volatility variable aligned with return-volatility definition
-                    volatility = historical_metrics.volatility;
-
-                    // Override total_days with authoritative trading days count from
-                    // get_trading_days() DB function, which uses strategy_trading_days_metadata
-                    historical_metrics.total_days = trading_days_count;
-                    // Recalculate win_rate using actual trading days as denominator
-                    if (trading_days_count > 0) {
-                        historical_metrics.win_rate =
-                            static_cast<double>(historical_metrics.winning_days) /
-                            static_cast<double>(trading_days_count) * 100.0;
-                    }
-
-                    INFO("HIST_METRICS [Day T]: volatility=" +
-                         std::to_string(historical_metrics.volatility) +
-                         " sharpe=" + std::to_string(historical_metrics.sharpe_ratio) +
-                         " winning_days=" + std::to_string(historical_metrics.winning_days) +
-                         " losing_days=" + std::to_string(historical_metrics.losing_days) +
-                         " total_days=" + std::to_string(historical_metrics.total_days) +
-                         " best_day=" + std::to_string(historical_metrics.best_day) +
-                         " worst_day=" + std::to_string(historical_metrics.worst_day) +
-                         " avg_win=" + std::to_string(historical_metrics.avg_win) +
-                         " avg_loss=" + std::to_string(historical_metrics.avg_loss) +
-                         " gross_profit=" + std::to_string(historical_metrics.gross_profit) +
-                         " gross_loss=" + std::to_string(historical_metrics.gross_loss));
-                } else {
-                    WARN(
-                        "LiveDataLoader not available or not connected; historical performance "
-                        "metrics will remain at default values for today.");
-                }
-            } catch (const std::exception& e) {
-                WARN("Exception while calculating historical performance metrics for today: " +
-                     std::string(e.what()));
-            }
+            // The statistic columns of today's row are the statistics through the last
+            // settled row, computed once after STEP 4 and written to the Day T-1 row too.
+            const HistoricalMetrics& historical_metrics = settled_statistics;
 
             // Use the LiveResultsManager
             INFO("Setting metrics in LiveResultsManager...");
@@ -2805,19 +4898,6 @@ int main(int argc, char* argv[]) {
             std::unordered_map<std::string, double> double_metrics = {
                 {"total_cumulative_return", total_cumulative_return_pct},
                 {"total_annualized_return", total_return_annualized},
-                {"volatility", historical_metrics.volatility},
-                {"downside_deviation", historical_metrics.downside_deviation},
-                {"sharpe_ratio", historical_metrics.sharpe_ratio},
-                {"sortino_ratio", historical_metrics.sortino_ratio},
-                {"max_drawdown", historical_metrics.max_drawdown},
-                {"win_rate", historical_metrics.win_rate},
-                {"avg_win", historical_metrics.avg_win},
-                {"avg_loss", historical_metrics.avg_loss},
-                {"profit_factor", historical_metrics.profit_factor},
-                {"best_day", historical_metrics.best_day},
-                {"worst_day", historical_metrics.worst_day},
-                {"gross_profit", historical_metrics.gross_profit},
-                {"gross_loss", historical_metrics.gross_loss},
                 {"total_pnl", total_pnl},
                 {"total_unrealized_pnl", total_unrealized_pnl},
                 {"total_realized_pnl", total_realized_pnl},
@@ -2825,8 +4905,6 @@ int main(int argc, char* argv[]) {
                 {"portfolio_var", portfolio_var},
                 {"net_leverage", net_leverage},
                 {"portfolio_leverage", gross_leverage},
-                {"equity_to_margin_ratio", equity_to_margin_ratio},
-                {"margin_cushion", margin_cushion},
                 {"max_correlation", max_correlation},
                 {"jump_risk", jump_risk},
                 {"risk_scale", risk_scale},
@@ -2838,21 +4916,58 @@ int main(int argc, char* argv[]) {
                 {"daily_realized_pnl", daily_realized_pnl},
                 {"daily_unrealized_pnl", daily_unrealized_pnl},
                 {"daily_transaction_costs", total_daily_transaction_costs},
+                {"daily_roll_costs", total_daily_roll_costs},        // migration 017
+                {"total_roll_costs", total_roll_costs_cumulative},  // migration 017
                 {"margin_posted", total_posted_margin},
                 {"cash_available", current_portfolio_value - total_posted_margin}};
 
+            // The ratio and the cushion are named only when they have a value; without one the
+            // cell stays NULL (live/margin_columns.hpp).
+            set_margin_cells(double_metrics, equity_to_margin_ratio, margin_cushion);
+            // K of the statistics grid: the e-mail labels an annualized return taken on fewer
+            // sessions than K. Written once the database has the column (migration 041).
+            if (const auto k = db->has_column("trading", "live_results",
+                                              "statistics_sessions_per_year");
+                k.is_ok() && k.value()) {
+                double_metrics["statistics_sessions_per_year"] = app_config.statistics.futures_sessions_per_year;
+            }
+
             std::unordered_map<std::string, int> int_metrics = {
-                {"active_positions", active_positions},
-                // Removed total_trades - will be implemented properly later with closing trades logic
-                {"winning_days", historical_metrics.winning_days},
-                {"losing_days", historical_metrics.losing_days},
-                {"total_days", historical_metrics.total_days}};
+                {"active_positions", active_positions}};
+
+            // The since-inception block, from the helper the Day T-1 UPDATE and the equity
+            // runner use, so a column cannot be written on one path and dropped on another.
+            for (const auto& [column, value] :
+                 historical_metrics_double_columns(historical_metrics)) {
+                double_metrics[column] = value;
+            }
+            for (const auto& [column, value] :
+                 historical_metrics_int_columns(historical_metrics)) {
+                int_metrics[column] = value;
+            }
 
             // Set all metrics at once
             results_manager->set_metrics(double_metrics, int_metrics);
 
+            // Migration 036: the typed cells of the same statistics, and the six overlay cells
+            // of the book this row stores; a cell with no value is left out of the INSERT and
+            // stays NULL. The overlay cells are the row's own: the Day T-1 refresh never
+            // writes them.
+            std::vector<LiveResultsCell> row_cells = settled_statistics_cells;
+            for (auto& cell : trade_ngin::overlay_cells(overlay_columns, live_results_number)) {
+                row_cells.push_back(std::move(cell));
+            }
+            results_manager->set_cells(row_cells);
+
             // Set config
             results_manager->set_config(report_config_json);
+
+            // The loop's record of the day, on the row of a sized rebalance the
+            // overlay answered; the cell stays NULL on every other row.
+            if (one_pass_day.stores_detail()) {
+                results_manager->set_risk_detail(
+                    risk_detail_json(one_pass_day, sizing_capital_read.capital.account));
+            }
 
             // Set equity for equity curve tracking
             results_manager->set_equity(current_portfolio_value);
@@ -2860,23 +4975,158 @@ int main(int argc, char* argv[]) {
             ERROR("Exception while saving trading results: " + std::string(e.what()));
         }
 
-        // Phase 4: Use CSVExporter for position export
+        // Use CSVExporter for position export
         INFO("Using CSVExporter to save positions to file...");
 
-        // Note: previously called LiveDataLoader::load_commissions_by_symbol here, but it
-        // was dead code (result map was unused; csv_exporter explicitly does
-        // (void)symbol_commissions) and the SQL referenced a column that no longer exists.
         // All real transaction-cost data flows from cost_manager_->calculate_costs() at
         // execution time and lives on trading.executions / trading.live_results directly.
 
         // Export current positions with per-strategy breakdown
         std::string today_filename;
-        auto current_export_result = csv_exporter->export_current_positions(
-            now, strategy_positions_map,
-            previous_day_close_prices,  // Market prices (Day T-1 close)
-            current_portfolio_value, gross_notional, net_notional, strategy_instances_map);
+        // The positions CSV: on a day with no session the
+        // strategies were fed nothing and no rebalance ran (the MarketDataBus is off at the
+        // load), so their forecasts, volatilities and EMAs are empty. The file then carries the
+        // real details instead of empty rows: the held book (strategy_positions_map, loaded by
+        // the non-trading-day branch above), each symbol's last mark (its latest loaded close)
+        // and each sleeve's last computed forecasts (its stored signals of the previous
+        // session), with a note that no session occurred and the values are carried, not
+        // computed.
+        // Why the day had no session is the T-1 classification's answer, not the weekday's, so
+        // a feed-hole carry names its reason too.
+        const std::string carried_day_note = "no session on " + yesterday_date_str_check + " (" +
+                                             carried_day_reason(t1_classification) + ")";
+        auto export_positions_file = [&]() -> Result<std::string> {
+            if (!skip_strategy_processing) {
+                return csv_exporter->export_current_positions(
+                    now, strategy_positions_map,
+                    day_t_mark_prices,  // Market prices (the Day T mark)
+                    current_portfolio_value, gross_notional, net_notional,
+                    strategy_instances_map);
+            }
+            std::unordered_map<std::string, CarriedMark> last_marks;
+            for (const auto& [symbol, bar] : latest_bars_per_symbol) {
+                last_marks[symbol] = CarriedMark{static_cast<double>(bar.close),
+                                                 core::format_utc_date(bar.timestamp)};
+            }
+            std::unordered_map<std::string, CarriedForecasts> last_forecasts;
+            for (const auto& strategy_name : strategy_names) {
+                auto carried = data_loader->load_last_signals_before(
+                    combined_strategy_id, strategy_name, portfolio_id, now);
+                if (carried.is_error()) {
+                    WARN("Carried forecasts for " + strategy_name + " could not be read: " +
+                         std::string(carried.error()->what()));
+                    continue;
+                }
+                INFO(trade_ngin::carried_forecasts_log_line(
+                    strategy_name, carried.value().forecasts.size(), carried.value().session_date));
+                last_forecasts[strategy_name] = carried.value();
+            }
+            return csv_exporter->export_carried_positions(
+                now, strategy_positions_map, last_marks, last_forecasts, current_portfolio_value,
+                gross_notional, net_notional, carried_day_note);
+        };
+        // Item 4 (review E#3, E#11): a send e-mails and exports the day AS STORED (positions,
+        // executions and the live_results row of the date; qt, or system on the model twin),
+        // never what this run's pass computed: the book, its fills and its figures are read back
+        // here, over the pipeline's. Only the market data (the marks, T-1 and T-2 closes) is
+        // this run's.
+        std::optional<nlohmann::json> qt_stored_results;
+        if (qt_sends) {
+            strategy_positions_map.clear();
+            for (const auto& sleeve : strategy_names) {
+                auto stored = db->load_positions_by_date(combined_strategy_id, sleeve,
+                                                         coordinator_config.portfolio_id, now,
+                                                         "trading.positions", qt_write_book);
+                if (stored.is_error()) {
+                    return qt_fail("the stored qt positions could not be read: " +
+                                   std::string(stored.error()->what()));
+                }
+                for (const auto& [symbol, position] : stored.value()) {
+                    if (day_t_mark_prices.count(symbol) == 0) {
+                        day_t_mark_prices[symbol] = static_cast<double>(position.average_price);
+                    }
+                }
+                strategy_positions_map[sleeve] = stored.value();
+            }
+            rebuild_combined_positions(positions, strategy_positions_map);
+            auto stored_fills = qt::load_book_executions(*db, portfolio_id, combined_strategy_id,
+                                                         qt_write_book, qt_date);
+            if (stored_fills.is_error()) {
+                return qt_fail("the stored qt executions could not be read: " +
+                               std::string(stored_fills.error()->what()));
+            }
+            all_strategy_executions.clear();
+            for (const auto& sleeve : strategy_names) all_strategy_executions[sleeve] = {};
+            for (const auto& [sleeve, fills] : stored_fills.value()) {
+                all_strategy_executions[sleeve] = fills;
+            }
+            auto stored_day = qt::load_book_results(*db, portfolio_id, combined_strategy_id,
+                                                    qt_write_book, qt_date);
+            if (stored_day.is_error()) {
+                return qt_fail("the stored qt live_results row could not be read: " +
+                               std::string(stored_day.error()->what()));
+            }
+            const nlohmann::json& stored_row = stored_day.value();
+            auto stored_value = [&](const char* column, double& target) {
+                if (stored_row.contains(column) && stored_row.at(column).is_number()) {
+                    target = stored_row.at(column).get<double>();
+                }
+            };
+            // A margin figure is NULL with no margin: the stored NULL is kept.
+            auto stored_optional = [&](const char* column, std::optional<double>& target) {
+                if (!stored_row.contains(column)) return;
+                const auto& cell = stored_row.at(column);
+                if (cell.is_number()) {
+                    target = cell.get<double>();
+                } else if (cell.is_null()) {
+                    target = std::nullopt;
+                }
+            };
+            stored_value("daily_return", daily_return);
+            stored_value("daily_pnl", daily_pnl);
+            stored_value("daily_realized_pnl", daily_realized_pnl);
+            stored_value("daily_unrealized_pnl", daily_unrealized_pnl);
+            stored_value("total_cumulative_return", total_cumulative_return_pct);
+            stored_value("total_annualized_return", total_return_annualized);
+            stored_value("total_pnl", total_pnl);
+            stored_value("total_realized_pnl", total_realized_pnl);
+            stored_value("total_unrealized_pnl", total_unrealized_pnl);
+            stored_value("current_portfolio_value", current_portfolio_value);
+            stored_value("gross_notional", gross_notional);
+            stored_value("net_notional", net_notional);
+            stored_value("margin_posted", total_posted_margin);
+            stored_optional("margin_cushion", margin_cushion);
+            stored_optional("equity_to_margin_ratio", equity_to_margin_ratio);
+            stored_value("total_transaction_costs", total_transaction_costs_cumulative);
+            stored_value("daily_roll_costs", total_daily_roll_costs);
+            qt_stored_results = stored_row;
+            std::size_t stored_fill_count = 0;
+            for (const auto& [sleeve, fills] : all_strategy_executions) {
+                (void)sleeve;
+                stored_fill_count += fills.size();
+            }
+            INFO("QT_SEND the e-mail and CSV are built from the stored " + qt_write_book +
+                 " day of " + qt_date +
+                 ": " + std::to_string(positions.size()) + " symbol(s), " +
+                 std::to_string(stored_fill_count) + " execution(s), book_source " +
+                 (stored_row.contains("book_source") && stored_row.at("book_source").is_string()
+                      ? stored_row.at("book_source").get<std::string>()
+                      : std::string("none (the system book)")));
+        }
+        auto current_export_result =
+            qt_export_csv ? export_positions_file() : Result<std::string>(std::string());
 
-        if (current_export_result.is_ok()) {
+        if (qt_sends && qt_desk_editable && current_export_result.is_ok() &&
+            !current_export_result.value().empty()) {
+            // The desk's book is not the model's: its CSV leaves out the model's columns.
+            if (auto stripped = qt::strip_model_columns(current_export_result.value());
+                stripped.is_error()) {
+                ERROR("QT_PUBLISH " + std::string(stripped.error()->what()));
+            }
+        }
+        if (!qt_export_csv) {
+            INFO("QT: a " + qt::mode_name(qt_mode) + " run writes no CSV (ruling 15)");
+        } else if (current_export_result.is_ok()) {
             today_filename = current_export_result.value();
             INFO("Today's positions saved to " + today_filename);
         } else {
@@ -2884,18 +5134,38 @@ int main(int argc, char* argv[]) {
                   std::string(current_export_result.error()->what()));
         }
 
+        // The Day T-1 books as stored after the finalize write above. previous_strategy_positions
+        // was loaded before it (the no-session hold needs the stored book early), so its realized
+        // P&L is still yesterday's placeholder: the yesterday CSV and the email's "Yesterday's
+        // Finalized Position Results" table print the rows read back here.
+        const SleeveBooks finalized_strategy_positions = read_back_finalized_books(
+            previous_strategy_positions, [&](const std::string& strategy_name) {
+                return db->load_positions_by_date(combined_strategy_id, strategy_name,
+                                                  coordinator_config.portfolio_id, previous_date,
+                                                  "trading.positions", qt_read_book);
+            });
+
+        // The two prices of the settled table, in the settled file and in the report, from one
+        // source: the pair PHASE 5's own P&L arithmetic was handed for each row
+        // (t1_settlement's "from" and "to" maps), never a second lookup of the bars. A symbol the
+        // "to" map does not hold printed no bar and settled 0: its previous price is its last
+        // consumed close.
+        const trade_ngin::SettledTablePrices settled_table = trade_ngin::settled_table_prices(
+            t1_settlement.t2_close_prices, t1_settlement.t1_close_prices,
+            t1_settlement.last_close_without_t1);
+
         // Export yesterday's finalized positions with per-strategy breakdown (if not first trading
         // day)
         std::string yesterday_filename;
-        if (!is_first_trading_day && !previous_strategy_positions.empty()) {
+        if (qt_export_csv && !is_first_trading_day && !previous_strategy_positions.empty()) {
             INFO("Exporting yesterday's finalized positions with per-strategy breakdown...");
 
             auto yesterday_time = now - std::chrono::hours(24);
 
             auto finalized_export_result = csv_exporter->export_finalized_positions(
-                now, yesterday_time, previous_strategy_positions,
-                two_days_ago_close_prices,  // Entry prices (T-2)
-                previous_day_close_prices   // Exit prices (T-1)
+                now, yesterday_time, finalized_strategy_positions,
+                settled_table.previous,  // the price each row was settled from
+                settled_table.latest     // the price it was settled at
             );
 
             if (finalized_export_result.is_ok()) {
@@ -2910,20 +5180,188 @@ int main(int argc, char* argv[]) {
         // Use the new LiveResultsManager - save all results at once
         INFO("Saving all live trading results using LiveResultsManager...");
 
-        auto save_result = results_manager->save_all_results(combined_strategy_id, now);
+        auto save_result = !qt_write_day
+                               ? Result<void>()
+                               : results_manager->save_all_results(combined_strategy_id, now);
         if (save_result.is_error()) {
             ERROR("Failed to save all live results: " + std::string(save_result.error()->what()));
+            qt_store_failed("live_results and equity_curve");
         } else {
             INFO("Successfully saved all live trading results to database");
         }
 
-        // Stop the strategy
+        // ========================================
+        // QT: THE DESK'S BOOKS (contract sections 3 and 6)
+        // ========================================
+        bool qt_failed = false;
+        if (qt_mode == qt::Mode::MODEL && qt_desk_editable) {
+            // The model run seeds qt_proposal and writes qt as copies of system (Q3,
+            // book_source 'model'), unless the desk has already edited the day: a re-run never
+            // clobbers a desk save or an approved override.
+            // Contract C3: neither is rewritten on a published day either.
+            auto edited = qt::desk_edit_done(*db, portfolio_id, qt_date);
+            auto published = qt::published_at(*db, portfolio_id, combined_strategy_id, qt_date);
+            if (edited.is_error() || published.is_error()) {
+                ERROR("QT_SEED could not read the command log or the publish record: " +
+                      std::string(edited.is_error() ? edited.error()->what()
+                                                    : published.error()->what()));
+                qt_failed = true;
+            } else if (!published.value().empty()) {
+                INFO("QT_SEED kept: " + qt_date + " was published at " + published.value() +
+                     "; a model re-run never rewrites a published day's qt_proposal and qt");
+            } else if (edited.value()) {
+                INFO("QT_SEED kept: the desk edited " + qt_date +
+                     "; qt_proposal and qt are not overwritten");
+            } else if (save_result.is_error() || !qt_store_failures.empty()) {
+                ERROR("QT_SEED skipped: the system book was not stored completely (" +
+                      (qt_store_failures.empty() ? std::string("live_results")
+                                                 : qt_store_failure_list()) +
+                      "); qt_proposal and qt are not written from it");
+                qt_failed = true;
+            } else {
+                auto proposal = qt::copy_book_day(*db, portfolio_id, combined_strategy_id, qt_date,
+                                                  "system", "qt_proposal", false, "");
+                auto desk_book = qt::copy_book_day(*db, portfolio_id, combined_strategy_id,
+                                                   qt_date, "system", "qt", true, "model");
+                if (proposal.is_error() || desk_book.is_error()) {
+                    ERROR("QT_SEED failed: " +
+                          std::string(proposal.is_error() ? proposal.error()->what()
+                                                          : desk_book.error()->what()));
+                    qt_failed = true;
+                } else {
+                    // Contract C7: every day, weekends and holidays included, waits for the
+                    // desk's approval or the 10:00 fallback; the model run publishes nothing.
+                    INFO("QT_SEED " + portfolio_id + " " + qt_date +
+                         ": qt_proposal seeded and qt written from system (book_source model); "
+                         "the day waits for the desk's approval (09:30) or the 10:00 fallback" +
+                         (qt_day_kind == qt::DayKind::CALENDAR_CLOSED
+                              ? std::string(" (T-1 was closed on the runner's calendar)")
+                              : std::string()));
+                }
+            }
+        }
+        if (qt_mode == qt::Mode::DESK || qt_mode == qt::Mode::OVERRIDE) {
+            const std::string source = qt_mode == qt::Mode::DESK ? "desk" : "override";
+            std::vector<DeskSymbolOutcome> outcomes = portfolio->last_desk_outcomes();
+            for (auto& o : outcomes) {
+                // The stored book is what was given back: the book gate (a non-SESSION symbol is
+                // held) and a ruling-21 close act after the pass.
+                const auto stored = positions.find(o.symbol);
+                const double final_q = stored == positions.end() ? 0.0
+                                                                 : stored->second.quantity.as_double();
+                if (std::abs(final_q - o.given) > 1e-9) {
+                    o.given = final_q;
+                    o.moved_by = std::abs(final_q - o.asked) <= 1e-9 ? "none" : "hold";
+                } else if (qt_mode == qt::Mode::OVERRIDE) {
+                    o.moved_by = std::abs(final_q - o.asked) <= 1e-9 ? "none" : "hold";
+                }
+            }
+            if (outcomes.empty()) {
+                // No rebalance ran (a day with no session or a sizing hold): every row is held.
+                std::map<std::string, double> held;
+                for (const auto& [symbol, position] : positions) {
+                    held[symbol] = position.quantity.as_double();
+                }
+                for (const auto& [symbol, asked] : qt_desk_totals) {
+                    const double given = held.count(symbol) ? held[symbol] : 0.0;
+                    outcomes.push_back({symbol, asked, given, given,
+                                        std::abs(given - asked) <= 1e-9 ? "none" : "hold"});
+                }
+            }
+            std::map<std::string, std::string> moved_by;
+            nlohmann::json report = nlohmann::json::array();
+            for (const auto& o : outcomes) {
+                moved_by[o.symbol] = o.moved_by;
+                report.push_back({{"symbol", o.symbol},
+                                  {"asked", o.asked},
+                                  {"given", o.given},
+                                  {"pass_given", o.pass_given},
+                                  {"moved_by", o.moved_by}});
+            }
+            const OnePassDay pass = portfolio->last_one_pass();
+            nlohmann::json detail = {
+                {"mode", source},
+                {"audit_id", qt_audit_id},
+                {"symbols", report},
+                {"overlay",
+                 {{"ran", pass.ran},
+                  {"refused", pass.refused},
+                  {"m", pass.risk_requested},
+                  {"binding", pass.binding_term},
+                  {"risk_scale", pass.risk_scale},
+                  {"over_limit_after_rounding", pass.over_limit_after_rounding_terms},
+                  {"over_limit_by_hold", pass.over_limit_by_hold_terms}}},
+                {"checks", desk_checks_json(pass)}};
+            if (qt_mode == qt::Mode::OVERRIDE) {
+                detail["report_only"] = true;  // the pass is a report; the ask is what trades
+            }
+            // Contract C11: the fund's hard cap. A book whose initial margin exceeds the
+            // fund's equity after today's costs is refused and left unmarked (book_source NULL),
+            // so it cannot be published; the 10:00 fallback sends the model's book.
+            detail["fund_cap"] = {{"initial_margin", total_posted_margin},
+                                  {"equity", current_portfolio_value},
+                                  {"transaction_costs", total_daily_transaction_costs}};
+            const std::string over_cap = qt::fund_cap_refusal(
+                total_posted_margin, current_portfolio_value, total_daily_transaction_costs,
+                qt_date);
+            if (!over_cap.empty()) {
+                return qt_refuse(over_cap);
+            }
+            if (!qt_store_failures.empty()) {
+                return qt_fail("the qt book of " + qt_date + " was not stored completely (" +
+                               qt_store_failure_list() +
+                               "); it is left unmarked and cannot be published: save again");
+            }
+            auto moved = qt::write_moved_by(*db, portfolio_id, combined_strategy_id, qt_date,
+                                            moved_by);
+            auto marked = save_result.is_error()
+                              ? make_error<void>(ErrorCode::DATABASE_ERROR,
+                                                 "the qt book was not stored", "QT")
+                              : qt::mark_qt_day(*db, portfolio_id, combined_strategy_id, qt_date,
+                                                source, detail);
+            if (moved.is_error() || marked.is_error()) {
+                const std::string why = moved.is_error() ? moved.error()->what()
+                                                         : marked.error()->what();
+                ERROR("QT: the qt book's record could not be written: " + why);
+                (void)qt::finish_audit_row(*db, qt_audit_id, "failed",
+                                           nlohmann::json{{"book_source", source}}, why);
+                return 1;
+            }
+            nlohmann::json result = qt::desk_result_json(outcomes, source);
+            if (qt_mode == qt::Mode::OVERRIDE) {
+                result["approved"] = true;
+            }
+            std::size_t moved_count = 0;
+            for (const auto& o : outcomes) moved_count += std::abs(o.given - o.asked) > 1e-9;
+            auto finished = qt::finish_audit_row(
+                *db, qt_audit_id, "done", result,
+                qt_mode == qt::Mode::DESK
+                    ? "desk run done: qt written for " + qt_date + "; " +
+                          std::to_string(moved_count) + " of " + std::to_string(outcomes.size()) +
+                          " symbol(s) moved from the ask"
+                    : "override booked: qt = qt_proposal for " + qt_date +
+                          "; the one pass is kept as a report in risk_detail");
+            if (finished.is_error()) {
+                ERROR("QT: " + std::string(finished.error()->what()));
+                return 1;
+            }
+            INFO("QT_" + std::string(qt_mode == qt::Mode::DESK ? "DESK" : "OVERRIDE") + " done " +
+                 portfolio_id + " " + qt_date);
+        }
+
+        // Stop every sleeve of the book, in registration order.
         INFO("Stopping strategy...");
-        auto stop_result = tf_strategy->stop();
-        if (stop_result.is_error()) {
-            ERROR("Failed to stop strategy: " + std::string(stop_result.error()->what()));
-        } else {
-            INFO("Strategy stopped successfully");
+        for (size_t i = 0; i < strategies.size(); ++i) {
+            auto stop_result = strategies[i]->stop();
+            if (stop_result.is_error()) {
+                ERROR("Failed to stop strategy" +
+                      (i == 0 ? std::string() : " " + strategy_names[i]) + ": " +
+                      std::string(stop_result.error()->what()));
+            } else if (i == 0) {
+                INFO("Strategy stopped successfully");
+            } else {
+                INFO("Strategy " + strategy_names[i] + " stopped successfully");
+            }
         }
 
         std::cout << "\n======= Daily Processing Complete =======" << std::endl;
@@ -2940,340 +5378,76 @@ int main(int argc, char* argv[]) {
 
         INFO("Daily trend following position generation completed successfully");
 
-        // Send email report with trading results (based on send_email flag)
-        if (send_email) {
-            INFO("Sending email report...");
-            try {
-                EmailSenderConfig email_config;
-                email_config.smtp_host = app_config.email.smtp_host;
-                email_config.smtp_port = app_config.email.smtp_port;
-                email_config.username = app_config.email.username;
-                email_config.password = app_config.email.password;
-                email_config.from_email = app_config.email.from_email;
-                email_config.use_tls = app_config.email.use_tls;
-                email_config.to_emails = app_config.email.to_emails;
-
-                auto email_sender = std::make_shared<EmailSender>(email_config);
-                auto email_init_result = email_sender->initialize();
-                if (email_init_result.is_error()) {
-                    ERROR("Failed to initialize email sender: " +
-                          std::string(email_init_result.error()->what()));
+        // The book e-mail (live/python_mail.hpp): the report module reads the stored day, renders
+        // it and sends it over the portfolio's email.json; the run adds what only it knows (no
+        // session the day before, a held book) and the files it exported. A QT send is recorded
+        // (live_run_metadata.sent_at, the row's email_sent_at) once the server accepted it (item
+        // 7, contract C7); with no SMTP for the QT engine nothing is sent and the command row says
+        // so. QT_MAIL_TEST_TO: a --send to that one address, recorded nowhere.
+        bool email_failed = false;  // the report was not sent: exit code 4
+        bool qt_emailed = false;
+        std::optional<nlohmann::json> qt_email_logged;
+        std::string qt_email_sent_at;  // publish: when this run's e-mail went out
+        if (send_email && !day_store_failures.empty()) {
+            std::string failed;
+            for (const auto& w : day_store_failures) failed += (failed.empty() ? "" : ", ") + w;
+            ERROR("The book e-mail is not sent: the day's stores failed (" + failed +
+                  "), and the e-mail reads the stored day");
+            email_failed = true;
+        } else if (send_email) {
+            if (qt_sends &&
+                qt::email_disabled(app_config.email.username, app_config.email.password)) {
+                qt_email_logged = nlohmann::json{{"to", app_config.email.to_emails},
+                                                 {"date", qt_date}};
+                INFO("QT_SEND e-mail disabled: not sent");
+            } else {
+                live::PythonMailRequest mail;
+                mail.portfolio_id = portfolio_id;
+                mail.date = qt_date;
+                mail.strategy_id = combined_strategy_id;
+                mail.no_session = skip_strategy_processing;
+                if (risk_module_failure) {
+                    mail.alert = risk_module_failure_text(*risk_module_failure);
+                }
+                mail.attachments = {today_filename, yesterday_filename};
+                mail.test_to = qt_mail_test_to;
+                // With per_contract_rolls on: the roll lines, the rollover box, the Front Month and
+                // cycle months, the footer sentence and the roll-bar note (report_rolls_json.hpp).
+                if (contract_rolls::PerContractSource::instance().enabled()) {
+                    const ReportRolls rolls = db->report_roll_view(
+                        report_roll_query(core::format_utc_date(now - std::chrono::hours(24)),
+                                          positions, strategy_positions_map,
+                                          all_strategy_executions, roll_status),
+                        report_tick_size);
+                    mail.rolls_json = live::report_rolls_json(rolls, all_strategy_executions,
+                                                              t1_settlement.per_contract_roll_symbols)
+                                          .dump(-1, ' ', false,
+                                                nlohmann::json::error_handler_t::replace);
+                }
+                INFO("Sending the book e-mail for " + portfolio_id + " " + qt_date);
+                if (auto why = live::send_via_python(mail, live::python_mail_settings_from_env())) {
+                    ERROR("The book e-mail was not sent: " + *why);
+                    email_failed = true;
+                } else if (!qt_mail_test_to.empty()) {
+                    // A test send: not the day's send, so nothing is recorded.
+                    qt_emailed = true;
+                    INFO("QT_SEND test e-mail sent to " + qt_mail_test_to +
+                         " (QT_MAIL_TEST_TO); sent_at not recorded");
                 } else {
-                    // Prepare email data
-                    std::string date_str =
-                        std::to_string(now_tm->tm_year + 1900) + "-" +
-                        std::string(2 - std::to_string(now_tm->tm_mon + 1).length(), '0') +
-                        std::to_string(now_tm->tm_mon + 1) + "-" +
-                        std::string(2 - std::to_string(now_tm->tm_mday).length(), '0') +
-                        std::to_string(now_tm->tm_mday);
-
-                    std::string subject = "Daily Trading Report - " + date_str;
-
-                    // Load yesterday's finalized positions for email display
-                    std::unordered_map<std::string, Position> yesterday_positions_finalized;
-                    std::map<std::string, double> yesterday_daily_metrics_final;
-                    std::unordered_map<std::string, double>
-                        yesterday_entry_prices;                                     // Day T-2 close
-                    std::unordered_map<std::string, double> yesterday_exit_prices;  // Day T-1 close
-
-                    // Calculate yesterday's date for email
-                    auto yesterday_time_email = now - std::chrono::hours(24);
-                    auto yesterday_time_t_email =
-                        std::chrono::system_clock::to_time_t(yesterday_time_email);
-
-                    // Load finalized positions from database for email
-                    std::string yesterday_date_for_email;
-                    std::ostringstream yss_email;
-                    yss_email << std::put_time(std::gmtime(&yesterday_time_t_email), "%Y-%m-%d");
-                    yesterday_date_for_email = yss_email.str();
-
-                    INFO("Loading yesterday's finalized positions for email: " +
-                         yesterday_date_for_email);
-
-                    std::string positions_query_email =
-                        "SELECT symbol, quantity, average_price, daily_realized_pnl, "
-                        "daily_unrealized_pnl, last_update "
-                        "FROM trading.positions "
-                        "WHERE strategy_id = '" +
-                        combined_strategy_id + "' AND portfolio_id = '" +
-                        coordinator_config.portfolio_id +
-                        "' AND DATE(last_update) = "
-                        "'" +
-                        yesterday_date_for_email + "'";
-
-                    auto positions_result_email = db->execute_query(positions_query_email);
-
-                    if (positions_result_email.is_ok() &&
-                        positions_result_email.value()->num_rows() > 0) {
-                        auto table_email = positions_result_email.value();
-                        // All columns are StringArrays from generic converter
-                        auto symbol_arr = std::static_pointer_cast<arrow::StringArray>(
-                            table_email->column(0)->chunk(0));
-                        auto quantity_arr = std::static_pointer_cast<arrow::StringArray>(
-                            table_email->column(1)->chunk(0));
-                        auto avg_price_arr = std::static_pointer_cast<arrow::StringArray>(
-                            table_email->column(2)->chunk(0));
-                        auto realized_pnl_arr = std::static_pointer_cast<arrow::StringArray>(
-                            table_email->column(3)->chunk(0));
-
-                        for (int64_t i = 0; i < table_email->num_rows(); ++i) {
-                            if (!symbol_arr->IsNull(i) && !quantity_arr->IsNull(i)) {
-                                std::string symbol = symbol_arr->GetString(i);
-                                double quantity = std::stod(quantity_arr->GetString(i));
-                                double avg_price = std::stod(avg_price_arr->GetString(i));
-                                double realized_pnl = std::stod(realized_pnl_arr->GetString(i));
-
-                                // Skip positions with zero quantity
-                                if (std::abs(quantity) < 0.0001)
-                                    continue;
-
-                                // Create Position object for yesterday's finalized position
-                                Position pos;
-                                pos.symbol = symbol;
-                                pos.quantity = Decimal(quantity);
-                                pos.average_price = Decimal(avg_price);
-                                pos.realized_pnl = Decimal(realized_pnl);
-
-                                yesterday_positions_finalized[symbol] = pos;
-
-                                // Populate entry and exit prices
-                                if (two_days_ago_close_prices.find(symbol) !=
-                                    two_days_ago_close_prices.end()) {
-                                    yesterday_entry_prices[symbol] =
-                                        two_days_ago_close_prices[symbol];
-                                }
-                                if (previous_day_close_prices.find(symbol) !=
-                                    previous_day_close_prices.end()) {
-                                    yesterday_exit_prices[symbol] =
-                                        previous_day_close_prices[symbol];
-                                }
-                            }
-                        }
-                        INFO("Loaded " + std::to_string(yesterday_positions_finalized.size()) +
-                             " finalized positions for email");
-
-                        // Load yesterday's daily metrics from database for accurate display
-                        std::string yesterday_metrics_query =
-                            "SELECT daily_return, daily_unrealized_pnl, daily_realized_pnl, "
-                            "daily_pnl, daily_transaction_costs "
-                            "FROM trading.live_results "
-                            "WHERE strategy_id = '" +
-                            combined_strategy_id + "' AND portfolio_id = '" +
-                            coordinator_config.portfolio_id + "' AND date = '" +
-                            yesterday_date_for_email +
-                            "' "
-                            "ORDER BY date DESC LIMIT 1";
-
-                        INFO("Loading yesterday's daily metrics from live_results: " +
-                             yesterday_metrics_query);
-                        auto yesterday_metrics_result = db->execute_query(yesterday_metrics_query);
-
-                        if (yesterday_metrics_result.is_ok() &&
-                            yesterday_metrics_result.value()->num_rows() > 0) {
-                            auto metrics_table = yesterday_metrics_result.value();
-                            INFO("Retrieved " + std::to_string(metrics_table->num_rows()) +
-                                 " rows from live_results");
-
-                            auto daily_return_arr = std::static_pointer_cast<arrow::StringArray>(
-                                metrics_table->column(0)->chunk(0));
-                            auto daily_unrealized_arr =
-                                std::static_pointer_cast<arrow::StringArray>(
-                                    metrics_table->column(1)->chunk(0));
-                            auto daily_realized_arr = std::static_pointer_cast<arrow::StringArray>(
-                                metrics_table->column(2)->chunk(0));
-                            auto daily_total_arr = std::static_pointer_cast<arrow::StringArray>(
-                                metrics_table->column(3)->chunk(0));
-                            auto daily_commissions_arr =
-                                std::static_pointer_cast<arrow::StringArray>(
-                                    metrics_table->column(4)->chunk(0));
-
-                            if (!daily_return_arr->IsNull(0)) {
-                                yesterday_daily_metrics_final["Daily Return"] =
-                                    std::stod(daily_return_arr->GetString(0));
-                                INFO("Daily Return: " + daily_return_arr->GetString(0));
-                            }
-                            if (!daily_unrealized_arr->IsNull(0)) {
-                                yesterday_daily_metrics_final["Daily Unrealized PnL"] =
-                                    std::stod(daily_unrealized_arr->GetString(0));
-                                INFO("Daily Unrealized PnL: " + daily_unrealized_arr->GetString(0));
-                            }
-                            if (!daily_realized_arr->IsNull(0)) {
-                                yesterday_daily_metrics_final["Daily Realized PnL"] =
-                                    std::stod(daily_realized_arr->GetString(0));
-                                INFO("Daily Realized PnL: " + daily_realized_arr->GetString(0));
-                            }
-                            if (!daily_total_arr->IsNull(0)) {
-                                yesterday_daily_metrics_final["Daily Total PnL"] =
-                                    std::stod(daily_total_arr->GetString(0));
-                                INFO("Daily Total PnL: " + daily_total_arr->GetString(0));
-                            }
-
-                            if (!daily_commissions_arr->IsNull(0)) {
-                                yesterday_daily_metrics_final["Daily Transaction Costs"] =
-                                    std::stod(daily_commissions_arr->GetString(0));
-                                INFO("Daily Transaction Costs: " +
-                                     daily_commissions_arr->GetString(0));
-                            }
-
-                            INFO("Successfully loaded yesterday's daily metrics from live_results");
+                    qt_emailed = true;
+                    INFO("The book e-mail was sent");
+                    if (qt_sends) {
+                        auto marked = qt::record_sent(*db, qt_audit ? qt_audit_id : 0,
+                                                      portfolio_id, combined_strategy_id, qt_date);
+                        if (marked.is_error()) {
+                            ERROR("QT_SEND the e-mail was sent but sent_at could not be "
+                                  "recorded: " +
+                                  std::string(marked.error()->what()));
                         } else {
-                            if (yesterday_metrics_result.is_error()) {
-                                ERROR("Failed to query live_results: " +
-                                      std::string(yesterday_metrics_result.error()->what()));
-                            } else {
-                                WARN("No rows found in live_results for date: " +
-                                     yesterday_date_for_email);
-                            }
-                            // Fallback: calculate from positions if database query fails
-                            double yesterday_daily_realized = 0.0;
-                            for (const auto& [symbol, pos] : yesterday_positions_finalized) {
-                                yesterday_daily_realized += pos.realized_pnl.as_double();
-                            }
-                            yesterday_daily_metrics_final["Daily Realized PnL"] =
-                                yesterday_daily_realized;
-                            INFO(
-                                "Calculated yesterday's metrics from positions (fallback) - Daily "
-                                "Realized PnL: " +
-                                std::to_string(yesterday_daily_realized));
+                            qt_email_sent_at = marked.value();
                         }
-
-                    } else {
-                        INFO("No finalized positions found for yesterday's email table");
-                    }
-
-                    // Create strategy metrics map with all relevant metrics organized by category
-                    std::map<std::string, double> strategy_metrics;
-
-                    // Load today's stored metrics from live_results (including Sharpe, Sortino,
-                    // etc.)
-                    LiveResultsRow today_row;
-                    bool has_today_row_metrics = false;
-                    try {
-                        auto today_row_result = data_loader->load_live_results(
-                            combined_strategy_id, coordinator_config.portfolio_id, now);
-                        if (today_row_result.is_ok()) {
-                            today_row = today_row_result.value();
-                            has_today_row_metrics = true;
-                        } else {
-                            WARN("Failed to load today's live_results row for email metrics: " +
-                                 std::string(today_row_result.error()->what()));
-                        }
-                    } catch (const std::exception& e) {
-                        WARN("Exception while loading today's live_results for email metrics: " +
-                             std::string(e.what()));
-                    }
-
-                    // Performance Metrics
-                    strategy_metrics["Daily Return"] = daily_return;
-                    strategy_metrics["Daily Unrealized PnL"] = daily_unrealized_pnl;
-                    strategy_metrics["Daily Realized PnL"] = daily_realized_pnl;
-                    strategy_metrics["Daily Total PnL"] = daily_pnl;
-                    strategy_metrics["Total Cumulative Return"] = total_cumulative_return_pct;
-                    strategy_metrics["Total Annualized Return"] = total_return_annualized;
-                    strategy_metrics["Total Unrealized PnL"] = total_unrealized_pnl;
-                    strategy_metrics["Total Realized PnL"] = total_realized_pnl;
-                    strategy_metrics["Total PnL"] = total_pnl;
-
-                    if (has_today_row_metrics) {
-                        // Risk-adjusted and distribution metrics from live_results
-                        strategy_metrics["Sharpe Ratio"] = today_row.sharpe_ratio;
-                        strategy_metrics["Sortino Ratio"] = today_row.sortino_ratio;
-                        strategy_metrics["Max Drawdown"] = today_row.max_drawdown;
-                        strategy_metrics["Volatility"] = today_row.volatility;
-                        strategy_metrics["Win Rate"] = today_row.win_rate;
-                        strategy_metrics["Average Win"] = today_row.avg_win;
-                        strategy_metrics["Average Loss"] = today_row.avg_loss;
-                        strategy_metrics["Profit Factor"] = today_row.profit_factor;
-                        strategy_metrics["Best Day"] = today_row.best_day;
-                        strategy_metrics["Worst Day"] = today_row.worst_day;
-                        strategy_metrics["Downside Deviation"] = today_row.downside_deviation;
-                        strategy_metrics["Gross Profit"] = today_row.gross_profit;
-                        strategy_metrics["Gross Loss"] = today_row.gross_loss;
-                        // Removed Total Trades - will be implemented properly later with closing trades logic
-                        strategy_metrics["Winning Days"] =
-                            static_cast<double>(today_row.winning_days);
-                        strategy_metrics["Losing Days"] =
-                            static_cast<double>(today_row.losing_days);
-                        // Flat Days = total - winning - losing (Sat/Sun/holidays w/ zero PnL).
-                        // Shown explicitly in email so the total math adds up cleanly.
-                        strategy_metrics["Flat Days"] = static_cast<double>(
-                            std::max(0, today_row.total_days - today_row.winning_days -
-                                            today_row.losing_days));
-                        strategy_metrics["Total Days"] = static_cast<double>(today_row.total_days);
-                    }
-                    // Portfolio VaR is always sourced from the live risk evaluation,
-                    // separate from historical volatility stored in live_results
-                    if (risk_eval.is_ok()) {
-                        strategy_metrics["Portfolio VaR"] = risk_eval.value().portfolio_var * 100.0;
-                    }
-                    strategy_metrics["Total Transaction Costs"] =
-                        total_transaction_costs_cumulative;
-                    strategy_metrics["Current Portfolio Value"] = current_portfolio_value;
-
-                    // Leverage Metrics - Calculate values from position analysis
-                    double gross_leverage_calc = (current_portfolio_value != 0.0)
-                                                     ? (gross_notional / current_portfolio_value)
-                                                     : 0.0;
-                    double net_leverage_calc = (current_portfolio_value != 0.0)
-                                                   ? (net_notional / current_portfolio_value)
-                                                   : 0.0;
-
-                    strategy_metrics["Gross Leverage"] = gross_leverage_calc;
-                    strategy_metrics["Net Leverage"] = net_leverage_calc;
-                    strategy_metrics["Equity-to-Margin Ratio"] = equity_to_margin_ratio;
-
-                    // Risk & Liquidity Metrics
-                    strategy_metrics["Margin Cushion"] =
-                        margin_cushion * 100.0;  // Convert to percentage
-                    strategy_metrics["Margin Posted"] = total_posted_margin;
-                    strategy_metrics["Cash Available"] =
-                        current_portfolio_value - total_posted_margin;
-
-                    // Note: yesterday_daily_metrics_final is now loaded AFTER database updates
-                    // above So we don't need to create it here anymore
-
-                    // Generate email body with is_daily_strategy flag set to true and current
-                    // prices. Pass strategy_positions_map and all_strategy_executions for
-                    // per-strategy tables.
-                    std::string email_body = email_sender->generate_trading_report_body(
-                        strategy_positions_map,  // Per-strategy positions for grouped tables
-                        positions,
-                        risk_eval.is_ok() ? std::make_optional(risk_eval.value()) : std::nullopt,
-                        strategy_metrics, all_strategy_executions, date_str,
-                        portfolio_id,                 // Portfolio name for email header
-                        true,                         // is_daily_strategy
-                        previous_day_close_prices,    // Pass Day T-1 close prices for today's
-                                                      // positions
-                        db,                           // Pass database for symbols reference table
-                        previous_strategy_positions,  // Per-strategy yesterday's positions for
-                                                      // grouped tables
-                        yesterday_exit_prices,   // Day T-1 close prices for yesterday's positions
-                        yesterday_entry_prices,  // Day T-2 close prices for yesterday's positions
-                        yesterday_daily_metrics_final  // Yesterday's metrics
-                    );
-
-                    // Send email with CSV attachments: today's positions and yesterday's finalized
-                    // (if available)
-                    std::vector<std::string> attachments = {today_filename};
-                    if (!yesterday_filename.empty()) {
-                        attachments.push_back(yesterday_filename);
-                    }
-
-                    auto send_result =
-                        email_sender->send_email(subject, email_body, true, attachments);
-                    if (send_result.is_error()) {
-                        ERROR("Failed to send email: " + std::string(send_result.error()->what()));
-                    } else {
-                        std::string attachment_list = today_filename;
-                        if (!yesterday_filename.empty()) {
-                            attachment_list += ", " + yesterday_filename;
-                        }
-                        INFO("Email report sent successfully with CSV attachments: " +
-                             attachment_list);
                     }
                 }
-            } catch (const std::exception& e) {
-                ERROR("Exception during email sending: " + std::string(e.what()));
             }
         } else {
             INFO("Email reporting disabled");
@@ -3282,7 +5456,84 @@ int main(int argc, char* argv[]) {
         std::cerr << "At end of main: initialized=" << Logger::instance().is_initialized()
                   << std::endl;
 
-        return 0;
+        if (qt_sends) {
+            // Contract C7: the day was published before the pipeline ran (an approval or the
+            // fallback, above) or before this run (--send); this is the e-mail's outcome.
+            const bool qt_sent_before = !qt_email_sent_before.at.empty();
+            nlohmann::json result = {{"emailed", qt_emailed || qt_sent_before}};
+            if (qt_audit) {
+                result["published"] = true;
+                result["publish_source"] =
+                    qt_mode == qt::Mode::FALLBACK ? qt::kSourceFallback : qt::kSourceDesk;
+            }
+            if (qt_sent_before) {
+                result["email_sent_at"] = qt_email_sent_before.at;
+                if (qt_email_sent_before.row_id > 0) {
+                    result["email_sent_by"] = qt_email_sent_before.row_id;
+                }
+            }
+            if (!qt_mail_test_to.empty()) result["email_test_to"] = qt_mail_test_to;
+            if (qt_email_logged) {
+                result["email_disabled"] = true;
+                result["email"] = *qt_email_logged;
+            }
+            const std::string what = qt_mode == qt::Mode::FALLBACK
+                                         ? "published " + qt_date + " with the model's book (" +
+                                               (qt_audit ? qt_audit->requested_by : "") + ")"
+                                     : qt_mode == qt::Mode::PUBLISH ? "approved " + qt_date
+                                                                    : "sent " + qt_date;
+            if (!qt_emailed && !qt_email_logged && !qt_sent_before) {
+                // The day stays published (frozen); the scheduler's next send retries the e-mail.
+                const std::string why = "the daily e-mail could not be sent";
+                ERROR("QT_SEND " + portfolio_id + " " + qt_date + ": " + why);
+                if (qt_audit) {
+                    result["send_error"] = why;
+                    (void)qt::finish_audit_row(*db, qt_audit_id, "done", result,
+                                               what + "; " + why +
+                                                   ": the scheduler's next send retries it");
+                }
+                return 1;
+            }
+            if (qt_audit) {
+                auto finished = qt::finish_audit_row(
+                    *db, qt_audit_id, "done", result,
+                    qt_sent_before
+                        ? what + ": the daily e-mail had already been sent (" +
+                              qt_email_sent_before.at + "); not sent again"
+                    : qt_emailed
+                        ? what + ": daily e-mail and CSV sent from the stored qt book"
+                        : what + ": e-mail disabled on this engine, the body is in result.email");
+                if (finished.is_error()) {
+                    ERROR("QT: " + std::string(finished.error()->what()));
+                    return 1;
+                }
+            }
+            INFO("QT_SEND done " + portfolio_id + " " + qt_date + ": " +
+                 (qt_emailed ? "e-mailed" : qt_sent_before ? "already sent" : "e-mail disabled"));
+        }
+        if (qt_failed) {
+            ERROR("QT_SEED the desk's books for " + qt_date + " were not written; exiting 1");
+            return 1;
+        }
+        if (!qt_store_failures.empty()) {
+            ERROR("QT_ALERT " + portfolio_id + " " + qt_date + ": stores failed (" +
+                  qt_store_failure_list() + "); exiting 1");
+            return 1;
+        }
+        if (qt_finalize_failed) {
+            ERROR("QT_ALERT the system book's Day T-1 was not finalised; exiting 1");
+            return 1;
+        }
+
+        if (risk_module_failure) {
+            ERROR("RISK_MODULE_FAILURE the day is stored with the book held; exiting " +
+                  std::to_string(kRiskModuleFailureExitCode));
+        }
+        if (email_failed && !risk_module_failure) {
+            ERROR("EMAIL_FAILED the day is stored; the report was not delivered; exiting " +
+                  std::to_string(live::kBookEmailFailureExitCode));
+        }
+        return live::futures_run_exit_code(risk_module_failure, email_failed);
 
     } catch (const std::exception& e) {
         std::cerr << "Unexpected error: " << e.what() << std::endl;

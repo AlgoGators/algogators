@@ -1,7 +1,13 @@
 // src/instruments/instrument_registry.cpp
 #include "trade_ngin/instruments/instrument_registry.hpp"
 #include <arrow/api.h>
+#include <algorithm>
+#include <cmath>
+#include <fstream>
+#include <nlohmann/json.hpp>
+#include <unordered_set>
 #include "trade_ngin/core/logger.hpp"
+#include "trade_ngin/data/conversion_utils.hpp"
 
 namespace trade_ngin {
 
@@ -37,12 +43,23 @@ std::shared_ptr<Instrument> InstrumentRegistry::get_instrument(const std::string
 
     // Strip variant suffix (e.g., "ZC.v.0" -> "ZC", "ES.v.0" -> "ES") before any lookup or remap
     auto v_pos = cleaned_symbol.find(".v.");
-    if (v_pos != std::string::npos) {
+    const bool had_variant_suffix = v_pos != std::string::npos;
+    if (had_variant_suffix) {
         cleaned_symbol = cleaned_symbol.substr(0, v_pos);
     }
 
-    // Handle special cases for micro futures
-    if (cleaned_symbol == "ES") {
+    // An exact match wins before any micro-futures remap: bare equity tickers
+    // collide with futures roots (NYSE "ES" is Eversource Energy). A .v.
+    // variant suffix marks a futures continuous series, so suffixed symbols
+    // still remap unconditionally.
+    if (!had_variant_suffix && instruments_.count(cleaned_symbol) > 0) {
+        // fall through to the map lookup below with no remap
+    } else
+    // Handle special cases for micro futures (off while listing dates are in force: the full-size
+    // row is then the contract the book trades before the micro's listing date)
+    if (!full_size_remap_) {
+        // no remap: the root's own row or nothing
+    } else if (cleaned_symbol == "ES") {
         cleaned_symbol = "MES";
     } else if (cleaned_symbol == "YM") {
         cleaned_symbol = "MYM";
@@ -97,6 +114,26 @@ std::shared_ptr<OptionInstrument> InstrumentRegistry::get_option_instrument(
     return std::dynamic_pointer_cast<OptionInstrument>(instrument);
 }
 
+InstrumentRegistry& InstrumentRegistry::instance() {
+    static InstrumentRegistry instance;
+    return instance;
+}
+
+Result<void> InstrumentRegistry::initialize_without_database() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    db_ = nullptr;
+    initialized_ = true;
+    return Result<void>();
+}
+
+void InstrumentRegistry::clear() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    instruments_.clear();
+    db_ = nullptr;
+    initialized_ = false;
+    full_size_remap_ = true;
+}
+
 Result<void> InstrumentRegistry::load_instruments() {
     if (!initialized_) {
         return make_error<void>(ErrorCode::NOT_INITIALIZED, "InstrumentRegistry not initialized",
@@ -123,27 +160,23 @@ Result<void> InstrumentRegistry::load_instruments() {
 
         // Check first row data for each column
         if (table->num_rows() > 0) {
+            // Phase 6 §1.17a: debug logger via type-aware safe_get_string
+            // (handles double/int/string columns uniformly; logs WARN on
+             // null instead of silently showing "NULL").
             INFO("First row values:");
             for (int i = 0; i < table->num_columns(); i++) {
                 auto field = table->schema()->field(i);
                 auto column = table->column(i);
                 if (column->num_chunks() > 0) {
-                    auto chunk = column->chunk(0);
-                    std::string value = "NULL";
-                    if (field->type()->id() == arrow::Type::DOUBLE) {
-                        auto array = std::static_pointer_cast<arrow::DoubleArray>(chunk);
-                        if (!array->IsNull(0)) {
-                            value = std::to_string(array->Value(0));
-                        }
-                    } else if (field->type()->id() == arrow::Type::STRING) {
-                        auto array = std::static_pointer_cast<arrow::StringArray>(chunk);
-                        if (!array->IsNull(0)) {
-                            value = array->GetString(0);
-                        }
-                    }
-                    INFO("    " + field->name() + ": " + value);
+                    auto r = DataConversionUtils::safe_get_string(column, 0, field->name());
+                    INFO("    " + field->name() + ": " + (r.is_ok() ? r.value() : std::string("NULL")));
                 }
             }
+        }
+
+        if (!table->GetColumnByName("Fee Per Contract")) {
+            WARN("metadata.contract_metadata has no \"Fee Per Contract\" column (migration "
+                 "014); the cost model charges its configured fee on every future");
         }
 
         int rows_loaded = 0;
@@ -174,6 +207,68 @@ Result<void> InstrumentRegistry::load_instruments() {
                                 std::string("Error loading instruments: ") + e.what(),
                                 "InstrumentRegistry");
     }
+}
+
+Result<void> InstrumentRegistry::load_equity_instruments(
+    const std::vector<std::string>& symbols,
+    const std::string& exchange_lookup_path) {
+    if (!initialized_) {
+        return make_error<void>(ErrorCode::NOT_INITIALIZED, "InstrumentRegistry not initialized",
+                                "InstrumentRegistry");
+    }
+
+    // Load exchange lookup table from JSON if provided
+    std::unordered_map<std::string, std::string> exchange_map;
+    if (!exchange_lookup_path.empty()) {
+        try {
+            std::ifstream file(exchange_lookup_path);
+            if (file.is_open()) {
+                nlohmann::json j;
+                file >> j;
+                for (auto& [exchange, symbols_array] : j.items()) {
+                    if (exchange.front() == '_') continue;  // Skip comment fields
+                    for (const auto& sym : symbols_array) {
+                        exchange_map[sym.get<std::string>()] = exchange;
+                    }
+                }
+                INFO("Loaded exchange lookup with " + std::to_string(exchange_map.size()) +
+                     " symbols from " + exchange_lookup_path);
+            } else {
+                WARN("Could not open exchange lookup file: " + exchange_lookup_path +
+                     " -- falling back to NYSE");
+            }
+        } catch (const std::exception& e) {
+            WARN("Error loading exchange lookup: " + std::string(e.what()) +
+                 " -- falling back to NYSE");
+        }
+    }
+
+    int registered = 0;
+    for (const auto& symbol : symbols) {
+        if (has_instrument(symbol)) {
+            continue;
+        }
+
+        EquitySpec spec;
+        // Determine exchange from lookup table, default to NYSE
+        auto ex_it = exchange_map.find(symbol);
+        spec.exchange = (ex_it != exchange_map.end()) ? ex_it->second : "NYSE";
+        spec.currency = "USD";
+        spec.tick_size = 0.01;
+        // Match IBKR Pro default (also used by AssetCostConfigRegistry::get_equity_default_config).
+        // Production cost path is TransactionCostManager; this default keeps the
+        // instrument-level commission accessor consistent for callers that query it.
+        spec.commission_per_share = 0.005;
+
+        register_instrument(symbol, std::make_shared<EquityInstrument>(symbol, std::move(spec)));
+        registered++;
+    }
+
+    INFO("Registered " + std::to_string(registered) + " equity instruments (" +
+         std::to_string(symbols.size()) + " total symbols, " +
+         std::to_string(symbols.size() - registered) + " already existed)");
+
+    return Result<void>();
 }
 
 std::unordered_map<std::string, std::shared_ptr<Instrument>>
@@ -219,6 +314,13 @@ std::vector<std::shared_ptr<Instrument>> InstrumentRegistry::get_instruments_by_
     return result;
 }
 
+void InstrumentRegistry::register_instrument(const std::string& symbol,
+                                              std::shared_ptr<Instrument> instrument) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    instruments_[symbol] = std::move(instrument);
+    DEBUG("Registered instrument: " + symbol);
+}
+
 bool InstrumentRegistry::has_instrument(const std::string& symbol) const {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -226,12 +328,23 @@ bool InstrumentRegistry::has_instrument(const std::string& symbol) const {
 
     // Strip variant suffix (e.g., "ZC.v.0" -> "ZC", "ES.v.0" -> "ES") before any lookup or remap
     auto v_pos = cleaned_symbol.find(".v.");
-    if (v_pos != std::string::npos) {
+    const bool had_variant_suffix = v_pos != std::string::npos;
+    if (had_variant_suffix) {
         cleaned_symbol = cleaned_symbol.substr(0, v_pos);
     }
 
-    // Handle special cases for micro futures
-    if (cleaned_symbol == "ES") {
+    // An exact match wins before any micro-futures remap: bare equity tickers
+    // collide with futures roots (NYSE "ES" is Eversource Energy). A .v.
+    // variant suffix marks a futures continuous series, so suffixed symbols
+    // still remap unconditionally.
+    if (!had_variant_suffix && instruments_.count(cleaned_symbol) > 0) {
+        // fall through to the map lookup below with no remap
+    } else
+    // Handle special cases for micro futures (off while listing dates are in force: the full-size
+    // row is then the contract the book trades before the micro's listing date)
+    if (!full_size_remap_) {
+        // no remap: the root's own row or nothing
+    } else if (cleaned_symbol == "ES") {
         cleaned_symbol = "MES";
     } else if (cleaned_symbol == "YM") {
         cleaned_symbol = "MYM";
@@ -247,30 +360,21 @@ std::shared_ptr<Instrument> InstrumentRegistry::create_instrument_from_db(
     INFO("Creating instrument from database row: " + std::to_string(row));
 
     try {
-        // Helper to get string from table
+        // Phase 6 §1.17a: per-row helpers route through safe_get_*
+        // (handles utf8-stored numerics and surfaces parse errors as WARNs
+        // instead of returning a silent 0.0 / empty string).
         auto get_string = [&table, row](const std::string& col_name) -> std::string {
             auto col = table->GetColumnByName(col_name);
-            if (!col || col->num_chunks() == 0)
-                return "";
-
-            auto string_array = std::static_pointer_cast<arrow::StringArray>(col->chunk(0));
-            if (string_array->IsNull(row))
-                return "";
-
-            return string_array->GetString(row);
+            if (!col) return "";
+            auto r = DataConversionUtils::safe_get_string(col, row, col_name);
+            return r.is_ok() ? r.value() : "";
         };
 
-        // Helper to get double from table
         auto get_double = [&table, row](const std::string& col_name) -> double {
             auto col = table->GetColumnByName(col_name);
-            if (!col || col->num_chunks() == 0)
-                return 0.0;
-
-            auto double_array = std::static_pointer_cast<arrow::DoubleArray>(col->chunk(0));
-            if (double_array->IsNull(row))
-                return 0.0;
-
-            return double_array->Value(row);
+            if (!col) return 0.0;
+            auto r = DataConversionUtils::safe_get_double(col, row, col_name);
+            return r.is_ok() ? r.value() : 0.0;
         };
 
         // Extract common fields
@@ -300,8 +404,9 @@ std::shared_ptr<Instrument> InstrumentRegistry::create_instrument_from_db(
         }
 
         double min_tick = get_double("Minimum Price Fluctuation");
-        std::string tick_size = get_string("Tick Size");
-        double commission = 0.0;  // Not in the metadata, set a default
+        // Asset-type-aware default. Futures spec doesn't carry commission; equities
+        // get IBKR Pro $0.005/share to match get_equity_default_config().
+        double commission = (asset_type == AssetType::EQUITY) ? 0.005 : 0.0;
 
         // Create instrument based on asset type
         switch (asset_type) {
@@ -311,8 +416,40 @@ std::shared_ptr<Instrument> InstrumentRegistry::create_instrument_from_db(
                 spec.exchange = exchange;
                 spec.currency = "USD";  // Default
                 spec.multiplier = contract_size;
-                spec.tick_size = min_tick;
+                // "Tick Size" is one tick in price units (the unit the close is stored in);
+                // "Minimum Price Fluctuation" is the same tick in dollars per contract, the
+                // tick value. Each goes to the field named for it.
+                spec.tick_size = get_double("Tick Size");
+                spec.tick_value = min_tick;
                 spec.commission_per_contract = commission;
+                if (spec.tick_size <= 0.0) {
+                    WARN("Metadata row " + symbol + " has no positive \"Tick Size\"");
+                    spec.tick_size = 0.0;
+                } else if (min_tick > 0.0) {
+                    // The tick value must equal the tick times the contract size. A row updated
+                    // in one column and not the other (a contract-size change without its tick)
+                    // is reported, not repaired.
+                    const double implied = spec.tick_size * contract_size;
+                    if (std::abs(implied - min_tick) > 1e-9 * std::max(1.0, std::abs(min_tick))) {
+                        WARN("Metadata row " + symbol + " is inconsistent: \"Tick Size\" " +
+                             std::to_string(spec.tick_size) + " x \"Contract Size\" " +
+                             std::to_string(contract_size) + " = " + std::to_string(implied) +
+                             " but \"Minimum Price Fluctuation\" is " + std::to_string(min_tick));
+                    }
+                }
+                // The fee the cost model charges per contract, when the table has the column
+                // (migration 014). It is also the instrument's own commission.
+                if (auto fee_col = table->GetColumnByName("Fee Per Contract")) {
+                    auto fee = DataConversionUtils::safe_get_double(fee_col, row,
+                                                                    "Fee Per Contract");
+                    if (fee.is_ok() && fee.value() >= 0.0) {
+                        spec.fee_per_contract = fee.value();
+                        spec.commission_per_contract = fee.value();
+                    } else {
+                        WARN("Metadata row " + symbol + " has no usable \"Fee Per Contract\"; "
+                             "the cost model charges its configured fee for it");
+                    }
+                }
 
                 // Extract futures-specific fields
                 spec.initial_margin = get_double("Overnight Initial Margin");
