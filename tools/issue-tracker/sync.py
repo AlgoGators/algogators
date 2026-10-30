@@ -15,7 +15,7 @@ PL={'equities':'equities','regime':'regime detection','data':'data','qt':'QT pla
 LP={v:k for k,v in PL.items()}
 STATUSES=['In progress','PR open','Draft PR open','Fix written, no PR','Ready to start','Under review','Blocked','Parked','Reference','Done']
 def gql(q):
-    r=subprocess.run(['gh','api','graphql','-f','query='+q],capture_output=True,text=True)
+    r=subprocess.run(['gh','api','graphql','-f','query='+q],capture_output=True,text=True,encoding='utf-8')
     if r.returncode: sys.exit('GitHub query failed: '+r.stderr[:400])
     return json.loads(r.stdout)['data']
 def unref(t): return re.sub(r'AlgoGators/([\w-]+)#(\d+)',r'\1 #\2',t or '')
@@ -37,7 +37,7 @@ def parse_status(comments):
         if extra: f['notes']=(f.get('notes','')+' '+' '.join(extra)).strip()
         return f
     return None
-base=json.load(open(os.path.join(HERE,'base.json')))
+base=json.load(open(os.path.join(HERE,'base.json'),encoding='utf-8'))
 B={(i['repo'],i['n']):i for i in base['issues']}
 BP={(p['repo'],p['n']):p for p in base['prs']}
 # order of work: the pinned issue trade-ngin #153 lists every issue, top first
@@ -142,16 +142,16 @@ for p in ['Fabio','Oliver','Sivan','Gaby','Pranav','John Riley','Dom']+sorted(se
     queues[p]=[dict(id=i['id'],proposed=False,start=(k==first)) for k,i in enumerate(lst)]
     for k,i in enumerate(lst,1): i['order'].append(dict(name=p,n=k,of=len(lst),proposed=False))
 projects=base['projects']+([dict(key='unsorted',name='Not yet sorted into a project',desc="New issues without a 'project:' label.")] if any(i['project']=='unsorted' for i in issues) else [])
-out=dict(issues=issues+closed,prs=prs,rotation=base['rotation'],people=[],queues=queues,projects=projects,updated=datetime.datetime.now().strftime('%-d %B %Y, %H:%M'))
+out=dict(issues=issues+closed,prs=prs,rotation=base['rotation'],people=[],queues=queues,projects=projects,updated=(lambda n: f'{n.day} {n:%B %Y, %H:%M}')(datetime.datetime.now()))
 s=mig(json.dumps(out,separators=(',',':'))).replace('</','<\\/')
-t=open(os.path.join(HERE,'template.html')).read()
+t=open(os.path.join(HERE,'template.html'),encoding='utf-8').read()
 args=[a for a in sys.argv[1:] if not a.startswith('--')]
 dest=args[0] if args else os.path.join(HERE,'algogators-issue-tracker.html')
 page=t.replace('__DATA__',s)
 if '--standalone' in sys.argv:  # a full web page, for hosting as a file or on Pages
     page='<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0}[hidden]{display:none!important}</style></head><body>\n'+page+'\n</body></html>'
 os.makedirs(os.path.dirname(os.path.abspath(dest)),exist_ok=True)
-open(dest,'w').write(page)
+open(dest,'w',encoding='utf-8').write(page)
 from collections import Counter
 print(f"Open issues: {len(issues)}. Open PRs: {len(prs)} ({sum(1 for p in prs if p['lane']=='dep')} Dependabot). Status: {dict(Counter(i['status'] for i in issues))}")
 def show(title,rows):
