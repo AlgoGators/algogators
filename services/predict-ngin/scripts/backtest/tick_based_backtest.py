@@ -135,7 +135,6 @@ class TickBacktest:
             # Check if open position should exit
             if open_position:
                 entry_ts = open_position["entry_timestamp"]
-                entry_price = open_position["entry_price"]
                 target = open_position["target"]
                 stop = open_position["stop"]
                 timeout_ms = open_position["timeout_ms"]

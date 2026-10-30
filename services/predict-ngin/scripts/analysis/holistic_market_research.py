@@ -453,7 +453,7 @@ def create_comprehensive_visualizations(
     ax1 = axes[0, 0]
     top_cats = category_stats.head(10)
     colors = plt.cm.viridis(np.linspace(0, 1, len(top_cats)))
-    bars = ax1.barh(range(len(top_cats)), top_cats["total_volume"] / 1e9, color=colors)
+    ax1.barh(range(len(top_cats)), top_cats["total_volume"] / 1e9, color=colors)
     ax1.set_yticks(range(len(top_cats)))
     ax1.set_yticklabels(top_cats.index, fontsize=10)
     ax1.set_xlabel('Total Volume (Billions USD)', fontsize=11, fontweight='bold')
@@ -466,7 +466,7 @@ def create_comprehensive_visualizations(
     
     # Top right: Market count by category
     ax2 = axes[0, 1]
-    bars = ax2.barh(range(len(top_cats)), top_cats["market_count"], color=colors)
+    ax2.barh(range(len(top_cats)), top_cats["market_count"], color=colors)
     ax2.set_yticks(range(len(top_cats)))
     ax2.set_yticklabels(top_cats.index, fontsize=10)
     ax2.set_xlabel('Number of Markets', fontsize=11, fontweight='bold')
@@ -479,7 +479,7 @@ def create_comprehensive_visualizations(
     
     # Bottom left: Average volume per market
     ax3 = axes[1, 0]
-    bars = ax3.barh(range(len(top_cats)), top_cats["avg_volume"] / 1e6, color=colors)
+    ax3.barh(range(len(top_cats)), top_cats["avg_volume"] / 1e6, color=colors)
     ax3.set_yticks(range(len(top_cats)))
     ax3.set_yticklabels(top_cats.index, fontsize=10)
     ax3.set_xlabel('Average Volume per Market (Millions USD)', fontsize=11, fontweight='bold')
@@ -541,7 +541,7 @@ def create_comprehensive_visualizations(
         # Liquidity by category
         ax4 = axes[1, 1]
         liq_by_cat = markets_df.groupby("category")["liquidity"].mean().sort_values(ascending=False).head(10)
-        bars = ax4.barh(range(len(liq_by_cat)), liq_by_cat / 1e6, color=plt.cm.viridis(np.linspace(0, 1, len(liq_by_cat))))
+        ax4.barh(range(len(liq_by_cat)), liq_by_cat / 1e6, color=plt.cm.viridis(np.linspace(0, 1, len(liq_by_cat))))
         ax4.set_yticks(range(len(liq_by_cat)))
         ax4.set_yticklabels(liq_by_cat.index, fontsize=10)
         ax4.set_xlabel('Average Liquidity (Millions USD)', fontsize=11, fontweight='bold')
@@ -585,7 +585,7 @@ def create_comprehensive_visualizations(
         if lifecycle_stats.get("age_buckets"):
             ax3 = axes[1, 0]
             buckets_df = pd.DataFrame(lifecycle_stats["age_buckets"])
-            bars = ax3.bar(range(len(buckets_df)), buckets_df["avg_volume"] / 1e6,
+            ax3.bar(range(len(buckets_df)), buckets_df["avg_volume"] / 1e6,
                           color=plt.cm.plasma(np.linspace(0, 0.9, len(buckets_df))))
             ax3.set_xticks(range(len(buckets_df)))
             ax3.set_xticklabels(buckets_df["age_range"], rotation=45, ha='right', fontsize=9)
@@ -596,7 +596,7 @@ def create_comprehensive_visualizations(
         # Market count by age bucket
         if lifecycle_stats.get("age_buckets"):
             ax4 = axes[1, 1]
-            bars = ax4.bar(range(len(buckets_df)), buckets_df["market_count"],
+            ax4.bar(range(len(buckets_df)), buckets_df["market_count"],
                           color=plt.cm.plasma(np.linspace(0, 0.9, len(buckets_df))))
             ax4.set_xticks(range(len(buckets_df)))
             ax4.set_xticklabels(buckets_df["age_range"], rotation=45, ha='right', fontsize=9)
@@ -693,7 +693,7 @@ def create_comprehensive_visualizations(
     # Top categories by market count
     ax7 = fig.add_subplot(gs[1, 2])
     top_10_cats = category_stats.head(10)
-    bars = ax7.barh(range(len(top_10_cats)), top_10_cats["market_count"],
+    ax7.barh(range(len(top_10_cats)), top_10_cats["market_count"],
                    color=plt.cm.viridis(np.linspace(0, 1, len(top_10_cats))))
     ax7.set_yticks(range(len(top_10_cats)))
     ax7.set_yticklabels(top_10_cats.index, fontsize=8)
@@ -704,7 +704,7 @@ def create_comprehensive_visualizations(
     
     # Volume by category (avg)
     ax8 = fig.add_subplot(gs[1, 3])
-    bars = ax8.barh(range(len(top_10_cats)), top_10_cats["avg_volume"] / 1e6,
+    ax8.barh(range(len(top_10_cats)), top_10_cats["avg_volume"] / 1e6,
                    color=plt.cm.viridis(np.linspace(0, 1, len(top_10_cats))))
     ax8.set_yticks(range(len(top_10_cats)))
     ax8.set_yticklabels(top_10_cats.index, fontsize=8)

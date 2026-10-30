@@ -15,7 +15,6 @@ Outputs data/vendor/alpha_decay/predexon/pair_month.parquet
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -84,4 +83,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

@@ -60,7 +60,8 @@ def main():
         od = OUT / c
         od.mkdir(parents=True, exist_ok=True)
         cal = g.get(f"{H}/{c}/calibrations")
-        json.dump(cal, open(od / "calibrations.json", "w"))
+        with open(od / "calibrations.json", "w") as fh:
+            json.dump(cal, fh)
         start = min(x["effective_at_ms"] for x in cal["calibrations"])
         d = pd.Timestamp(start, unit="ms", tz="UTC").normalize()
         while d < end:

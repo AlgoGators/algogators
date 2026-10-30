@@ -89,7 +89,8 @@ def load_index(city):
         return None, None
     d = pd.concat([pd.read_parquet(f) for f in fs], ignore_index=True)
     d = d[d.t.notna()]
-    cal = json.load(open(OUT / "index" / city / "calibrations.json"))["calibrations"]
+    with open(OUT / "index" / city / "calibrations.json") as fh:
+        cal = json.load(fh)["calibrations"]
     return d, cal
 
 

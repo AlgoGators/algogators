@@ -319,10 +319,9 @@ class ArbitrageStrategy:
         signals: List[ArbitrageSignal] = []
         in_position = False
         entry_direction: Optional[str] = None
-        entry_idx: Optional[int] = None
         periods_held = 0
 
-        for idx, row in spread_df.iterrows():
+        for _, row in spread_df.iterrows():
             spread = row["spread"]
             abs_spread = row["abs_spread"]
             z_score = row["z_score"]
@@ -364,7 +363,6 @@ class ArbitrageStrategy:
                         ))
                         in_position = True
                         entry_direction = direction
-                        entry_idx = idx
                         periods_held = 0
 
             else:
@@ -416,7 +414,6 @@ class ArbitrageStrategy:
                     ))
                     in_position = False
                     entry_direction = None
-                    entry_idx = None
 
         return signals
 

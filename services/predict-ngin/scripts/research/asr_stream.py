@@ -69,51 +69,51 @@ async def run(ev, provider, seconds, start, tag):
     key = env["DEEPGRAM_API_KEY"] if provider == "dg" else env["ASSEMBLYAI_API_KEY"]
     hdr = {"Authorization": f"Token {key}" if provider == "dg" else key}
     kts = keyterms(event_titles(ev))
-    w = wave.open(str(AUDIO / f"{ev}.wav"))
-    assert w.getframerate() == SR and w.getnchannels() == 1
-    w.setpos(int(start * SR))
-    n_total = w.getnframes() - int(start * SR)
-    if seconds:
-        n_total = min(n_total, int(seconds * SR))
-    per = int(CHUNK_S * SR)
-    f = open(out, "w")
-    async with websockets.connect(url_for(provider, kts), additional_headers=hdr, max_size=2**24,
-                                  ping_interval=20) as ws:
-        state = {"sent_s": 0.0}
-        t0 = time.time()
-        f.write(json.dumps({"type": "hdr", "event": ev, "provider": provider, "t0_wall": t0, "start_s": start,
-                            "keyterms": kts}) + "\n")
+    with wave.open(str(AUDIO / f"{ev}.wav")) as w:
+        assert w.getframerate() == SR and w.getnchannels() == 1
+        w.setpos(int(start * SR))
+        n_total = w.getnframes() - int(start * SR)
+        if seconds:
+            n_total = min(n_total, int(seconds * SR))
+        per = int(CHUNK_S * SR)
+        with open(out, "w") as f:
+            async with websockets.connect(url_for(provider, kts), additional_headers=hdr, max_size=2**24,
+                                          ping_interval=20) as ws:
+                state = {"sent_s": 0.0}
+                t0 = time.time()
+                f.write(json.dumps({"type": "hdr", "event": ev, "provider": provider, "t0_wall": t0, "start_s": start,
+                                    "keyterms": kts}) + "\n")
 
-        async def sender():
-            i = 0
-            sent = 0
-            while sent < n_total:
-                k = min(per, n_total - sent)
-                await ws.send(w.readframes(k))
-                sent += k
-                state["sent_s"] = sent / SR
-                i += 1
-                await asyncio.sleep(max(0.0, t0 + i * CHUNK_S - time.time()))
-            await asyncio.sleep(1.0)
-            await ws.send(json.dumps({"type": "CloseStream"} if provider == "dg" else {"type": "Terminate"}))
+                async def sender():
+                    i = 0
+                    sent = 0
+                    while sent < n_total:
+                        k = min(per, n_total - sent)
+                        await ws.send(w.readframes(k))
+                        sent += k
+                        state["sent_s"] = sent / SR
+                        i += 1
+                        await asyncio.sleep(max(0.0, t0 + i * CHUNK_S - time.time()))
+                    await asyncio.sleep(1.0)
+                    await ws.send(json.dumps({"type": "CloseStream"} if provider == "dg" else {"type": "Terminate"}))
 
-        async def receiver():
-            async for raw in ws:
-                now = time.time()
-                rec = compact(provider, json.loads(raw))
-                rec["rw"] = round(now, 3)
-                rec["sent"] = round(state["sent_s"], 2)
-                f.write(json.dumps(rec) + "\n")
-                f.flush()
+                async def receiver():
+                    async for raw in ws:
+                        now = time.time()
+                        rec = compact(provider, json.loads(raw))
+                        rec["rw"] = round(now, 3)
+                        rec["sent"] = round(state["sent_s"], 2)
+                        f.write(json.dumps(rec) + "\n")
+                        f.flush()
 
-        st = asyncio.create_task(sender())
-        try:
-            await receiver()
-        except websockets.ConnectionClosed as e:
-            print("closed", e.code)
-        await st
-    f.write(json.dumps({"type": "done", "audio_s": n_total / SR, "wall_s": time.time() - t0}) + "\n")
-    f.close()
+                st = asyncio.create_task(sender())
+                try:
+                    await receiver()
+                except websockets.ConnectionClosed as e:
+                    print("closed", e.code)
+                # Finish sending before the WAV and transcript handles close.
+                await asyncio.gather(st)
+            f.write(json.dumps({"type": "done", "audio_s": n_total / SR, "wall_s": time.time() - t0}) + "\n")
     with open(OUT / "minutes_log.jsonl", "a") as g:
         g.write(json.dumps({"event": ev, "provider": provider, "tag": tag, "audio_min": round(n_total / SR / 60, 2),
                             "ts": time.time()}) + "\n")

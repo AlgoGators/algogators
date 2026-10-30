@@ -92,4 +92,5 @@ for tag, df in (("full", p), ("compliant", p[p.compliant])):
             res.append(r)
 gate = any(r["passed"] is True for r in res)
 print("\nGATE PASSED" if gate else "\nGATE FAILED -> stop (no test fetch, no strategy)")
-json.dump(dict(results=res, gate=gate), open(OUT + f"gate_{SPLIT}.json", "w"), indent=1)
+with open(OUT + f"gate_{SPLIT}.json", "w") as fh:
+    json.dump(dict(results=res, gate=gate), fh, indent=1)

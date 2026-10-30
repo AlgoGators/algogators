@@ -13,6 +13,7 @@ Requires:
 
 import asyncio
 import json
+import sys
 from datetime import datetime
 from typing import Set, Dict, Any, Optional
 
@@ -20,7 +21,7 @@ try:
     import websockets
 except ImportError:
     print("Install websockets: pip install websockets")
-    exit(1)
+    sys.exit(1)
 
 # Polymarket WebSocket endpoint
 WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
@@ -192,7 +193,7 @@ if __name__ == "__main__":
 
     if not token_ids:
         print("No tokens found")
-        exit(1)
+        sys.exit(1)
 
     # Stream prices for 60 seconds
     stream = PolymarketPriceStream(token_ids)
