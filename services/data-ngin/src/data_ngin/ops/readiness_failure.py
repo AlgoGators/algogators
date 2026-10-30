@@ -25,10 +25,16 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 # The DAG's tasks, by what their failure means for the two readiness rows.
-CONTINUOUS_ONLY_TASKS = frozenset({"write_readiness"})  # continuous row failed; contract row left alone
+CONTINUOUS_ONLY_TASKS = frozenset(
+    {"write_readiness"}
+)  # continuous row failed; contract row left alone
 CONTRACT_ONLY_TASKS = frozenset({"write_contract_readiness"})  # contract row failed only
-CONTRACT_PULL_TASKS = frozenset({"run_contract_pipeline"})  # contract row failed; continuous row written
-AFTER_PULLS_TASKS = frozenset({"fill_continuous_holes"})  # both rows written from the tables, not failed
+CONTRACT_PULL_TASKS = frozenset(
+    {"run_contract_pipeline"}
+)  # contract row failed; continuous row written
+AFTER_PULLS_TASKS = frozenset(
+    {"fill_continuous_holes"}
+)  # both rows written from the tables, not failed
 
 
 def make_readiness_failure_callback(config_name: str) -> Callable[[Any], None]:
