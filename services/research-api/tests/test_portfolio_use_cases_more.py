@@ -119,20 +119,19 @@ class FakeReader:
         self.performance = performance or IncubationPerformanceRows(positions=[], equity_curve=[])
         self.calls: list[tuple[str, Any]] = []
 
-    def fetch_summary_row(self, strategy_type: str, portfolio_id: str) -> Mapping[str, Any] | None:
-        self.calls.append(("fetch_summary_row", (strategy_type, portfolio_id)))
-        if strategy_type not in self.summary_rows:
-            raise RuntimeError(f"database exploded for {strategy_type}")
-        return self.summary_rows[strategy_type]
+    def fetch_summary_row(self, portfolio_id: str) -> Mapping[str, Any] | None:
+        self.calls.append(("fetch_summary_row", (portfolio_id,)))
+        if portfolio_id not in self.summary_rows:
+            raise RuntimeError(f"database exploded for {portfolio_id}")
+        return self.summary_rows[portfolio_id]
 
-    def fetch_detail_rows(
+    def fetch_portfolio_rows(
         self,
-        strategy_type: str,
         portfolio_id: str,
         book: str = "qt",
         allow_fallback: bool = True,
     ) -> PortfolioDetailRows:
-        self.calls.append(("fetch_detail_rows", (strategy_type, portfolio_id)))
+        self.calls.append(("fetch_portfolio_rows", (portfolio_id,)))
         assert self.detail_rows is not None
         return self.detail_rows
 
@@ -373,7 +372,7 @@ def test_get_strategy_detail_known_id_without_data_raises_data_not_found():
         GetStrategyDetail(registry_port(registry), reader_port(reader)).execute("trendfollowing")
 
 
-def test_get_strategy_detail_happy_path_queries_by_type_and_portfolio():
+def test_get_strategy_detail_happy_path_queries_by_portfolio_only():
     registry = FakeRegistry([make_cfg()])
     reader = FakeReader(detail_rows=make_detail_rows())
 
@@ -382,18 +381,19 @@ def test_get_strategy_detail_happy_path_queries_by_type_and_portfolio():
     )
 
     assert detail["id"] == "trendfollowing"
-    assert reader.calls == [("fetch_detail_rows", ("LIVE_TREND_FOLLOWING", "MAIN"))]
+    # Issue #59: the registry entry's portfolio id is the key; strategy_type is display only.
+    assert reader.calls == [("fetch_portfolio_rows", ("MAIN",))]
 
 
 def test_list_strategies_skips_failures_and_missing_rows(caplog):
     good = make_cfg()
-    no_data = make_cfg(id="empty", strategy_type="LIVE_EMPTY")
-    broken = make_cfg(id="broken", strategy_type="LIVE_BROKEN")
+    no_data = make_cfg(id="empty", portfolio_id="EMPTY")
+    broken = make_cfg(id="broken", portfolio_id="BROKEN")
     reader = FakeReader(
         summary_rows={
-            "LIVE_TREND_FOLLOWING": make_latest(),
-            "LIVE_EMPTY": None,
-            # LIVE_BROKEN intentionally absent -> fetch_summary_row raises
+            "MAIN": make_latest(),
+            "EMPTY": None,
+            # BROKEN intentionally absent -> fetch_summary_row raises
         }
     )
 

@@ -20,6 +20,8 @@ export interface Execution {
   notional: number;
   commission: number;
   date?: string;
+  /** Issue #59: the sleeve (strategy_name) that made the fill. */
+  sleeve?: string | null;
 }
 
 export interface FinalizedPosition {
@@ -97,8 +99,14 @@ export interface Strategy {
   fellBack?: boolean;
   /** Set by the portfolio-id endpoint (/portfolio/portfolios/<id>). */
   portfolioId?: string;
-  /** D-20: the portfolio's strategies (sleeves) on its latest day, with the symbols each holds. */
-  strategies?: { name: string; positions: number }[];
+  /**
+   * D-20: the portfolio's strategies (sleeves) on its latest day, with the symbols each holds.
+   * Issue #59: the run's allocations name them; `allocation` is absent for a sleeve the run
+   * metadata does not list.
+   */
+  strategies?: { name: string; positions: number; allocation?: number | null }[];
+  /** Issue #59: each date the book's sleeve set changed, from the run metadata. */
+  sleeveChanges?: { date: string | null; added: string[]; removed: string[] }[];
   portfolioGroup?: string | null;
   assetClass?: 'futures' | 'equity';
   /** desk_editable and futures (ruling 13). */

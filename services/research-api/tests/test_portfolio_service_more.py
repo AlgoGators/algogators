@@ -56,8 +56,6 @@ class FakeRepo:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.has_type = True
-        self.curves: dict[str | None, list[dict[str, Any]]] = {}
-        self.latest_row: dict[str, Any] | None = {"latest": True}
         self.summary: dict[str, Any] | None = make_latest()
         self.detail_rows = PortfolioDetailRows(
             latest=make_latest(),
@@ -68,42 +66,16 @@ class FakeRepo:
             yesterday_positions=[],
         )
 
-    def _fetch_latest_live_results(self, cursor: Any, st: str, pid: str) -> Any:
-        self.calls.append(("_fetch_latest_live_results", (cursor, st, pid)))
-        return self.latest_row
-
-    def _fetch_summary_row(self, cursor: Any, st: str, pid: str) -> Any:
-        self.calls.append(("_fetch_summary_row", (cursor, st, pid)))
-        return self.summary
-
     def _has_portfolio_type(self, cursor: Any) -> bool:
         self.calls.append(("_has_portfolio_type", (cursor,)))
         return self.has_type
 
-    def _fetch_equity_curve(
-        self, cursor: Any, st: str, pid: str, portfolio_type: str | None = None
-    ) -> list[dict[str, Any]]:
-        self.calls.append(("_fetch_equity_curve", (cursor, st, pid, portfolio_type)))
-        return self.curves.get(portfolio_type, [])
-
-    def _fetch_current_positions(self, cursor: Any, st: str, pid: str, book: str) -> Any:
-        self.calls.append(("_fetch_current_positions", (cursor, st, pid, book)))
-        return [{"symbol": "ES.v.0"}]
-
-    def _fetch_recent_executions(self, cursor: Any, st: str, pid: str) -> Any:
-        self.calls.append(("_fetch_recent_executions", (cursor, st, pid)))
-        return [{"symbol": "ES.v.0", "side": "BUY"}]
-
-    def _fetch_yesterday_positions(self, cursor: Any, st: str, pid: str, book: str) -> Any:
-        self.calls.append(("_fetch_yesterday_positions", (cursor, st, pid, book)))
-        return [{"symbol": "NQ.v.0"}]
-
-    def fetch_detail_rows(self, st: str, pid: str) -> PortfolioDetailRows:
-        self.calls.append(("fetch_detail_rows", (st, pid)))
+    def fetch_portfolio_rows(self, pid: str) -> PortfolioDetailRows:
+        self.calls.append(("fetch_portfolio_rows", (pid,)))
         return self.detail_rows
 
-    def fetch_summary_row(self, st: str, pid: str) -> dict[str, Any] | None:
-        self.calls.append(("fetch_summary_row", (st, pid)))
+    def fetch_summary_row(self, pid: str) -> dict[str, Any] | None:
+        self.calls.append(("fetch_summary_row", (pid,)))
         return self.summary
 
 
@@ -117,79 +89,11 @@ def repo(monkeypatch: pytest.MonkeyPatch) -> FakeRepo:
 # --- thin cursor-level wrappers ----------------------------------------------
 
 
-def test_fetch_latest_live_results_delegates(repo: FakeRepo) -> None:
-    result = svc._fetch_latest_live_results(CURSOR, "LIVE_TF", "MAIN")
-
-    assert result == {"latest": True}
-    assert repo.calls == [("_fetch_latest_live_results", (CURSOR, "LIVE_TF", "MAIN"))]
-
-
-def test_fetch_summary_row_delegates(repo: FakeRepo) -> None:
-    result = svc._fetch_summary_row(CURSOR, "LIVE_TF", "MAIN")
-
-    assert result == repo.summary
-    assert repo.calls == [("_fetch_summary_row", (CURSOR, "LIVE_TF", "MAIN"))]
-
-
 def test_has_portfolio_type_delegates(repo: FakeRepo) -> None:
     repo.has_type = False
 
     assert svc._has_portfolio_type(CURSOR) is False
     assert repo.calls == [("_has_portfolio_type", (CURSOR,))]
-
-
-def test_fetch_equity_curve_forwards_portfolio_type(repo: FakeRepo) -> None:
-    repo.curves["qt"] = [{"timestamp": datetime(2026, 1, 1), "equity": 1.0}]
-
-    result = svc._fetch_equity_curve(CURSOR, "LIVE_TF", "MAIN", "qt")
-
-    assert result == repo.curves["qt"]
-    assert repo.calls == [("_fetch_equity_curve", (CURSOR, "LIVE_TF", "MAIN", "qt"))]
-
-
-def test_fetch_equity_curve_defaults_portfolio_type_to_none(repo: FakeRepo) -> None:
-    svc._fetch_equity_curve(CURSOR, "LIVE_TF", "MAIN")
-
-    assert repo.calls == [("_fetch_equity_curve", (CURSOR, "LIVE_TF", "MAIN", None))]
-
-
-def test_fetch_position_and_execution_wrappers_delegate(repo: FakeRepo) -> None:
-    assert svc._fetch_current_positions(CURSOR, "LIVE_TF", "MAIN", "qt") == [{"symbol": "ES.v.0"}]
-    assert svc._fetch_recent_executions(CURSOR, "LIVE_TF", "MAIN") == [
-        {"symbol": "ES.v.0", "side": "BUY"}
-    ]
-    assert svc._fetch_yesterday_positions(CURSOR, "LIVE_TF", "MAIN", "qt") == [{"symbol": "NQ.v.0"}]
-    assert [name for name, _ in repo.calls] == [
-        "_fetch_current_positions",
-        "_fetch_recent_executions",
-        "_fetch_yesterday_positions",
-    ]
-
-
-# --- _fetch_equity_by_stream -------------------------------------------------
-
-
-def test_equity_by_stream_is_empty_without_portfolio_type_column(repo: FakeRepo) -> None:
-    repo.has_type = False
-
-    assert svc._fetch_equity_by_stream(CURSOR, "LIVE_TF", "MAIN") == {}
-    # Short-circuits: no per-stream curve queries were issued.
-    assert [name for name, _ in repo.calls] == ["_has_portfolio_type"]
-
-
-def test_equity_by_stream_transforms_rows_and_skips_empty_streams(repo: FakeRepo) -> None:
-    repo.curves["qt"] = [{"timestamp": datetime(2026, 1, 1), "equity": 500000.0}]
-    repo.curves["system"] = [{"timestamp": datetime(2026, 1, 2), "equity": 501000.0}]
-    # A stream with no rows must not appear in the result (the repo returns [] for it).
-
-    result = svc._fetch_equity_by_stream(CURSOR, "LIVE_TF", "MAIN")
-
-    assert result == {
-        "qt": [{"date": "2026-01-01T00:00:00", "value": 500000.0}],
-        "system": [{"date": "2026-01-02T00:00:00", "value": 501000.0}],
-    }
-    queried = [args[3] for name, args in repo.calls if name == "_fetch_equity_curve"]
-    assert queried == list(svc.PORTFOLIO_STREAMS)
 
 
 # --- strategy detail / summary facades ---------------------------------------
@@ -202,7 +106,8 @@ def test_get_strategy_detail_builds_from_repository_rows(repo: FakeRepo) -> None
     assert detail["id"] == "trendfollowing"
     assert detail["invested"] == 500000.0
     assert detail["currentValue"] == 510000.0
-    assert repo.calls == [("fetch_detail_rows", ("LIVE_TREND_FOLLOWING", "MAIN"))]
+    # Issue #59: the book by its portfolio id alone.
+    assert repo.calls == [("fetch_portfolio_rows", ("MAIN",))]
 
 
 def test_get_strategy_detail_returns_none_and_warns_without_rows(
@@ -221,7 +126,7 @@ def test_get_strategy_detail_returns_none_and_warns_without_rows(
         assert svc.get_strategy_detail(make_cfg()) is None
 
     assert "No live_results" in caplog.text
-    assert "LIVE_TREND_FOLLOWING" in caplog.text
+    assert "MAIN" in caplog.text
 
 
 def test_get_strategy_summary_builds_from_latest_row(repo: FakeRepo) -> None:
@@ -232,7 +137,7 @@ def test_get_strategy_summary_builds_from_latest_row(repo: FakeRepo) -> None:
     assert summary["currentValue"] == 510000.0
     assert summary["returnPercent"] == pytest.approx(2.0)
     assert summary["sharpeRatio"] == pytest.approx(2.0)
-    assert repo.calls == [("fetch_summary_row", ("LIVE_TREND_FOLLOWING", "MAIN"))]
+    assert repo.calls == [("fetch_summary_row", ("MAIN",))]
 
 
 def test_get_strategy_summary_returns_none_and_warns_without_row(

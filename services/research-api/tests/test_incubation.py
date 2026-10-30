@@ -88,15 +88,16 @@ class FakeCursor:
         self.calls.append((sql, params))
         if "FROM trading.strategy_registry" in sql:
             self.result = {
-                "strategy_type": "LIVE_TREND_FOLLOWING",
                 "portfolio_id": "MOCK_PORTFOLIO",
                 "incubation_started_at": self.incubation_start,
             }
+        elif "information_schema.columns" in sql:
+            self.result = {"?column?": 1}
         elif "FROM trading.positions" in sql:
-            started_at = params[2]
+            started_at = params[1]
             self.result = [row for row in self.positions if row["date"] >= started_at]
         elif "FROM trading.equity_curve" in sql:
-            started_at = params[2]
+            started_at = params[1]
             self.result = [row for row in self.equity_curve if row["date"] >= started_at]
         else:
             raise AssertionError(f"Unexpected SQL: {sql}")
@@ -143,13 +144,6 @@ def test_incubation_performance_excludes_pre_incubation_history():
     assert [point["date"] for point in performance["equity_curve"]] == [after]
     position_call = next(call for call in cursor.calls if "trading.positions" in call[0])
     equity_call = next(call for call in cursor.calls if "trading.equity_curve" in call[0])
-    assert position_call[1] == (
-        "LIVE_TREND_FOLLOWING",
-        "MOCK_PORTFOLIO",
-        incubation_start,
-    )
-    assert equity_call[1] == (
-        "LIVE_TREND_FOLLOWING",
-        "MOCK_PORTFOLIO",
-        incubation_start,
-    )
+    # Issue #59: the incubating book by its portfolio id, never the strategy id.
+    assert position_call[1] == ("MOCK_PORTFOLIO", incubation_start)
+    assert equity_call[1] == ("MOCK_PORTFOLIO", incubation_start)

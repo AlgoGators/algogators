@@ -393,13 +393,12 @@ class PostgresDeskRepository:
                     UPDATE trading.positions
                     SET quantity = %s, daily_unrealized_pnl = 0,
                         daily_realized_pnl = 0, last_update = now(), updated_at = now()
-                    WHERE portfolio_id = %s AND strategy_id = %s AND strategy_name = %s
+                    WHERE portfolio_id = %s AND strategy_name = %s
                       AND date = %s AND symbol = %s AND portfolio_type = 'qt_proposal'
                     """,
                     (
                         to,
                         portfolio_id,
-                        held[0]["strategy_id"],
                         held[0]["strategy_name"],
                         day,
                         symbol,

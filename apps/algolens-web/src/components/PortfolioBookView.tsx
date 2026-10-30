@@ -9,6 +9,7 @@ import {
   type BookChoice,
   type PortfolioEntry,
 } from '../domain/portfolio/portfolioRegistry';
+import { describeSleeve, describeSleeveChanges } from '../domain/portfolio/sleeves';
 import { BookToggle } from './BookToggle';
 import { StrategyDetail } from './StrategyDetail';
 
@@ -124,8 +125,15 @@ export function PortfolioBookView({
       <p className={`mt-2 text-sm ${dark ? 'text-gray-400' : 'text-gray-500'}`} data-testid="portfolio-strategies">
         Strategies:{' '}
         {strategy.strategies
-          .map(s => `${s.name} (${s.positions} position${s.positions === 1 ? '' : 's'})`)
+          .map(s => `${s.name} (${describeSleeve(s)})`)
           .join(', ')}
+      </p>
+    ) : null;
+  const sleeveNotes = describeSleeveChanges(strategy?.sleeveChanges);
+  const sleeveChangesLine =
+    sleeveNotes.length > 0 ? (
+      <p className={`mt-1 text-sm ${dark ? 'text-gray-400' : 'text-gray-500'}`} data-testid="portfolio-sleeve-changes">
+        {sleeveNotes.join(' ')}
       </p>
     ) : null;
 
@@ -152,6 +160,7 @@ export function PortfolioBookView({
         <>
           {toggle}
           {strategiesLine}
+          {sleeveChangesLine}
         </>
       }
       title={title}

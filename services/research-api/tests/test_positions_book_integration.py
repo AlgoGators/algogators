@@ -63,7 +63,7 @@ CREATE TABLE trading.equity_curve (
     equity NUMERIC
 );
 CREATE TABLE trading.executions (
-    strategy_id TEXT, portfolio_id TEXT, symbol TEXT, side TEXT,
+    strategy_id TEXT, strategy_name TEXT, portfolio_id TEXT, symbol TEXT, side TEXT,
     quantity NUMERIC, price NUMERIC, execution_time TIMESTAMP,
     commissions_fees NUMERIC
 );
@@ -104,7 +104,9 @@ def conn_factory():
     repo_module._has_portfolio_type_cache = None
 
 
-def _insert_position(factory, book, day, symbol, qty, price=100.0, portfolio=PORTFOLIO):
+def _insert_position(
+    factory, book, day, symbol, qty, price=100.0, portfolio=PORTFOLIO, strategy=STRATEGY
+):
     with factory.setup.cursor() as cur:
         cur.execute(
             """
@@ -115,7 +117,7 @@ def _insert_position(factory, book, day, symbol, qty, price=100.0, portfolio=POR
             """,
             (
                 portfolio,
-                STRATEGY,
+                strategy,
                 day,
                 symbol,
                 book,
@@ -126,7 +128,7 @@ def _insert_position(factory, book, day, symbol, qty, price=100.0, portfolio=POR
         )
 
 
-def _insert_equity(factory, book, day, equity):
+def _insert_equity(factory, book, day, equity, strategy=STRATEGY):
     with factory.setup.cursor() as cur:
         cur.execute(
             """
@@ -134,15 +136,16 @@ def _insert_equity(factory, book, day, equity):
                 (strategy_id, portfolio_id, portfolio_type, "timestamp", equity)
             VALUES (%s, %s, %s, %s, %s)
             """,
-            (STRATEGY, PORTFOLIO, book, datetime(day.year, day.month, day.day), equity),
+            (strategy, PORTFOLIO, book, datetime(day.year, day.month, day.day), equity),
         )
 
 
 def _read(factory, book="qt", allow_fallback=True):
     from research_api.infrastructure.portfolio.repositories import PostgresPortfolioRepository
 
-    return PostgresPortfolioRepository(connection_factory=factory).fetch_detail_rows(
-        STRATEGY, PORTFOLIO, book=book, allow_fallback=allow_fallback
+    # Issue #59: the book by its portfolio id; the strategy id is not a key.
+    return PostgresPortfolioRepository(connection_factory=factory).fetch_portfolio_rows(
+        PORTFOLIO, book=book, allow_fallback=allow_fallback
     )
 
 
@@ -230,3 +233,18 @@ def test_invalid_book_is_400_over_http(conn_factory, client, monkeypatch):
     response = client.get("/portfolio/strategy/trendfollowing?book=benchmark")
 
     assert response.status_code == 400
+
+
+def test_a_relabelled_strategy_id_still_renders_one_continuous_book(conn_factory):
+    # Issue #59: the book is its portfolio id. The engine relabels the strategy id between
+    # D1 and D2; the page still shows the book's latest positions and one equity series.
+    _insert_position(conn_factory, "qt", D1, "ES", 2, strategy="LIVE_TREND_FOLLOWING")
+    _insert_position(conn_factory, "qt", D2, "ES", 3, strategy="TF_BOOK")
+    _insert_equity(conn_factory, "qt", D1, 100, strategy="LIVE_TREND_FOLLOWING")
+    _insert_equity(conn_factory, "qt", D2, 101, strategy="TF_BOOK")
+
+    rows = _read(conn_factory, "qt", allow_fallback=False)
+
+    assert [(p["symbol"], float(p["quantity"])) for p in rows.positions] == [("ES", 3.0)]
+    assert [float(r["equity"]) for r in rows.equity_curve] == [100.0, 101.0]
+    assert [(p["symbol"], float(p["quantity"])) for p in rows.yesterday_positions] == [("ES", 2.0)]

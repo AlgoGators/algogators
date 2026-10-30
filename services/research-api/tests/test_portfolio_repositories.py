@@ -7,7 +7,7 @@ its Error type; no real connection is ever opened.
 """
 
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, NoReturn
 from unittest.mock import MagicMock
 
@@ -90,8 +90,19 @@ def _reset_portfolio_type_cache(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# fetch_summary_row
+# fetch_summary_row (issue #59: by portfolio id alone)
 # ---------------------------------------------------------------------------
+
+
+def summary_handler(row: Any, results_have_book: bool = True) -> Handler:
+    def handle(sql: str, params: tuple[Any, ...] | None) -> Any:
+        if "information_schema.columns" in sql:
+            return {"?column?": 1} if results_have_book else None
+        if "FROM trading.live_results" in sql:
+            return row
+        raise AssertionError(f"Unexpected SQL: {sql}")
+
+    return handle
 
 
 def test_fetch_summary_row_returns_latest_row_and_closes_connection() -> None:
@@ -101,24 +112,35 @@ def test_fetch_summary_row_returns_latest_row_and_closes_connection() -> None:
         "volatility": 0.18,
         "total_cumulative_return": 0.34,
     }
-    cursor = ScriptedCursor(lambda sql, params: row)
+    cursor = ScriptedCursor(summary_handler(row))
     repo, conn = make_repo(cursor)
 
-    result = repo.fetch_summary_row("LIVE_TREND_FOLLOWING", "MAIN")
+    result = repo.fetch_summary_row("MAIN")
 
     assert result == row
     assert conn.closed
-    (sql, params), *rest = cursor.calls
-    assert not rest
-    assert "FROM trading.live_results" in sql
-    assert params == ("LIVE_TREND_FOLLOWING", "MAIN")
+    ((sql, params),) = cursor.calls_matching("FROM trading.live_results")
+    assert params == ("MAIN",)
+    assert "strategy" not in sql
+    # With books, the system row wins a date it shares with another book's.
+    assert "(portfolio_type = 'system') DESC" in sql
+
+
+def test_fetch_summary_row_without_book_column_orders_by_date_only() -> None:
+    cursor = ScriptedCursor(summary_handler({"current_portfolio_value": 1.0}, False))
+    repo, _conn = make_repo(cursor)
+
+    repo.fetch_summary_row("MAIN")
+
+    ((sql, _params),) = cursor.calls_matching("FROM trading.live_results")
+    assert "portfolio_type" not in sql
 
 
 def test_fetch_summary_row_returns_none_when_no_rows() -> None:
-    cursor = ScriptedCursor(lambda sql, params: None)
+    cursor = ScriptedCursor(summary_handler(None))
     repo, conn = make_repo(cursor)
 
-    assert repo.fetch_summary_row("LIVE_TREND_FOLLOWING", "MAIN") is None
+    assert repo.fetch_summary_row("MAIN") is None
     assert conn.closed
 
 
@@ -130,7 +152,7 @@ def test_fetch_summary_row_closes_connection_when_query_raises() -> None:
     repo, conn = make_repo(cursor)
 
     with pytest.raises(RuntimeError, match="db down"):
-        repo.fetch_summary_row("LIVE_TREND_FOLLOWING", "MAIN")
+        repo.fetch_summary_row("MAIN")
     assert conn.closed
 
 
@@ -144,16 +166,16 @@ def test_default_connection_factory_is_get_db_connection(
     monkeypatch.setattr(repositories, "get_db_connection", lambda: conn)
 
     repo = PostgresPortfolioRepository()
-    result = repo.fetch_summary_row("STRAT", "PORT")
+    result = repo.fetch_summary_row("PORT")
 
     assert result == {"current_portfolio_value": 42.0}
     conn.close.assert_called_once()
     assert mock_cursor.execute.call_args is not None
-    assert mock_cursor.execute.call_args.args[1] == ("STRAT", "PORT")
+    assert mock_cursor.execute.call_args.args[1] == ("PORT",)
 
 
 # ---------------------------------------------------------------------------
-# fetch_detail_rows
+# fetch_portfolio_rows
 # ---------------------------------------------------------------------------
 
 
@@ -165,11 +187,13 @@ def detail_handler(
     positions: list[dict[str, Any]],
     executions: list[dict[str, Any]],
     yesterday: list[dict[str, Any]],
+    sleeves: list[dict[str, Any]] | None = None,
+    runs: list[dict[str, Any]] | None = None,
 ) -> Handler:
-    """Canned-row dispatch for every query fetch_detail_rows can issue.
+    """Canned-row dispatch for every query fetch_portfolio_rows can issue.
 
     ``equity`` is keyed by portfolio-type param (stream name, or None for the
-    untyped equity query).
+    untyped equity query). ``runs`` None means there is no run metadata table.
     """
 
     def handle(sql: str, params: tuple[Any, ...] | None) -> Any:
@@ -179,14 +203,22 @@ def detail_handler(
             return {"?column?": 1} if portfolio_type_column else None
         if "FROM trading.equity_curve" in sql:
             assert params is not None
-            stream = params[2] if len(params) == 3 else None
+            stream = params[1] if len(params) == 2 else None
             return equity.get(stream, [])
-        if "to_regclass" in sql:
+        if "to_regclass('metadata.contract_metadata')" in sql:
             return {"present": False}  # no contract metadata: sizes stay 1
+        if "to_regclass('trading.live_run_metadata')" in sql:
+            return {"present": runs is not None}
+        if "FROM trading.live_run_metadata" in sql:
+            return runs or []
         if "SELECT 1 FROM trading.positions" in sql:
             return {"?column?": 1}  # the requested book has rows
+        if "GROUP BY strategy_name" in sql:
+            return sleeves or []
         if "FROM trading.positions" in sql and "DISTINCT ON" in sql:
-            return yesterday if "AND date < (" in sql else positions
+            return yesterday
+        if "FROM trading.positions" in sql and "GROUP BY symbol" in sql:
+            return positions
         if "FROM trading.executions" in sql:
             return executions
         raise AssertionError(f"Unexpected SQL: {sql}")
@@ -194,7 +226,7 @@ def detail_handler(
     return handle
 
 
-def test_fetch_detail_rows_short_circuits_when_no_live_results() -> None:
+def test_fetch_portfolio_rows_short_circuits_when_no_live_results() -> None:
     cursor = ScriptedCursor(
         detail_handler(
             latest=None,
@@ -207,7 +239,7 @@ def test_fetch_detail_rows_short_circuits_when_no_live_results() -> None:
     )
     repo, conn = make_repo(cursor)
 
-    result = repo.fetch_detail_rows("LIVE_TREND_FOLLOWING", "MAIN")
+    result = repo.fetch_portfolio_rows("MAIN", book="system")
 
     assert result == PortfolioDetailRows(
         latest=None,
@@ -216,18 +248,21 @@ def test_fetch_detail_rows_short_circuits_when_no_live_results() -> None:
         positions=[],
         executions=[],
         yesterday_positions=[],
+        book="system",
     )
-    # Only the live_results probe ran; nothing else was queried.
-    assert len(cursor.calls) == 1
+    assert not cursor.calls_matching("GROUP BY symbol")
     assert conn.closed
 
 
-def test_fetch_detail_rows_assembles_all_sections_with_stream_scoping() -> None:
-    latest = {"date": "2026-08-13", "current_portfolio_value": 1_000_000.0}
+def test_fetch_portfolio_rows_assembles_all_sections_with_stream_scoping() -> None:
+    day = date(2026, 8, 13)
+    latest = {"date": day, "current_portfolio_value": 1_000_000.0}
     qt_rows = [{"timestamp": "2026-08-12", "equity": 990_000.0}]
     system_rows = [{"timestamp": "2026-08-12", "equity": 995_000.0}]
     positions = [{"symbol": "ES", "quantity": 2, "average_price": 5000.0}]
-    executions = [{"symbol": "ES", "side": "BUY", "quantity": 2, "price": 5000.0}]
+    executions = [
+        {"symbol": "ES", "side": "BUY", "quantity": 2, "price": 5000.0, "strategy_name": "TF"}
+    ]
     yesterday = [{"symbol": "NQ", "quantity": 1, "average_price": 18_000.0}]
     cursor = ScriptedCursor(
         detail_handler(
@@ -237,32 +272,37 @@ def test_fetch_detail_rows_assembles_all_sections_with_stream_scoping() -> None:
             positions=positions,
             executions=executions,
             yesterday=yesterday,
+            sleeves=[{"name": "TF", "positions": 1}],
+            runs=[{"date": day, "strategy_allocations": {"TF": 1.0}}],
         )
     )
     repo, conn = make_repo(cursor)
 
-    result = repo.fetch_detail_rows("LIVE_TREND_FOLLOWING", "MAIN")
+    result = repo.fetch_portfolio_rows("MAIN")
 
     assert result.latest == latest
-    assert result.equity_curve == qt_rows  # headline curve is the primary "qt" stream
+    assert result.book == "qt"
+    assert result.equity_curve == qt_rows  # headline curve is the served "qt" book
     # Streams with no rows (benchmark) are omitted from the per-stream map.
     assert result.equity_by_stream == {"qt": qt_rows, "system": system_rows}
     assert result.positions == positions
     assert result.executions == executions
     assert result.yesterday_positions == yesterday
+    assert result.sleeves == [{"name": "TF", "positions": 1, "allocation": 1.0}]
+    assert result.sleeve_changes == []
     assert conn.closed
 
-    # The column probe runs for positions, live_results and executions (portfolio_type).
-    assert len(cursor.calls_matching("information_schema.columns")) == 3
     equity_params = [params for _, params in cursor.calls_matching("FROM trading.equity_curve")]
     assert equity_params == [
-        ("LIVE_TREND_FOLLOWING", "MAIN", "qt"),  # primary curve
-        ("LIVE_TREND_FOLLOWING", "MAIN", "qt"),  # per-stream pass
-        ("LIVE_TREND_FOLLOWING", "MAIN", "system"),
+        ("MAIN", "qt"),  # headline curve
+        ("MAIN", "qt"),  # per-stream pass
+        ("MAIN", "system"),
     ]
+    ((execution_sql, _),) = cursor.calls_matching("FROM trading.executions")
+    assert "strategy_name" in execution_sql  # the page shows each fill's sleeve
 
 
-def test_fetch_detail_rows_without_portfolio_type_column_uses_unscoped_curve() -> None:
+def test_fetch_portfolio_rows_without_portfolio_type_column_uses_unscoped_curve() -> None:
     latest = {"date": "2026-08-13", "current_portfolio_value": 500_000.0}
     legacy_rows = [{"timestamp": "2026-08-12", "equity": 499_000.0}]
     cursor = ScriptedCursor(
@@ -277,14 +317,97 @@ def test_fetch_detail_rows_without_portfolio_type_column_uses_unscoped_curve() -
     )
     repo, _conn = make_repo(cursor)
 
-    result = repo.fetch_detail_rows("LIVE_TREND_FOLLOWING", "MAIN")
+    result = repo.fetch_portfolio_rows("MAIN")
 
     assert result.equity_curve == legacy_rows
     assert result.equity_by_stream == {}
     equity_calls = cursor.calls_matching("FROM trading.equity_curve")
     assert len(equity_calls) == 1  # no per-stream queries on legacy schemas
-    assert equity_calls[0][1] == ("LIVE_TREND_FOLLOWING", "MAIN")
+    assert equity_calls[0][1] == ("MAIN",)
     assert "portfolio_type" not in equity_calls[0][0]
+
+
+def test_fetch_portfolio_rows_lists_the_runs_sleeves_and_their_changes() -> None:
+    """Issue #59: the day's sleeves come from the run metadata, not the strategy id."""
+    day = date(2026, 8, 13)
+    runs = [
+        {"date": date(2026, 8, 11), "strategy_allocations": {"TF": 0.7, "FAST": 0.3}},
+        {"date": date(2026, 8, 12), "strategy_allocations": {"TF": 1.0}},
+        {"date": day, "strategy_allocations": {"TF": 1.0}},
+        # a run after the book's latest results date does not name that day's sleeves
+        {"date": date(2026, 8, 14), "strategy_allocations": {"TF": 0.5, "NEW": 0.5}},
+    ]
+    cursor = ScriptedCursor(
+        detail_handler(
+            latest={"date": day, "current_portfolio_value": 1.0},
+            portfolio_type_column=True,
+            equity={},
+            positions=[],
+            executions=[],
+            yesterday=[],
+            sleeves=[{"name": "TF", "positions": 3}],
+            runs=runs,
+        )
+    )
+    repo, _conn = make_repo(cursor)
+
+    result = repo.fetch_portfolio_rows("BASE", book="system")
+
+    assert result.sleeves == [{"name": "TF", "positions": 3, "allocation": 1.0}]
+    assert result.sleeve_changes == [
+        {"date": "2026-08-12", "added": [], "removed": ["FAST"]},
+        {"date": "2026-08-14", "added": ["NEW"], "removed": []},
+    ]
+    ((sql, params),) = cursor.calls_matching("FROM trading.live_run_metadata")
+    assert params == ("BASE",)
+    assert "strategy_id" not in sql
+
+
+def test_a_sleeve_that_ran_flat_is_listed_with_no_positions() -> None:
+    day = date(2026, 8, 13)
+    cursor = ScriptedCursor(
+        detail_handler(
+            latest={"date": day},
+            portfolio_type_column=True,
+            equity={},
+            positions=[],
+            executions=[],
+            yesterday=[],
+            sleeves=[{"name": "TF", "positions": 2}, {"name": "OLD", "positions": 0}],
+            runs=[{"date": day, "strategy_allocations": {"TF": 0.7, "FAST": 0.3}}],
+        )
+    )
+    repo, _conn = make_repo(cursor)
+
+    result = repo.fetch_portfolio_rows("BASE", book="system")
+
+    assert result.sleeves == [
+        {"name": "FAST", "positions": 0, "allocation": 0.3},
+        {"name": "OLD", "positions": 0},  # rows the run does not name: no allocation
+        {"name": "TF", "positions": 2, "allocation": 0.7},
+    ]
+
+
+def test_no_run_metadata_table_keeps_the_position_sleeves() -> None:
+    cursor = ScriptedCursor(
+        detail_handler(
+            latest={"date": "2026-08-13"},
+            portfolio_type_column=True,
+            equity={},
+            positions=[],
+            executions=[],
+            yesterday=[],
+            sleeves=[{"name": "TF", "positions": 2}],
+            runs=None,
+        )
+    )
+    repo, _conn = make_repo(cursor)
+
+    result = repo.fetch_portfolio_rows("MAIN", book="system")
+
+    assert result.sleeves == [{"name": "TF", "positions": 2}]
+    assert result.sleeve_changes == []
+    assert not cursor.calls_matching("FROM trading.live_run_metadata")
 
 
 # ---------------------------------------------------------------------------
@@ -314,29 +437,6 @@ def test_has_portfolio_type_negative_result_is_cached_and_requeried_after_expiry
     monkeypatch.setattr(repositories, "_has_portfolio_type_expires_at", 0.0)
     assert repo._has_portfolio_type(cursor) is False
     assert len(cursor.calls) == 2
-
-
-def test_stream_helpers_probe_for_column_when_not_told() -> None:
-    """The equity helpers resolve has_portfolio_type themselves when not passed in."""
-    qt_rows = [{"timestamp": "2026-08-12", "equity": 1.0}]
-    cursor = ScriptedCursor(
-        detail_handler(
-            latest=None,
-            portfolio_type_column=True,
-            equity={"qt": qt_rows, "system": [], "benchmark": []},
-            positions=[],
-            executions=[],
-            yesterday=[],
-        )
-    )
-    repo = PostgresPortfolioRepository(connection_factory=_unusable_factory)
-
-    assert repo._fetch_equity_curve(cursor, "ST", "PF", "qt") == qt_rows
-    assert len(cursor.calls_matching("information_schema.columns")) == 1
-
-    assert repo._fetch_equity_by_stream(cursor, "ST", "PF") == {"qt": qt_rows}
-    # The second helper reuses the cached probe result instead of re-querying.
-    assert len(cursor.calls_matching("information_schema.columns")) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +473,8 @@ def incubation_handler(
     def handle(sql: str, params: tuple[Any, ...] | None) -> Any:
         if "FROM trading.strategy_registry" in sql:
             return registry_row
+        if "information_schema.columns" in sql:
+            return {"?column?": 1}  # positions and equity_curve carry the book
         if "FROM trading.positions" in sql:
             return positions
         if "FROM trading.equity_curve" in sql:
@@ -395,7 +497,6 @@ def test_fetch_incubation_performance_returns_empty_when_not_incubating() -> Non
 
 def test_fetch_incubation_performance_returns_empty_when_start_date_missing() -> None:
     registry_row = {
-        "strategy_type": "MOCK_TREND",
         "portfolio_id": "MOCK",
         "incubation_started_at": None,
     }
@@ -411,7 +512,6 @@ def test_fetch_incubation_performance_returns_empty_when_start_date_missing() ->
 def test_fetch_incubation_performance_scopes_queries_to_incubation_window() -> None:
     start = datetime(2026, 7, 1, tzinfo=UTC)
     registry_row = {
-        "strategy_type": "MOCK_TREND",
         "portfolio_id": "MOCK",
         "incubation_started_at": start,
     }
@@ -429,8 +529,14 @@ def test_fetch_incubation_performance_scopes_queries_to_incubation_window() -> N
     assert registry_calls[0][1] == ("trend",)
     position_calls = cursor.calls_matching("FROM trading.positions")
     equity_calls = cursor.calls_matching("FROM trading.equity_curve")
-    assert position_calls[0][1] == ("MOCK_TREND", "MOCK", start)
-    assert equity_calls[0][1] == ("MOCK_TREND", "MOCK", start)
+    # Issue #59: the book by its portfolio id, the system book only; never the strategy id.
+    assert position_calls[0][1] == ("MOCK", start)
+    assert equity_calls[0][1] == ("MOCK", start)
+    for sql, _params in position_calls + equity_calls:
+        assert "strategy_id" not in sql
+        assert "portfolio_type = 'system'" in sql
+    (registry_sql, _), *_ = registry_calls
+    assert "strategy_type" not in registry_sql
 
 
 # ---------------------------------------------------------------------------
