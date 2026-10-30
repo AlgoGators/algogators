@@ -4,11 +4,18 @@
 -- registry's key to the trading tables is portfolio_id; strategy_type stays as a description
 -- shown on the page and is not matched on.
 --
--- BASE_PORTFOLIO holds two entries: inc_tf_fast (the two-sleeve book) and inc_tf_base (its
--- rows from before the second sleeve was added in November 2025). Read by portfolio id both
--- would show the same book, so inc_tf_base is retired, kept as history with its incubation
--- start and mock capital, and the change is logged. A partial unique index then keeps one
--- entry per book that is not retired.
+-- BASE_PORTFOLIO holds two entries, both incubating: inc_tf_fast (the two-sleeve book) and
+-- inc_tf_base (its rows from before the second sleeve was added in November 2025). Both are
+-- retired, kept as history with their incubation start and mock capital, and each change is
+-- logged:
+-- - read by portfolio id, BASE's history mixes four strategy ids' leftover rows (a 100,000
+--   equity test day on 2025-08-15, two equity points a day on 2025-11-08 to 11-12, and
+--   REGIME_SWITCHING_FX positions to 2025-11-16), which the issue keeps as they are;
+-- - BASE has written nothing since February 2026, and its incubation window (from 2025-06-01)
+--   has ended.
+-- With no entry, AlgoLens shows none of BASE. If BASE runs again, give it one new entry.
+--
+-- A partial unique index then keeps one entry per book that is not retired.
 --
 -- Safe to run more than once. Fails, changing nothing, if another portfolio still has two
 -- entries that are not retired: retire one of them first.
@@ -18,14 +25,15 @@ BEGIN;
 INSERT INTO trading.strategy_lifecycle_log
     (strategy_id, before_state, after_state, reason, user_id)
 SELECT id, lifecycle, 'retired',
-       'issue #59: one registry entry per book; BASE_PORTFOLIO is read through inc_tf_fast',
+       'issue #59: BASE_PORTFOLIO retired (leftover rows of other strategy ids; '
+       'no runs since 2026-02; incubation window over)',
        'migration 008'
 FROM trading.strategy_registry
-WHERE id = 'inc_tf_base' AND lifecycle <> 'retired';
+WHERE id IN ('inc_tf_base', 'inc_tf_fast') AND lifecycle <> 'retired';
 
 UPDATE trading.strategy_registry
 SET lifecycle = 'retired', updated_at = now()
-WHERE id = 'inc_tf_base' AND lifecycle <> 'retired';
+WHERE id IN ('inc_tf_base', 'inc_tf_fast') AND lifecycle <> 'retired';
 
 DO $$
 DECLARE
