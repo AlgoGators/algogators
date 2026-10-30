@@ -159,6 +159,7 @@ p{margin:0}
 const D=JSON.parse(document.getElementById('data').textContent);
 const $=id=>document.getElementById(id);
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const url=u=>/^https:\/\/github\.com\//.test(String(u||''))?esc(u):'#';
 const PO={P0:0,P1:1,P2:2,P3:3};
 const REPOS=['trade-ngin','algogators','AlgoLens','algosystem','algogauge'];
 const SPC={'In progress':'go','PR open':'go','Draft PR open':'go','Fix written, no PR':'go','Ready to start':'rdy','Blocked':'blk','Parked':'off','Reference':'off','Proposed close':'cls','Closed':'off','Needs triage':'cls'};
@@ -187,14 +188,14 @@ function md(src){
 
 /* ---------- issue rows ---------- */
 const FLD=[['description','What the work is, in full'],['size','Size and stages'],['blocked_by','Blocked by, in full'],['blocks','What waits on this'],['cross','Cross-engine, in full'],['decisions','Open decisions, in full']];
-function owners(i){const a=i.assignees.length?esc(i.assignees.join(', ')):'<span class="none">Unassigned</span>';return a+(i.proposed?'<span class="prop">Proposed: '+esc(i.proposed)+'</span>':'')+(i.order||[]).map(o=>'<span class="also">'+esc(o.name.split(' ')[0])+': no. '+o.n+' of '+o.of+'</span>').join('');}
+function owners(i){const a=i.assignees.length?esc(i.assignees.join(', ')):'<span class="none">Unassigned</span>';return a+(i.proposed?'<span class="prop">Proposed: '+esc(i.proposed)+'</span>':'')+(i.order||[]).map(o=>'<span class="also">'+esc(o.name.split(' ')[0]+': no. '+o.n+' of '+o.of)+'</span>').join('');}
 function issueRow(i,sec,withRepo){
   const ref=(withRepo?i.repo+' ':'')+'#'+i.n;
-  return '<div class="row" data-row="'+sec+'-'+i.id+'">'+
-   '<button class="rowh" type="button" aria-expanded="false" data-toggle="'+i.id+'" data-sec="'+sec+'">'+
+  return '<div class="row" data-row="'+esc(sec+'-'+i.id)+'">'+
+   '<button class="rowh" type="button" aria-expanded="false" data-toggle="'+esc(i.id)+'">'+
    '<span class="cell c-pri"><span class="pill '+i.prio+'">'+i.prio+'</span></span>'+
    '<span class="cell c-ref ref">'+esc(ref)+'</span>'+
-   '<span class="cell c-main"><span class="ttl">'+esc(i.title)+'</span><div class="what">'+inline(i.what)+'</div>'+(i.cross?'<span class="also">Other engines: '+esc(i.cross)+'</span>':'')+'<span data-chip="'+i.id+'">'+chip(i.id)+'</span></span>'+
+   '<span class="cell c-main"><span class="ttl">'+esc(i.title)+'</span><div class="what">'+inline(i.what)+'</div>'+(i.cross?'<span class="also">Other engines: '+esc(i.cross)+'</span>':'')+'</span>'+
    '<span class="cell c-st"><span class="lab">Status</span>'+sp(i.status)+'</span>'+
    '<span class="cell c-own"><span class="lab">Assignee</span>'+owners(i)+'</span>'+
    '<span class="cell c-blk"><span class="lab">Waiting on</span>'+inline(i.waiting)+'</span>'+
@@ -202,13 +203,13 @@ function issueRow(i,sec,withRepo){
    '<span class="cell c-x"><span class="lab">Notes</span>'+inline(i.notes||'')+(i.noteat?'<span class="also">'+esc(i.noteby)+', '+esc(i.noteat)+'</span>':'')+'</span>'+
    '<span class="chev" aria-hidden="true">&#9654;</span></button><div class="slot"></div></div>';
 }
-function issueDetail(i,sec){
+function issueDetail(i){
   let h='<div class="detail"><div class="long">';
   h+='<div class="fld"><h3>Status</h3><div class="body"><p>'+sp(i.status)+'</p></div></div>'+'<div class="fld"><h3>Waiting on</h3><div class="body"><p>'+inline(i.waiting)+'</p></div></div>'+'<div class="fld"><h3>Next step</h3><div class="body"><p>'+inline(i.next)+'</p></div></div>'+(i.notes?'<div class="fld"><h3>Notes</h3><div class="body"><p>'+inline(i.notes)+'</p></div></div>':'')+(i.cross?'<div class="fld"><h3>Other engines involved</h3><div class="body"><p>'+esc(i.cross)+'</p></div></div>':'');
   for(const [k,l] of FLD){ if(i.long[k]) h+='<div class="fld"><h3>'+l+'</h3><div class="body">'+md(i.long[k])+'</div></div>'; }
-  h+='</div><div class="side">'+ruleBox(i.id,sec)+
-   '<div class="kv"><span>On GitHub</span><a href="'+i.url+'" target="_blank" rel="noopener">'+esc(i.repo)+' #'+i.n+'</a></div>'+
-   '<div class="kv"><span>Opened / last updated</span><span class="mono">'+i.created+' / '+i.updated+'</span></div>'+
+  h+='</div><div class="side">'+
+   '<div class="kv"><span>On GitHub</span><a href="'+url(i.url)+'" target="_blank" rel="noopener">'+esc(i.repo)+' #'+i.n+'</a></div>'+
+   '<div class="kv"><span>Opened / last updated</span><span class="mono">'+esc(i.created)+' / '+esc(i.updated)+'</span></div>'+
    (i.labels.length?'<div class="kv"><span>Labels</span><span>'+esc(i.labels.join(', '))+'</span></div>':'')+
    '</div></div>';
   return h;
@@ -222,7 +223,7 @@ function group(title,note,rows,sec,withRepo){
     '<div class="list">'+COLS+rows.map(i=>issueRow(i,sec,withRepo)).join('')+'</div></div>';
 }
 function passI(i){
-  const q=$('f-q').value.trim().toLowerCase(), rp=$('f-repo').value, pr=$('f-prio').value, who=$('f-who').value, tg=$('f-tag').value, ru='';
+  const q=$('f-q').value.trim().toLowerCase(), rp=$('f-repo').value, pr=$('f-prio').value, who=$('f-who').value, tg=$('f-tag').value;
   if(rp&&i.repo!==rp) return false; if(pr&&i.prio!==pr) return false;
   if(who){ if(who==='__none'){ if(i.assignees.length) return false; } else if(!i.assignees.includes(who)&&!(i.proposed||'').includes(who)) return false; }
   if(tg&&i.status!==tg) return false;
@@ -233,31 +234,31 @@ document.addEventListener('click',e=>{
   const b=e.target.closest&&e.target.closest('[data-toggle]'); if(!b) return;
   const row=b.parentElement, slot=row.querySelector('.slot'), it=byId[b.dataset.toggle], open=row.classList.toggle('open');
   b.setAttribute('aria-expanded',open?'true':'false');
-  slot.innerHTML=open?(it.disp!==undefined?prDetail(it,b.dataset.sec):issueDetail(it,b.dataset.sec)):'';
+  slot.innerHTML=open?(it.disp!==undefined?prDetail(it):issueDetail(it)):'';
 });
 
 /* ---------- pull requests ---------- */
 const PCOLS='<div class="cols"><span>PR</span><span>Name</span><span>Author</span><span>State today</span><span>Disposition</span><span>Why</span><span></span></div>';
 function prRow(p,sec){
   const st=p.mergeable+'; CI '+p.ci+(p.approved.length?'; approved by '+p.approved.join(', '):'')+(p.draft?'; draft':'');
-  return '<div class="row"><button class="rowh" type="button" aria-expanded="false" data-toggle="'+p.id+'" data-sec="'+sec+'">'+
+  return '<div class="row"><button class="rowh" type="button" aria-expanded="false" data-toggle="'+esc(p.id)+'">'+
    '<span class="cell c-ref ref">'+esc(p.repo)+' #'+p.n+'</span>'+
-   '<span class="cell c-main"><span class="ttl">'+esc(p.title)+'</span><span data-chip="'+p.id+'" style="display:block">'+chip(p.id)+'</span></span>'+
+   '<span class="cell c-main"><span class="ttl">'+esc(p.title)+'</span></span>'+
    '<span class="cell c-au"><span class="lab">Author</span>'+esc(p.author)+'</span>'+
    '<span class="cell c-st"><span class="lab">State</span>'+esc(st)+'</span>'+
    '<span class="cell c-act"><span class="lab">Disposition</span><b style="font-weight:500">'+esc(p.disp)+'</b></span>'+
    '<span class="cell c-x"><span class="lab">Why</span>'+inline(p.note)+'</span>'+
    '<span class="chev" aria-hidden="true">&#9654;</span></button><div class="slot"></div></div>';
 }
-function prDetail(p,sec){
+function prDetail(p){
   return '<div class="detail"><div class="long">'+
    '<div class="fld"><h3>Disposition</h3><div class="body"><p><b>'+esc(p.disp)+'.</b> '+inline(p.note)+'</p></div></div>'+
    '<div class="fld"><h3>Branch</h3><div class="body"><p><code>'+esc(p.head)+'</code> into <code>'+esc(p.base)+'</code></p></div></div>'+
    '<div class="fld"><h3>Size</h3><div class="body"><p class="mono">'+esc(p.size)+'</p></div></div>'+
    '<div class="fld"><h3>Checks</h3><div class="body"><p>'+esc(p.mergeable)+'. CI '+esc(p.ci)+'.'+(p.approved.length?' Approved by '+esc(p.approved.join(', '))+'.':' No human approval.')+'</p></div></div>'+
-   '</div><div class="side">'+ruleBox(p.id,sec)+
-   '<div class="kv"><span>On GitHub</span><a href="'+p.url+'" target="_blank" rel="noopener">'+esc(p.repo)+' #'+p.n+'</a></div>'+
-   '<div class="kv"><span>Opened / last updated</span><span class="mono">'+p.created+' / '+p.updated+'</span></div></div></div>';
+   '</div><div class="side">'+
+   '<div class="kv"><span>On GitHub</span><a href="'+url(p.url)+'" target="_blank" rel="noopener">'+esc(p.repo)+' #'+p.n+'</a></div>'+
+   '<div class="kv"><span>Opened / last updated</span><span class="mono">'+esc(p.created)+' / '+esc(p.updated)+'</span></div></div></div>';
 }
 function prList(rows,sec){return '<div class="list pr">'+PCOLS+rows.map(p=>prRow(p,sec)).join('')+'</div>';}
 function renderPRs(){
@@ -268,7 +269,7 @@ function renderPRs(){
   for(const r of ['trade-ngin','algogators','AlgoLens','algosystem','algogauge']){
     const rr=rows.filter(p=>p.repo===r).sort((a,b)=>(a.lane==='dep')-(b.lane==='dep')||a.n-b.n); if(!rr.length) continue;
     const depAll=D.prs.filter(p=>p.repo===r&&p.lane==='dep').length;
-    h+='<div class="group"><div class="ghead"><h2>'+r+(r==='algogators'?' (monorepo)':'')+'</h2><span class="n">'+rr.length+' shown'+(depAll&&!dep?', '+depAll+' Dependabot hidden':'')+'</span></div>'+prList(rr,'p')+'</div>';
+    h+='<div class="group"><div class="ghead"><h2>'+esc(r)+(r==='algogators'?' (monorepo)':'')+'</h2><span class="n">'+rr.length+' shown'+(depAll&&!dep?', '+depAll+' Dependabot hidden':'')+'</span></div>'+prList(rr,'p')+'</div>';
   }
   $('pr-groups').innerHTML=h||'<div class="list"><div class="empty">No pull request matches these filters.</div></div>';
   $('pf-count').textContent=rows.length+' of '+D.prs.length+' pull requests';
@@ -280,8 +281,8 @@ function show(t){ if(!TABS.some(x=>x[0]===t)) t='issues';
   try{history.replaceState(null,'','#'+t);}catch(e){} try{localStorage.setItem('algogators-tracker-tab',t);}catch(e){} }
 $('tabs').innerHTML=TABS.map(x=>'<button class="tab" role="tab" id="t-'+x[0]+'" data-tab="'+x[0]+'" type="button">'+x[1]+(x[2]!==''?'<span class="ct">'+x[2]+'</span>':'')+'</button>').join('');
 $('tabs').addEventListener('click',e=>{const b=e.target.closest('[data-tab]'); if(b) show(b.dataset.tab);});
-REPOS.forEach(r=>{$('f-repo').insertAdjacentHTML('beforeend','<option>'+r+'</option>');});
-['trade-ngin','algogators','AlgoLens','algosystem','algogauge'].forEach(r=>$('pf-repo').insertAdjacentHTML('beforeend','<option>'+r+'</option>'));
+REPOS.forEach(r=>{$('f-repo').insertAdjacentHTML('beforeend','<option>'+esc(r)+'</option>');});
+['trade-ngin','algogators','AlgoLens','algosystem','algogauge'].forEach(r=>$('pf-repo').insertAdjacentHTML('beforeend','<option>'+esc(r)+'</option>'));
 [...new Set(D.issues.flatMap(i=>i.assignees))].sort().forEach(n=>$('f-who').insertAdjacentHTML('beforeend','<option>'+esc(n)+'</option>'));
 $('f-who').insertAdjacentHTML('beforeend','<option value="__none">Unassigned</option>');
 [...new Set(D.prs.map(p=>p.author))].sort().forEach(n=>$('pf-who').insertAdjacentHTML('beforeend','<option>'+esc(n)+'</option>'));
@@ -291,8 +292,6 @@ $('f-who').insertAdjacentHTML('beforeend','<option value="__none">Unassigned</op
 ['pf-q','pf-repo','pf-who','pf-disp'].forEach(id=>$(id).addEventListener('input',renderPRs));
 
 
-function ruleBox(){return '';}
-function chip(){return '';}
 function updateStats(){
   const open=D.issues.filter(i=>i.status!=='Closed'), un=open.filter(i=>!i.assignees.length).length, rdy=open.filter(i=>i.status==='Ready to start').length, blk=open.filter(i=>i.status==='Blocked').length;
   $('stats').innerHTML='<span><b>'+open.length+'</b> open issues</span><span><b>'+rdy+'</b> ready to start</span><span><b>'+blk+'</b> blocked</span><span><b>'+un+'</b> unassigned</span><span><b>'+D.prs.filter(p=>p.lane!=='dep').length+'</b> open pull requests</span><span><b>'+D.prs.filter(p=>p.lane==='dep').length+'</b> Dependabot</span>';
@@ -308,7 +307,7 @@ function renderUT(){
    '<p>One person a week adds tests for one phase and hands off with a comment on the issue. Every phase adds new tests, so the test count and coverage rise each week. Baseline on main: 1,872 tests, 55.1% of source lines covered.</p>'+
    '<p>Phase 0 goes first because every later phase uses its tooling. The other phases do not depend on each other, so the order below is by who is best placed for each. This order is proposed.</p></div>'+
    '<div class="plain"><table><tr><th>Week</th><th>Person</th><th>Phase</th><th>What is delivered</th><th>Note</th></tr>'+
-   D.rotation.map(r=>'<tr><td class="mono">'+r.week+'</td><td><b style="font-weight:600">'+esc(r.person)+'</b></td><td>'+esc(r.phase)+'</td><td>'+esc(r.deliver)+'</td><td>'+esc(r.note)+'</td></tr>').join('')+'</table></div>'+
+   D.rotation.map(r=>'<tr><td class="mono">'+esc(r.week)+'</td><td><b style="font-weight:600">'+esc(r.person)+'</b></td><td>'+esc(r.phase)+'</td><td>'+esc(r.deliver)+'</td><td>'+esc(r.note)+'</td></tr>').join('')+'</table></div>'+
    '<div class="prose"><h3>Rules</h3><ul><li>Tests only: changes go under <code>tests/</code>, and a pull request shows the test count rose by the number added.</li><li>A test must catch a regression: break the covered line by hand, see the test fail, restore it.</li><li>A bug a test finds is pinned first. It is fixed in the same phase only if the fix moves no stored number; otherwise it is reported to a lead.</li><li>Never point a test or a runner at the production database.</li></ul></div>';
 }
 function renderPeople(){
@@ -317,7 +316,7 @@ function renderPeople(){
   for(const name of Object.keys(D.queues)){
     const q=D.queues[name]; if(!q.length) continue;
     h+='<div class="group"><div class="ghead"><h2>'+esc(name)+'</h2><span class="n">'+q.length+' issues</span></div><div class="plain"><table><tr><th>No.</th><th>Pri</th><th>Issue</th><th>Name</th><th>Status</th><th>Waiting on</th><th>Next step</th></tr>'+
-      q.map((x,k)=>{const i=byId[x.id];return '<tr><td class="mono">'+(k+1)+'</td><td><span class="pill '+i.prio+'">'+i.prio+'</span></td><td class="mono" style="white-space:nowrap"><a href="'+i.url+'" target="_blank" rel="noopener">'+esc(i.repo)+' #'+i.n+'</a></td><td>'+esc(i.title)+(x.start?' <span class="sp go">Start here</span>':'')+(x.proposed?' <span class="also">Proposed owner; not yet assigned</span>':'')+'</td><td>'+sp(i.status)+'</td><td>'+inline(i.waiting)+'</td><td>'+inline(i.next)+'</td></tr>';}).join('')+'</table></div></div>';
+      q.map((x,k)=>{const i=byId[x.id];return '<tr><td class="mono">'+(k+1)+'</td><td><span class="pill '+esc(i.prio)+'">'+esc(i.prio)+'</span></td><td class="mono" style="white-space:nowrap"><a href="'+url(i.url)+'" target="_blank" rel="noopener">'+esc(i.repo)+' #'+i.n+'</a></td><td>'+esc(i.title)+(x.start?' <span class="sp go">Start here</span>':'')+(x.proposed?' <span class="also">Proposed owner; not yet assigned</span>':'')+'</td><td>'+sp(i.status)+'</td><td>'+inline(i.waiting)+'</td><td>'+inline(i.next)+'</td></tr>';}).join('')+'</table></div></div>';
   }
   $('p-people').innerHTML=h;
 }
@@ -326,9 +325,9 @@ function renderDep(){
   for(const r of ['trade-ngin','algogators','AlgoLens','algosystem','algogauge']){
     const rr=D.prs.filter(p=>p.repo===r&&p.lane==='dep').sort((a,b)=>a.disp.localeCompare(b.disp)||a.n-b.n); if(!rr.length) continue;
     const by={}; rr.forEach(p=>by[p.disp]=(by[p.disp]||0)+1);
-    h+='<div class="group"><div class="ghead"><h2>'+r+'</h2><span class="n">'+rr.length+' open: '+Object.keys(by).map(k=>by[k]+' '+k.toLowerCase()).join(', ')+'</span></div>'+
+    h+='<div class="group"><div class="ghead"><h2>'+esc(r)+'</h2><span class="n">'+rr.length+' open: '+esc(Object.keys(by).map(k=>by[k]+' '+k.toLowerCase()).join(', '))+'</span></div>'+
        '<div class="plain"><table><tr><th>PR</th><th>Update</th><th>State today</th><th>What to do</th></tr>'+
-       rr.map(p=>'<tr><td class="mono"><a href="'+p.url+'" target="_blank" rel="noopener">#'+p.n+'</a></td><td>'+esc(p.title)+'</td><td>'+esc(p.mergeable+'; CI '+p.ci)+'</td><td>'+esc(p.disp)+'</td></tr>').join('')+'</table></div></div>';
+       rr.map(p=>'<tr><td class="mono"><a href="'+url(p.url)+'" target="_blank" rel="noopener">#'+p.n+'</a></td><td>'+esc(p.title)+'</td><td>'+esc(p.mergeable+'; CI '+p.ci)+'</td><td>'+esc(p.disp)+'</td></tr>').join('')+'</table></div></div>';
   }
   $('p-dep').innerHTML=h;
 }
@@ -338,7 +337,7 @@ function renderIssues(){
   const all=D.issues.filter(passI).filter(i=>!pj||i.project===pj), live=all.filter(i=>i.status!=='Closed');
   let h='';
   if($('f-view').value==='engine'){
-    const main=live.filter(i=>i.lane==='main'), xorder=['algogators','trade-ngin','algosystem','algogauge','AlgoLens'];
+    const main=live.filter(i=>i.lane==='main');
     h+=group('Cross-engine work','Work that spans engines, in priority order. Each row also appears in its own engine below.',main.filter(i=>i.cross).sort((a,b)=>PO[a.prio]-PO[b.prio]||a.rank-b.rank),'x',true);
     for(const r of REPOS) h+=group(r,'',main.filter(i=>i.repo===r).sort(sortI),'e',false);
     h+=group('QT platform','Under review by Dom. See the QT platform tab.',live.filter(i=>i.lane==='qtjr').sort(sortI),'q',true);
@@ -354,7 +353,7 @@ function renderIssues(){
   $('issue-groups').innerHTML=h||'<div class="list"><div class="empty">No issue matches these filters.</div></div>';
   $('f-count').textContent=live.length+' open issues shown';
 }
-D.projects.forEach(p=>$('f-proj').insertAdjacentHTML('beforeend','<option value="'+p.key+'">'+esc(p.name)+'</option>'));
+D.projects.forEach(p=>$('f-proj').insertAdjacentHTML('beforeend','<option value="'+esc(p.key)+'">'+esc(p.name)+'</option>'));
 ['f-view','f-proj'].forEach(id=>$(id).addEventListener('input',renderIssues));
 
 if(D.updated&&$('upd')) $('upd').textContent='Updated from GitHub: '+D.updated+'.';

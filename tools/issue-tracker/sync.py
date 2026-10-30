@@ -37,7 +37,7 @@ def parse_status(comments):
         if extra: f['notes']=(f.get('notes','')+' '+' '.join(extra)).strip()
         return f
     return None
-base=json.load(open(os.path.join(HERE,'base.json'),encoding='utf-8'))
+with open(os.path.join(HERE,'base.json'),encoding='utf-8') as fh: base=json.load(fh)
 B={(i['repo'],i['n']):i for i in base['issues']}
 BP={(p['repo'],p['n']):p for p in base['prs']}
 # order of work: the pinned issue trade-ngin #153 lists every issue, top first
@@ -144,14 +144,14 @@ for p in ['Fabio','Oliver','Sivan','Gaby','Pranav','John Riley','Dom']+sorted(se
 projects=base['projects']+([dict(key='unsorted',name='Not yet sorted into a project',desc="New issues without a 'project:' label.")] if any(i['project']=='unsorted' for i in issues) else [])
 out=dict(issues=issues+closed,prs=prs,rotation=base['rotation'],people=[],queues=queues,projects=projects,updated=(lambda n: f'{n.day} {n:%B %Y, %H:%M}')(datetime.datetime.now()))
 s=mig(json.dumps(out,separators=(',',':'))).replace('</','<\\/')
-t=open(os.path.join(HERE,'template.html'),encoding='utf-8').read()
+with open(os.path.join(HERE,'template.html'),encoding='utf-8') as fh: t=fh.read()
 args=[a for a in sys.argv[1:] if not a.startswith('--')]
 dest=args[0] if args else os.path.join(HERE,'algogators-issue-tracker.html')
 page=t.replace('__DATA__',s)
 if '--standalone' in sys.argv:  # a full web page, for hosting as a file or on Pages
     page='<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>body{margin:0}[hidden]{display:none!important}</style></head><body>\n'+page+'\n</body></html>'
 os.makedirs(os.path.dirname(os.path.abspath(dest)),exist_ok=True)
-open(dest,'w',encoding='utf-8').write(page)
+with open(dest,'w',encoding='utf-8') as fh: fh.write(page)
 from collections import Counter
 print(f"Open issues: {len(issues)}. Open PRs: {len(prs)} ({sum(1 for p in prs if p['lane']=='dep')} Dependabot). Status: {dict(Counter(i['status'] for i in issues))}")
 def show(title,rows):
