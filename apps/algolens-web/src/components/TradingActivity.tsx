@@ -12,6 +12,8 @@ export function TradingActivity({ executions, finalizedPositions }: TradingActiv
 
   const totalNotional = executions.reduce((sum, exec) => sum + exec.notional, 0);
   const totalCommissions = executions.reduce((sum, exec) => sum + exec.commission, 0);
+  // Issue #59: a book with several sleeves names the sleeve under each fill's symbol.
+  const showSleeve = new Set(executions.map(exec => exec.sleeve).filter(Boolean)).size > 1;
 
   return (
     <div className="space-y-6">
@@ -60,7 +62,14 @@ export function TradingActivity({ executions, finalizedPositions }: TradingActiv
                   ? new Date(execution.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
                   : '-'}
               </div>
-              <div>{execution.symbol}</div>
+              <div>
+                {execution.symbol}
+                {showSleeve && execution.sleeve ? (
+                  <div className={`text-xs ${theme === 'dark' ? 'text-gray-500' : 'text-gray-400'}`}>
+                    {execution.sleeve}
+                  </div>
+                ) : null}
+              </div>
               <div>
                 <span className={`px-2 py-1 rounded text-xs ${
                   execution.side === 'BUY'

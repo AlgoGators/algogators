@@ -29,8 +29,11 @@ class PortfolioDetailRows:
     # D-32: contract size by symbol root (metadata.contract_metadata); a root not listed
     # counts with size 1 (equities).
     contract_sizes: Mapping[str, float] = field(default_factory=dict)
-    # D-20: the book's strategies (sleeves) on its latest date: [{name, positions}].
+    # D-20: the book's strategies (sleeves) on its latest date:
+    # [{name, positions, allocation?}]; issue #59: the run's strategy_allocations name them.
     sleeves: Sequence[Mapping[str, Any]] = ()
+    # Issue #59: each date the run's sleeve set changed: [{date, added, removed}].
+    sleeve_changes: Sequence[Mapping[str, Any]] = ()
 
 
 @dataclass(frozen=True)
@@ -48,17 +51,8 @@ class StrategyRegistryPort(Protocol):
 
 
 class PortfolioReaderPort(Protocol):
-    def fetch_summary_row(
-        self, strategy_type: str, portfolio_id: str
-    ) -> Mapping[str, Any] | None: ...
-
-    def fetch_detail_rows(
-        self,
-        strategy_type: str,
-        portfolio_id: str,
-        book: str = DEFAULT_BOOK,
-        allow_fallback: bool = True,
-    ) -> PortfolioDetailRows: ...
+    # Issue #59: a book is read by its portfolio id; the strategy id is never a key.
+    def fetch_summary_row(self, portfolio_id: str) -> Mapping[str, Any] | None: ...
 
     def fetch_portfolio_rows(
         self,
