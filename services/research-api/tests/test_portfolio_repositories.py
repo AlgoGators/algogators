@@ -215,7 +215,7 @@ def detail_handler(
             return {"?column?": 1}  # the requested book has rows
         if "GROUP BY strategy_name" in sql:
             return sleeves or []
-        if "FROM trading.positions" in sql and "DISTINCT ON" in sql:
+        if "FROM trading.positions" in sql and "AND date < (" in sql:
             return yesterday
         if "FROM trading.positions" in sql and "GROUP BY symbol" in sql:
             return positions
@@ -361,6 +361,37 @@ def test_fetch_portfolio_rows_lists_the_runs_sleeves_and_their_changes() -> None
     ((sql, params),) = cursor.calls_matching("FROM trading.live_run_metadata")
     assert params == ("BASE",)
     assert "strategy_id" not in sql
+
+
+def test_several_run_rows_on_one_date_read_as_their_union() -> None:
+    """Leftover strategy ids write their own run row on a date; the book's sleeves that day
+    are the union, never one row picked by write order (a false "off" then "on")."""
+    d1, d2, d3 = date(2025, 11, 12), date(2025, 11, 13), date(2025, 11, 14)
+    runs = [  # as the query orders them: by date, newest row first
+        {"date": d1, "strategy_allocations": {"TF": 0.7, "FAST": 0.3}},
+        {"date": d2, "strategy_allocations": {"TF": 1.0}},  # leftover id, written last
+        {"date": d2, "strategy_allocations": {"TF": 0.7, "FAST": 0.3}},
+        {"date": d3, "strategy_allocations": {"TF": 0.7, "FAST": 0.3}},
+    ]
+    cursor = ScriptedCursor(
+        detail_handler(
+            latest={"date": d3},
+            portfolio_type_column=True,
+            equity={},
+            positions=[],
+            executions=[],
+            yesterday=[],
+            sleeves=[],
+            runs=runs,
+        )
+    )
+    repo, _conn = make_repo(cursor)
+
+    result = repo.fetch_portfolio_rows("BASE", book="system")
+
+    assert result.sleeve_changes == []
+    runs_read = repo._run_allocations(cursor, "BASE")
+    assert runs_read[1] == {"date": d2, "allocations": {"TF": 1.0, "FAST": 0.3}}
 
 
 def test_a_sleeve_that_ran_flat_is_listed_with_no_positions() -> None:

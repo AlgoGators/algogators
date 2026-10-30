@@ -1,6 +1,7 @@
 """Postgres portfolio readers."""
 
 import time
+from typing import Any
 
 import psycopg2
 
@@ -225,13 +226,21 @@ class PostgresPortfolioRepository:
         return cursor.fetchall()
 
     def _portfolio_yesterday_positions(self, cursor, portfolio_id, book, has_portfolio_type):
+        """The book's positions on its previous date, netted across sleeves as today's are,
+        so a symbol two sleeves hold compares net with net. A net-zero symbol is kept: it is
+        what the comparison with today reads as closed."""
         book_filter = "AND portfolio_type = %s" if has_portfolio_type else ""
         params = (portfolio_id, book) if has_portfolio_type else (portfolio_id,)
         cursor.execute(
             f"""
-            SELECT DISTINCT ON (symbol)
-                   symbol, quantity, average_price,
-                   daily_unrealized_pnl, daily_realized_pnl, updated_at
+            SELECT symbol,
+                   SUM(quantity) AS quantity,
+                   CASE WHEN SUM(quantity) <> 0
+                        THEN SUM(quantity * average_price) / SUM(quantity)
+                        ELSE MAX(average_price) END AS average_price,
+                   SUM(daily_unrealized_pnl) AS daily_unrealized_pnl,
+                   SUM(daily_realized_pnl) AS daily_realized_pnl,
+                   MAX(updated_at) AS updated_at
             FROM trading.positions
             WHERE portfolio_id = %s {book_filter}
             AND date = (
@@ -242,7 +251,8 @@ class PostgresPortfolioRepository:
                     WHERE portfolio_id = %s {book_filter}
                 )
             )
-            ORDER BY symbol, updated_at DESC
+            GROUP BY symbol
+            ORDER BY symbol
             """,
             params * 3,
         )
@@ -303,9 +313,12 @@ class PostgresPortfolioRepository:
     def _run_allocations(self, cursor, portfolio_id):
         """Issue #59: the sleeves each run of the book allocated to, one entry per date.
 
-        trading.live_run_metadata holds one row per portfolio and run date (a date run twice
-        keeps its newest row here); `strategy_allocations` is a JSON object of sleeve name to
-        allocation. Returns [{date, allocations}] oldest first, or [] where the table is absent.
+        trading.live_run_metadata holds a row per portfolio, run date and strategy id;
+        `strategy_allocations` is a JSON object of sleeve name to allocation. A date with several
+        rows (BASE's leftover strategy ids of late 2025) is read as the union of their sleeves,
+        each with its allocation from the newest row naming it, so leftover rows never read as a
+        sleeve switching off and on. Returns [{date, allocations}] oldest first, or [] where the
+        table is absent.
         """
         cursor.execute("SELECT to_regclass('trading.live_run_metadata') IS NOT NULL AS present")
         present = cursor.fetchone()
@@ -313,26 +326,27 @@ class PostgresPortfolioRepository:
             return []
         cursor.execute(
             """
-            SELECT DISTINCT ON (date) date, strategy_allocations
+            SELECT date, strategy_allocations
             FROM trading.live_run_metadata
             WHERE portfolio_id = %s AND strategy_allocations IS NOT NULL
             ORDER BY date, created_at DESC NULLS LAST, id DESC
             """,
             (portfolio_id,),
         )
-        runs = []
+        by_date: dict[Any, dict[str, float | None]] = {}
         for row in cursor.fetchall():
             raw = row["strategy_allocations"]
             if not isinstance(raw, dict):
                 continue
-            allocations: dict[str, float | None] = {}
+            allocations = by_date.setdefault(row["date"], {})
             for name, weight in raw.items():
+                if str(name) in allocations:
+                    continue  # a newer row of the same date already named it
                 try:
                     allocations[str(name)] = float(weight)
                 except (TypeError, ValueError):
                     allocations[str(name)] = None
-            runs.append({"date": row["date"], "allocations": allocations})
-        return runs
+        return [{"date": day, "allocations": allocations} for day, allocations in by_date.items()]
 
     def fetch_portfolio_rows(self, portfolio_id, book=DEFAULT_BOOK, allow_fallback=True):
         """Detail rows for one portfolio's book, found by portfolio id alone."""

@@ -101,6 +101,19 @@ def test_positions_sql_filters_book_and_latest_date_then_nets_and_drops_zero():
     assert "HAVING SUM(quantity) <> 0" in sql
 
 
+def test_yesterday_is_netted_across_sleeves_like_today():
+    # Review of #59: with yesterday's row per symbol taken from one sleeve, a symbol two
+    # sleeves hold compared one sleeve's quantity with today's net and read as changed daily.
+    cursor = RecordingCursor()
+    PostgresPortfolioRepository()._portfolio_yesterday_positions(cursor, "P1", "qt", True)
+    ((sql, params),) = cursor.calls
+    assert params == ("P1", "qt") * 3
+    assert "SUM(quantity) AS quantity" in sql
+    assert "GROUP BY symbol" in sql
+    assert "DISTINCT ON" not in sql
+    assert "HAVING" not in sql  # a net-zero symbol stays: the comparison reads it as closed
+
+
 def test_positions_on_unmigrated_db_drop_book_predicate():
     cursor = RecordingCursor()
     PostgresPortfolioRepository()._portfolio_positions(cursor, "P1", "system", False)
