@@ -1,0 +1,19 @@
+# QT scheduler watchdog (docs/design/desk-service.md, "Scheduler"), new_algo_data only.
+# Install as /etc/cron.d/algogators-qt (root:root 0644), replacing the old 10:15 model run.
+#
+# The model runs, the 09:30 send and the 10:00 fallback are scheduled inside engine-rpc
+# (background task desk.catchup: every 5 min 06:30-10:30, then every 30 min to 22:00,
+# America/New_York, every day). This cron only checks that a pass ran recently (15 minutes in
+# the 06:30-10:30 window, 75 minutes after it) and, if not (the server's thread died, or it was
+# down), runs one itself through the same code and locks. It fires every 5 minutes around the
+# clock; outside the window it does nothing. The host clock is UTC; the window is checked in New
+# York time by the script.
+SHELL=/bin/bash
+*/5 * * * * ubuntu docker exec engine-rpc /app/scripts/qt_catchup.sh watchdog >> /home/ubuntu/qt-engine/logs/qt-watchdog.log 2>&1
+
+# D-39: the host watchdog, outside the container, so a stopped, crash-looping or wedged
+# engine-rpc still reaches the President. Standard-library python3 and the docker CLI only.
+# Install: copy deploy/qt_host_watchdog.py to /home/ubuntu/qt-engine/, and write
+# /home/ubuntu/qt-engine/qt-host-watchdog.env (mode 600; ALERT_TO, SMTP_HOST, SMTP_PORT,
+# SMTP_USER, SMTP_PASSWORD, MAIL_FROM; the rest has defaults, see the script's docstring).
+*/5 * * * * ubuntu set -a; . /home/ubuntu/qt-engine/qt-host-watchdog.env; set +a; python3 /home/ubuntu/qt-engine/qt_host_watchdog.py >> /home/ubuntu/qt-engine/logs/qt-host-watchdog.log 2>&1

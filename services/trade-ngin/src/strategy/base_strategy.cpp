@@ -1,12 +1,15 @@
 // src/strategy/base_strategy.cpp
 
 #include "trade_ngin/strategy/base_strategy.hpp"
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <sstream>
 #include "trade_ngin/core/logger.hpp"
 #include "trade_ngin/core/state_manager.hpp"
 #include "trade_ngin/data/database_pooling.hpp"
 #include "trade_ngin/data/market_data_bus.hpp"
+#include "trade_ngin/transaction_cost/netting.hpp"
 
 namespace trade_ngin {
 
@@ -16,6 +19,22 @@ BaseStrategy::BaseStrategy(std::string id, StrategyConfig config,
       config_(std::move(config)),
       state_(StrategyState::INITIALIZED),
       db_(std::move(db)) {
+    // Initialize metadata
+    metadata_.id = id_;
+    metadata_.name = "Base Strategy";
+    metadata_.description = "Base strategy implementation";
+
+    // Initialize risk limits from config
+    risk_limits_.max_leverage = config_.max_leverage;
+    risk_limits_.max_drawdown = config_.max_drawdown;
+
+    Logger::register_component("BaseStrategy");
+}
+
+BaseStrategy::BaseStrategy() : state_(StrategyState::INITIALIZED) {
+    // Default constructor for Python bindings
+    // Fields will be initialized in initialize_from_context()
+
     // Initialize metadata
     metadata_.id = id_;
     metadata_.name = "Base Strategy";
@@ -43,10 +62,11 @@ Result<void> BaseStrategy::initialize() {
     }
 
     try {
-        // Initialize database connection if needed
+        // A database connection is optional: this class does not use it, and a backtest driven by
+        // a custom MarketDataSource (the Python wrapper) runs without one. Strategies that read
+        // from the database check it themselves.
         if (!db_) {
-            return make_error<void>(ErrorCode::NOT_INITIALIZED,
-                                    "Database interface not initialized", "BaseStrategy");
+            INFO("No database connection; strategy results will not be persisted");
         }
 
         // Generate a unique component ID for this strategy
@@ -192,23 +212,41 @@ Result<void> BaseStrategy::on_data(const std::vector<Bar>& data) {
 }
 
 Result<void> BaseStrategy::on_execution(const ExecutionReport& report) {
+    // A ROLL leg or a BORROW row is not a trade of the
+    // strategy: no basis arithmetic, no count, no win-rate.
+    if (report.execution_type != ExecutionType::STRATEGY) return Result<void>();
+
     std::lock_guard<std::mutex> lock(mutex_);
 
     try {
         auto& pos = positions_[report.symbol];
 
-        // Calculate realized PnL if closing position
+        // Calculate realized PnL if closing position.
+        //
+        // Realize on the CLOSED quantity, not on the whole fill. A fill that
+        // crosses zero -- long 100, SELL 150 -- closes 100 shares against the existing basis and
+        // OPENS 50 new ones at the fill price. Multiplying the price difference by the full 150
+        // would book P&L on 50 shares that were never held, and the overstatement would be
+        // permanent: it lands in pos.realized_pnl and metrics_.realized_pnl, which live_results
+        // and trading.positions.daily_realized_pnl are built from.
+        //
+        // MeanReversionStrategy cannot flip in a single bar and TF/TFF/TFS override
+        // on_execution; an optimizer-driven QP_FLIP/RISK_SCALE_FLIP on any non-overriding
+        // strategy reaches this path.
         if ((pos.quantity > 0 && report.side == Side::SELL) ||
             (pos.quantity < 0 && report.side == Side::BUY)) {
+            const double closed_quantity =
+                std::min(std::abs(static_cast<double>(pos.quantity)),
+                         static_cast<double>(report.filled_quantity));
             double realized_pnl = 0.0;
             if (report.side == Side::SELL) {
                 realized_pnl = (static_cast<double>(report.fill_price) -
                                 static_cast<double>(pos.average_price)) *
-                               static_cast<double>(report.filled_quantity);
+                               closed_quantity;
             } else {
                 realized_pnl = (static_cast<double>(pos.average_price) -
                                 static_cast<double>(report.fill_price)) *
-                               static_cast<double>(report.filled_quantity);
+                               closed_quantity;
             }
 
             pos.realized_pnl += Decimal(realized_pnl);
@@ -255,12 +293,28 @@ Result<void> BaseStrategy::on_execution(const ExecutionReport& report) {
 
         pos.last_update = report.fill_time;
 
-        // Always subtract transaction costs from realized PnL (for all trades, not just closing)
-        // This ensures transaction costs are accounted for in opening positions too
-        double transaction_cost = static_cast<double>(report.total_transaction_costs);
-        pos.realized_pnl -= Decimal(transaction_cost);
-        metrics_.realized_pnl -= transaction_cost;
-        metrics_.total_pnl -= transaction_cost;
+        // `pos.realized_pnl` is GROSS trade P&L. Transaction costs are NOT
+        // netted into it.
+        //
+        // This field is persisted as trading.positions.daily_realized_pnl (via
+        // LiveDailyCycle::resolve_and_apply_basis), while live_results carries costs in
+        // their own column. Netting costs here would make the row net-of-cost and the
+        // aggregate net-of-commission-only, so the two would reconcile against different
+        // cost bases and the row-sums-to-aggregate check could never be exact.
+        //
+        // The reporting model mirrors futures: realized is gross, costs are a separate
+        // column, and the consumer subtracts once --
+        //     daily_pnl = (daily_realized_pnl - daily_transaction_costs) + daily_unrealized_pnl
+        // Netting here as well would subtract them twice.
+        //
+        // metrics_ is deliberately left net. It is internal strategy bookkeeping, and
+        // metrics_.total_pnl feeds the drawdown gate in check_risk_limits(); making that
+        // gross would quietly loosen a risk limit. The asymmetry
+        // is intentional: metrics_ is a risk input, pos.realized_pnl is a reported figure.
+        // The cost after netting, as every other total charges it.
+        const double net_transaction_cost = static_cast<double>(transaction_cost::net_cost(report));
+        metrics_.realized_pnl -= net_transaction_cost;
+        metrics_.total_pnl -= net_transaction_cost;
 
         // Update metrics
         metrics_.total_trades++;
@@ -345,8 +399,7 @@ Result<void> BaseStrategy::seed_positions(
     const std::unordered_map<std::string, Position>& positions) {
     std::lock_guard<std::mutex> lock(mutex_);
     positions_ = positions;
-    INFO("Seeded " + std::to_string(positions.size()) +
-         " positions into strategy " + id_ +
+    INFO("Seeded " + std::to_string(positions.size()) + " positions into strategy " + id_ +
          " (anchors position buffer across process restart)");
     return Result<void>();
 }
@@ -355,6 +408,18 @@ Result<void> BaseStrategy::update_risk_limits(const RiskLimits& limits) {
     std::lock_guard<std::mutex> lock(mutex_);
     risk_limits_ = limits;
     return check_risk_limits();
+}
+
+Result<void> BaseStrategy::set_capital_allocation(double capital) {
+    if (!std::isfinite(capital) || capital <= 0.0) {
+        return make_error<void>(ErrorCode::INVALID_ARGUMENT,
+                                "Invalid sizing capital " + std::to_string(capital) +
+                                    ": it must be a finite positive number",
+                                "BaseStrategy");
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_.capital_allocation = capital;
+    return Result<void>();
 }
 
 Result<void> BaseStrategy::check_risk_limits() {
@@ -409,12 +474,16 @@ Result<void> BaseStrategy::check_risk_limits() {
     double drawdown = (metrics_.total_pnl / config_.capital_allocation);
     const double MIN_DRAWDOWN_THRESHOLD = 0.001;  // Only trigger if drawdown is at least 0.1%
 
-    // Only trigger error if drawdown exceeds limit AND is greater than minimum threshold
+    // A breach WARNS; it does not fail the strategy. Returning an error here would fail on_data
+    // and every caller above it, so a drawdown past the limit would stop the strategy from
+    // updating its targets -- a kill switch nobody configured as one, reachable from realised
+    // P&L alone. Sizing and the risk modules own the response to a loss; this line makes the
+    // breach visible.
     if (drawdown < -static_cast<double>(risk_limits_.max_drawdown) &&
         std::abs(drawdown) > MIN_DRAWDOWN_THRESHOLD) {
-        return make_error<void>(ErrorCode::RISK_LIMIT_EXCEEDED,
-                                "Drawdown exceeds limit: " + std::to_string(drawdown),
-                                "BaseStrategy");
+        WARN("Drawdown exceeds limit: " + std::to_string(drawdown) + " against max_drawdown " +
+             std::to_string(static_cast<double>(risk_limits_.max_drawdown)) +
+             " (warning only; the strategy keeps running)");
     }
 
     return Result<void>();

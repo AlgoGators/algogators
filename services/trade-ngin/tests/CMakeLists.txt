@@ -1,25 +1,84 @@
 # Set test source files
 set(TEST_SOURCES
+    core/test_decimal.cpp
+    core/test_report_settled_marks.cpp
+    core/test_report_rolls.cpp
+    core/test_time_utils_parse.cpp
+    core/test_timed_process.cpp
     core/test_result.cpp
     core/test_state_manager.cpp
-    core/test_state_manager_extended.cpp
     core/test_logger.cpp
     core/test_config_manager.cpp
     core/test_config_version.cpp
-    core/test_config_version_extended.cpp
     core/test_config_base.cpp
-    core/test_config_base_extended.cpp
+    core/test_holiday_checker.cpp
+    core/test_holiday_coverage_years.cpp
+    core/test_logger_retention.cpp
+    core/test_report_risk_lines.cpp
+    core/test_report_leverage_console.cpp
+    core/test_stat_quality.cpp
     core/test_run_id_generator.cpp
     core/test_config_loader.cpp
-    core/test_config_manager_extended.cpp
+    core/test_config_loader_db_overlay.cpp
+    core/test_reserve_capital_deleted.cpp
+    core/test_backtest_window.cpp
+    core/test_static_destruction_order_db.cpp
+    core/test_to_json_temporary_hazard.cpp
     data/test_db_utils.cpp
+    data/test_utc_date_contract.cpp
+    data/test_postgres_param_safety.cpp
+    data/test_finite_statement.cpp
+    data/test_finite_statement_db.cpp
+    instruments/test_equity_market_hours_exchange.cpp
     data/test_postgres_database.cpp
     data/test_database_pooling.cpp
-    data/test_database_pooling_extended.cpp
+    data/test_db_transaction_atomicity.cpp
+    data/test_delete_stale_executions_scope_db.cpp
+    data/test_qt_books_db.cpp
+    data/test_qt_desk_db.cpp
+    data/test_contract_metadata_fee_column_db.cpp
+    data/test_executions_netting_column_db.cpp
+    data/test_execution_report_validation.cpp
+    data/test_load_positions_identifier_db.cpp
+    data/test_session_time_zone_db.cpp
+    data/test_equity_curve_stream_db.cpp
+    data/test_store_positions_error_db.cpp
+    data/test_strategy_id_length_db.cpp
+    data/test_get_trading_days_scope_db.cpp
     data/test_market_data_bus.cpp
     data/test_credential_store.cpp
-    data/test_credential_store_extended.cpp
+    data/test_bar_close_uses_adjusted.cpp
     data/test_conversion_utils.cpp
+    data/test_market_data_utils.cpp
+    data/test_futures_bar_dedup_db.cpp
+    data/test_session_classifier.cpp
+    strategy/test_listing_dates.cpp
+    data/test_session_classifier_instrument_id.cpp
+    data/test_roll_series.cpp
+    data/test_roll_split.cpp
+    data/test_roll_calendar.cpp
+    data/test_contract_bars.cpp
+    data/test_contract_bars_db.cpp
+    data/test_roll_cycle.cpp
+    data/test_roll_cycle_db.cpp
+    data/test_contract_roll_rule.cpp
+    data/test_contract_roll_rule_db.cpp
+    data/test_contract_roll_micros.cpp
+    data/test_contract_rolls_api.cpp
+    data/test_per_contract_source.cpp
+    data/test_carry_quote.cpp
+    data/test_per_contract_places.cpp
+    data/test_roll_legs.cpp
+    data/test_executions_execution_type_db.cpp
+    data/test_roll_split_db.cpp
+    data/test_report_roll_view_db.cpp
+    data/test_strategy_config_db.cpp
+    data/test_futures_bar_instrument_id_db.cpp
+    data/test_positions_instrument_id_db.cpp
+    data/test_roll_state_db.cpp
+    data/test_day_execution_replace.cpp
+    data/test_day_signal_replace.cpp
+    data/test_contract_metadata_fixes_db.cpp
     order/test_order_manager.cpp
     order/test_utils.cpp
     instruments/test_futures.cpp
@@ -27,43 +86,199 @@ set(TEST_SOURCES
     instruments/test_option.cpp
     instruments/test_instrument_registry.cpp
     risk/test_risk_manager.cpp
-    risk/test_risk_manager_extended.cpp
+    risk/test_overlay.cpp
+    optimization/test_one_pass.cpp
+    optimization/test_one_pass_attribute.cpp
+    portfolio/test_one_pass_book.cpp
+    portfolio/test_desk_book.cpp
+    live/test_qt_runner_modes.cpp
+    portfolio/test_listing_switch_pass.cpp
+    backtest/test_listing_loader.cpp
+    portfolio/test_loop_fixups.cpp
+    portfolio/test_worked_days.cpp
+    portfolio/test_overlay_covariance_pass.cpp
+    portfolio/test_portfolio_config_keys.cpp
+    risk/test_overlay_wiring.cpp
+    risk/test_overlay_columns.cpp
+    risk/test_risk_adjusted_returns.cpp
+    risk/test_risk_modules.cpp
+    risk/test_risk_module_config.cpp
+    risk/test_risk_scale_report.cpp
     optimization/test_dynamic_optimizer.cpp
-    optimization/test_dynamic_optimizer_extended.cpp
-    backtesting/test_transaction_cost_analysis.cpp
+    backtest/test_transaction_cost_analysis.cpp
+    transaction_cost/test_transaction_cost_manager.cpp
+    transaction_cost/test_cost_metadata_specs.cpp
     transaction_cost/test_spread_model.cpp
     transaction_cost/test_impact_model.cpp
-    backtesting/test_slippage_model.cpp
-    backtesting/test_backtest_execution_manager.cpp
-    backtesting/test_backtest_price_manager.cpp
-    backtesting/test_backtest_portfolio_constraints.cpp
-    backtesting/test_backtest_pnl_manager.cpp
-    backtesting/test_backtest_metrics_calculator.cpp
-    backtesting/test_backtest_data_loader.cpp
-    backtesting/test_backtest_csv_exporter.cpp
-    backtesting/test_backtest_coordinator.cpp
-    # backtesting/test_engine.cpp  # Deprecated - BacktestEngine replaced by BacktestCoordinator
+    transaction_cost/test_netting.cpp
+    live/test_strategy_config_live_only.cpp
+    live/test_live_settings_check.cpp
+    live/corp_actions/test_applier.cpp
+    live/corp_actions/test_effect_classes.cpp
+    live/corp_actions/test_frame_horizon.cpp
+    live/corp_actions/test_ex_date_eligibility.cpp
+    live/corp_actions/test_rename_eras.cpp
+    live/corp_actions/test_denominator_frame.cpp
+    live/corp_actions/test_denominator_range_db.cpp
+    live/corp_actions/test_corp_action_query_bounds_db.cpp
+    live/corp_actions/test_audit_log.cpp
+    live/corp_actions/test_income.cpp
+    live/corp_actions/test_broker_frame.cpp
+    live/corp_actions/test_broker_frame_db.cpp
+    live/corp_actions/test_class1_silent_row_announcement.cpp
+    live/corp_actions/test_spinoff_zero_basis_parent.cpp
+    live/corp_actions/test_spinoff_receipt.cpp
+    live/corp_actions/test_spinoff_bar_routing.cpp
+    live/corp_actions/test_spinoff_reverse_split.cpp
+    live/corp_actions/test_spinoff_multi_child.cpp
+    live/corp_actions/test_spinoff_retry_after_split.cpp
+    live/corp_actions/test_spinoff_bar_warnings.cpp
+    live/corp_actions/test_spinoff_refusal_bound.cpp
+    live/corp_actions/test_spinoff_dividend_double_apply.cpp
+    live/test_live_metrics_includes_dividend_income.cpp
+    live/test_daily_pnl_identity.cpp
+    live/test_book_exposure.cpp
+    live/test_trading_days_anchor.cpp
+    backtest/test_slippage_model.cpp
+    backtest/test_backtest_execution_manager.cpp
+    backtest/test_backtest_price_manager.cpp
+    backtest/test_backtest_pnl_manager.cpp
+    backtest/test_backtest_metrics_calculator.cpp
+    backtest/test_trade_statistics_roll_legs.cpp
+    backtest/test_backtest_data_loader.cpp
+    backtest/test_market_data_source.cpp
+    backtest/test_wrapper_parity.cpp
+    backtest/test_backtest_csv_exporter.cpp
+    backtest/test_backtest_coordinator.cpp
+    backtest/test_bt_equity_validation_config.cpp
+    backtest/test_backtest_realized_flow.cpp
+    backtest/test_backtest_unrealized_accounting.cpp
+    backtest/test_equity_cost_warmup.cpp
+    backtest/test_backtest_junk_signal_feed.cpp
+    backtest/test_backtest_k01_feed.cpp
+    backtest/test_backtest_change_bar_hold.cpp
+    backtest/test_backtest_change_bar_pnl.cpp
+    backtest/test_backtest_no_bar_row.cpp
+    backtest/test_consumed_series_record.cpp
+    backtest/test_backtest_equity_cost_retier.cpp
+    backtest/test_backtest_futures_cost_feed.cpp
+    backtest/test_backtest_statistics_columns.cpp
+    backtest/test_backtest_statistics_grid.cpp
+    backtest/test_backtest_netting_one_model.cpp
+    backtest/test_backtest_stored_run_refusal.cpp
+    backtest/test_backtest_roll_legs_once.cpp
     execution/test_execution_engine.cpp
-    execution/test_execution_engine_extended.cpp
     portfolio/test_portfolio_manager.cpp
+    core/test_equity_portfolio_namespace.cpp
+    live/corp_actions/test_window.cpp
+    live/test_effective_universe.cpp
+    live/test_live_daily_cycle_carry_forward.cpp
+    live/test_broker_frame_event_classes.cpp
+    live/test_rolled_back_symbol_mark.cpp
+    live/test_feed_freshness_universe.cpp
+    live/test_feed_ingestion_assertion.cpp
+    live/test_day_t_write_ordering.cpp
+    live/test_settled_statistics_block.cpp
+    live/test_settled_stamp.cpp
+    live/test_stored_config_runners.cpp
+    core/test_resolved_sleeves.cpp
+    live/test_margin_columns.cpp
+    live/test_margin_columns_runners.cpp
+    live/test_finalized_books_read.cpp
+    live/test_late_bar_warning.cpp
+    live/test_live_run_refusal_arms.cpp
+    live/test_risk_module_error_path.cpp
+    live/test_sleeve_risk_module_failure.cpp
+    data/test_current_holding_start_db.cpp
+    data/test_current_holding_start_bound_db.cpp
+    instruments/test_equity_margin_cash_regt.cpp
+    instruments/test_futures_margin_overload.cpp
     portfolio/test_portfolio_aggregation.cpp
-    portfolio/test_portfolio_manager_extended.cpp
     portfolio/test_portfolio_manager_internals.cpp
+    portfolio/test_fractional_position_convergence.cpp
+    portfolio/test_price_history_ordering.cpp
+    portfolio/test_pm_own_price_history.cpp
+    portfolio/test_risk_module_loop.cpp
+    portfolio/test_risk_fail_closed.cpp
+    portfolio/test_optimizer_allocation_split.cpp
+    portfolio/test_optimizer_allocation_once.cpp
+    portfolio/test_allocation_distribution.cpp
+    portfolio/test_optimizer_cost_vector.cpp
+    portfolio/test_covariance_date_alignment.cpp
+    portfolio/test_covariance_adjusted_returns.cpp
+    portfolio/test_allocation_share_shorts.cpp
+    portfolio/test_covariance_participants.cpp
+    portfolio/test_pm_session_hold.cpp
+    portfolio/test_delivered_cut.cpp
+    portfolio/test_sizing_capital.cpp
+    portfolio/test_half_compounding.cpp
+    portfolio/test_pm_netting.cpp
     storage/test_backtest_results_manager.cpp
     storage/test_live_results_manager.cpp
+    storage/test_equity_fallback_stream_db.cpp
+    storage/test_live_results_key_roundtrip_db.cpp
     live/test_live_historical_metrics.cpp
+    live/test_live_historical_metrics_columns.cpp
+    live/test_statistics_grid.cpp
+    live/test_live_statistics_columns.cpp
     live/test_live_price_manager.cpp
+    live/test_live_trading_coordinator_keying.cpp
     live/test_execution_manager.cpp
+    live/test_exec_id_determinism.cpp
+    live/test_sleeve_seeding.cpp
+    live/test_base_bus_off_and_carried_day.cpp
+    live/test_session_book_gate.cpp
+    live/test_live_runner_small_fixes.cpp
+    live/test_python_mail.cpp
+    live/test_run_args.cpp
+    live/test_equity_cash_available.cpp
+    live/test_held_feed_ruling.cpp
+    live/test_mode_branch_guard.cpp
+    live/test_cost_model_feed.cpp
+    live/test_futures_cost_feed.cpp
+    live/test_cost_feed_adjusted_returns.cpp
+    live/test_change_bar_pnl.cpp
+    live/test_live_roll_legs.cpp
+    live/test_report_roll_query.cpp
+    live/test_live_rerun_repair.cpp
+    live/test_live_k01_history.cpp
+    live/test_live_roll_write_order.cpp
+    live/test_live_listing_guard.cpp
+    live/test_execution_price_integrity.cpp
     live/test_margin_manager.cpp
     live/test_live_metrics_calculator.cpp
     live/test_live_pnl_manager.cpp
+    live/test_finalize_unrealized_policy.cpp
+    live/test_finalize_realized_policy.cpp
+    live/test_realized_row_retention.cpp
+    live/test_unrealized_cost_basis.cpp
+    live/test_yesterday_rows_source.cpp
     live/test_live_data_loader.cpp
+    live/test_live_results_roll_cost_columns.cpp
     live/test_csv_exporter.cpp
+    live/test_live_csv_files.cpp
+    live/test_console_labels.cpp
     strategy/test_base_strategy.cpp
     strategy/test_trend_following.cpp
     strategy/test_regime_detector.cpp
     strategy/test_trend_following_fast.cpp
-    strategy/test_trend_following_slow.cpp
+    strategy/test_fast_sleeve_configuration.cpp
+    strategy/test_trend_estimator.cpp
+    strategy/test_carry_estimator.cpp
+    strategy/test_carry_strategy.cpp
+    strategy/test_trend_history_seed.cpp
+    strategy/test_equity_slow_rule.cpp
+    strategy/test_mean_reversion_backtest.cpp
+    strategy/test_equity_backtest_db_validation.cpp
+    strategy/test_equity_pnl_accounting.cpp
+    strategy/test_live_bt_signal_consistency.cpp
+    strategy/test_signals_publication.cpp
+    strategy/test_volatility_size_1_nan_guard.cpp
+    strategy/test_vol_annualisation.cpp
+    strategy/test_trend_adjusted_series.cpp
+    strategy/test_stale_unrealized_pnl_zero_avg_price.cpp
+    strategy/test_live_daily_cycle_seeding.cpp
+    strategy/test_penny_stock_lifecycle.cpp
     statistics/test_normalizer.cpp
     statistics/test_pca.cpp
     statistics/test_adf.cpp
@@ -125,3 +340,29 @@ set_target_properties(trade_ngin_tests
 # Enable test discovery
 include(GoogleTest)
 gtest_discover_tests(trade_ngin_tests)
+
+# scripts/migrate_risk_json.py gets its OWN ctest entry rather than a case inside the gtest
+# binary (T-6a lead ruling 16). The migration is the one step of the schema-2 change that
+# runs by hand on a production box and is not C++, so a machine without python3 has to fail
+# here loudly instead of silently skipping it.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+set(MIGRATION_PYTHON "${Python3_EXECUTABLE}")
+if(NOT MIGRATION_PYTHON)
+    # Not found at configure time: name it anyway so the entry FAILS when it runs, which
+    # is the loud failure the ruling asks for, rather than quietly dropping the test.
+    set(MIGRATION_PYTHON "python3")
+endif()
+add_test(NAME MigrateRiskJson.ScriptSuite
+         COMMAND "${MIGRATION_PYTHON}"
+                 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_migrate_risk_json.py")
+
+# T-7a C4: the seven-day cron, the wrapper without its weekend exit, and the watchdog's write
+# clock / system-book filter / calendar-day threshold. Python, so its own entry, like the one
+# above; its database case runs only with TRADE_NGIN_TEST_DSN and rolls back what it writes.
+add_test(NAME CheckLiveTrading.ScriptSuite
+         COMMAND "${MIGRATION_PYTHON}"
+                 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/test_check_live_trading.py")
+# The two entries import modules from scripts/: without this the interpreter leaves an untracked
+# scripts/__pycache__/ in the source tree on every ctest run.
+set_tests_properties(MigrateRiskJson.ScriptSuite CheckLiveTrading.ScriptSuite
+                     PROPERTIES ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")

@@ -42,11 +42,13 @@ MEMBER_ROOTS = ("libs", "apps", "services", "platform")
 
 #: A directory is a member if it contains one of these. Discovery stops
 #: descending once it finds one, so nested source and test directories under a
-#: member are never treated as separate members.
+#: member are never treated as separate members. The first match wins:
+#: CMakeLists.txt comes first because a pyproject.toml next to one is a Python
+#: binding built from the C++ (trade-ngin's scikit-build wheel), not a uv member.
 MANIFESTS = {
+    "CMakeLists.txt": "cpp",
     "pyproject.toml": "python",
     "package.json": "node",
-    "CMakeLists.txt": "cpp",
 }
 
 PRUNE_DIRS = {

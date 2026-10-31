@@ -34,6 +34,25 @@ public:
     constexpr Decimal() : value_(0) {}
     constexpr explicit Decimal(int64_t raw_value) : value_(raw_value) {}
 
+    Decimal(std::string str) : value_(0) {
+        size_t dot_pos = str.find('.');
+        if (dot_pos == std::string::npos) {
+            // No decimal point, treat as integer
+            value_ = std::stoll(str) * SCALE;
+        } else {
+            std::string int_part = str.substr(0, dot_pos);
+            std::string frac_part = str.substr(dot_pos + 1);
+            if (frac_part.length() > 8) {
+                throw std::overflow_error("Too many decimal places in string");
+            }
+            // Pad fractional part with zeros
+            while (frac_part.length() < 8) {
+                frac_part += "0";
+            }
+            value_ = std::stoll(int_part) * SCALE + std::stoll(frac_part);
+        }
+    }
+
     Decimal(double d) {
         if (std::isnan(d) || std::isinf(d)) {
             throw std::invalid_argument("Cannot create Decimal from NaN or infinity");
@@ -46,10 +65,10 @@ public:
     }
 
     Decimal(int i) : value_(static_cast<int64_t>(i) * SCALE) {}
-    
+
     // Only define long constructor if long is different from int64_t
-    template<typename T = long>
-    Decimal(T l, typename std::enable_if<!std::is_same<T, int64_t>::value>::type* = nullptr) 
+    template <typename T = long>
+    Decimal(T l, typename std::enable_if<!std::is_same<T, int64_t>::value>::type* = nullptr)
         : value_(static_cast<int64_t>(l) * SCALE) {}
 
     // Conversion operators
@@ -183,10 +202,18 @@ public:
 
     // String conversion
     std::string to_string() const {
-        int64_t integer_part = value_ / SCALE;
-        int64_t fractional_part = std::abs(value_ % SCALE);
+        // Format from the magnitude and prepend the sign explicitly so values
+        // in (-1, 0) keep their sign: value_ / SCALE truncates -0.5 to 0,
+        // which would otherwise print as "0.5".
+        bool negative = value_ < 0;
+        // Two's-complement negate in unsigned arithmetic; safe for INT64_MIN.
+        uint64_t magnitude = negative ? ~static_cast<uint64_t>(value_) + 1
+                                      : static_cast<uint64_t>(value_);
+        uint64_t integer_part = magnitude / SCALE;
+        uint64_t fractional_part = magnitude % SCALE;
 
-        std::string result = std::to_string(integer_part);
+        std::string result = negative ? "-" : "";
+        result += std::to_string(integer_part);
         if (fractional_part > 0) {
             std::string frac_str = std::to_string(fractional_part);
             // Pad with leading zeros
@@ -252,6 +279,23 @@ enum class Side {
 };
 
 /**
+ * @brief The class of an execution row (executions.execution_type, migration 015):
+ *        STRATEGY = the day's fill against the target; ROLL =
+ *        one leg of a contract roll (mechanical, outside every strategy trade measure, inside the
+ *        costs and the equity curve); BORROW = the backtest's synthetic overnight borrow-fee row
+ *        on a short equity position (quantity 0).
+ */
+enum class ExecutionType { STRATEGY, ROLL, BORROW };
+
+inline const char* to_string(ExecutionType t) {
+    switch (t) {
+        case ExecutionType::ROLL: return "ROLL";
+        case ExecutionType::BORROW: return "BORROW";
+        default: return "STRATEGY";
+    }
+}
+
+/**
  * @brief Order type enumeration
  */
 enum class OrderType { MARKET, LIMIT, STOP, STOP_LIMIT, NONE };
@@ -276,8 +320,125 @@ enum class TimeInForce {
 enum class AssetType { FUTURE, EQUITY, OPTION, FOREX, CRYPTO, NONE };
 
 /**
+ * @brief What a per-contract bar's roll field says (RollFrom::kind).
+ */
+enum class RollFromKind {
+    /// A roll known on this bar: a crossover, a deadline, a vendor switch an earlier bar confirmed.
+    KNOWN,
+    /// A vendor-triggered roll (rule (a)) whose switch is on this bar: only the next bar confirms
+    /// it. The bar is the HELD (old) contract's own bar, and this field names the TARGET: its close
+    /// and id on this date. When the next consumed bar is in the target, the roll happened here:
+    /// both
+    /// legs at this bar's two closes, the next bar's move measured from the target's close. When it
+    /// is not, nothing rolled. Every level reader reads the held contract's close either way.
+    AWAITS_NEXT,
+    /// NOT a roll bar: a bar after one (up to the next), carrying the old contract's close on THIS
+    /// date. Read only by a consumer that withheld the roll bar and every bar since (the
+    /// consumed-bar rule): it books the roll on this bar, the old contract's move up to it and both
+    /// legs at this bar's closes.
+    AFTER_ROLL,
+    /// portfolio.json per_contract_switch_bar "vendor": AWAITS_NEXT with
+    /// the bar the other way round. The bar is the TARGET's own bar (the contract the vendor
+    /// switched to, a one-bar stray included: no run can tell them apart on the bar) and this field
+    /// names the HELD contract, its close and id on this date. The bar's move is the held
+    /// contract's, to this close; the next consumed bar decides as for AWAITS_NEXT: in the target,
+    /// the roll happened here (both legs at this bar's two closes, the next move from this bar's
+    /// close); otherwise nothing rolled and the next move is measured from the held contract's
+    /// close. So the booked moves and the legs are AWAITS_NEXT's; only the levels read on the bar
+    /// (sizing, marks, notional, the overlay) and the session classifier's reading of it differ.
+    AWAITS_NEXT_VENDOR,
+    /// KNOWN, but the change of a micro's price source (the vendor's 2026-02-22
+    /// change: before it the micro's series is the full-size contract of the same expiry, from it
+    /// the micro's own; contract_roll_rule.hpp MicroAlias). Read by the series exactly as KNOWN (the
+    /// old contract's move booked to its close, the gap excluded, the held contract the new one),
+    /// but no trade: the account holds the micro contract throughout, so no legs, no cost.
+    SOURCE_CHANGE,
+    /// AFTER_ROLL following a SOURCE_CHANGE: a consumer that withheld the change bar reads the
+    /// change on its first consumed bar, as SOURCE_CHANGE, at that bar's two closes.
+    AFTER_SOURCE_CHANGE,
+};
+
+/// The kind as the series reads it (SOURCE_CHANGE as KNOWN, AFTER_SOURCE_CHANGE as AFTER_ROLL).
+inline RollFromKind series_kind(RollFromKind kind) {
+    if (kind == RollFromKind::SOURCE_CHANGE) return RollFromKind::KNOWN;
+    if (kind == RollFromKind::AFTER_SOURCE_CHANGE) return RollFromKind::AFTER_ROLL;
+    return kind;
+}
+/// The field marks a change of price source, not a roll the account trades.
+inline bool is_price_source_change(RollFromKind kind) {
+    return kind == RollFromKind::SOURCE_CHANGE || kind == RollFromKind::AFTER_SOURCE_CHANGE;
+}
+
+/**
+ * @brief The contract a per-contract roll bar left (portfolio.json per_contract_rolls).
+ *
+ * With the switch on, the futures bar source hands out the held contract's own bar on each date of
+ * the vendor's grid (data/per_contract_source.hpp). On a roll bar that is the NEW contract's bar,
+ * and this names the contract left, with its close on the same date, so the bar's return is the
+ * old contract's own and the adjusted step is the new close minus the old close (roll_series.hpp).
+ * On a bar after a roll it is the same contract's close on that date (AFTER_ROLL). On a vendor switch
+ * only the next bar confirms (AWAITS_NEXT) the bar is the held contract's and this names the target
+ * instead. Absent on every other bar, on every bar of the vendor's series (the switch off) and on
+ * every equity bar.
+ */
+struct RollFrom {
+    double close{0.0};          ///< the old contract's close on this bar (AWAITS_NEXT: the target's)
+    std::string instrument_id;  ///< the old contract's id string (AWAITS_NEXT: the target's)
+    RollFromKind kind{RollFromKind::KNOWN};
+    /// The roll's date, YYYY-MM-DD. KNOWN: this
+    /// bar's; AFTER_ROLL: the roll bar this bar follows; AWAITS_NEXT and AWAITS_NEXT_VENDOR: the
+    /// switch bar's (this bar's). A bar after a withheld roll then tells the vendor switch a
+    /// consumer awaits (its own date) from a later roll into the same target (another date). Empty
+    /// when unknown.
+    std::string date;
+    /// On a change of price source (SOURCE_CHANGE, AFTER_SOURCE_CHANGE) the old
+    /// contract's own volume on this date, for the cost of a listing predecessor's legs (a
+    /// predecessor still holds the full-size contract; ListingDates::add_predecessor_bars). Empty
+    /// on every other kind.
+    std::optional<double> volume{};
+
+    bool operator==(const RollFrom& o) const {
+        return close == o.close && instrument_id == o.instrument_id && kind == o.kind &&
+               date == o.date && volume == o.volume;
+    }
+};
+
+/**
+ * @brief Carry (trade-ngin #185): the close of the held contract and of its neighbouring contract on
+ *        the same date, both real contract closes, never the adjusted series.
+ *
+ * The neighbour is the NEARER contract of the root's roll cycle when one is alive on the date, else
+ * (the held contract is the front) the FURTHER one (contract_rolls::carry_quote). `months` is the
+ * neighbour's delivery month less the held contract's: negative for the nearer one, positive for the
+ * further one, never 0. Raw carry is other_close - held_close for a nearer neighbour and
+ * held_close - other_close for a further one (carry_estimator.hpp). Set by the per-contract source
+ * only when carry is on (per_contract_source.hpp); absent on every other bar, and on any date the
+ * held contract or its neighbour has no row of its own.
+ */
+struct CarryQuote {
+    double held_close{0.0};
+    double other_close{0.0};
+    int months{0};
+    std::string held_symbol;   ///< "CLZ2"
+    std::string other_symbol;  ///< "CLX2"
+
+    bool operator==(const CarryQuote& o) const {
+        return held_close == o.held_close && other_close == o.other_close && months == o.months &&
+               held_symbol == o.held_symbol && other_symbol == o.other_symbol;
+    }
+};
+
+/**
  * @brief Market data bar structure
- * Represents OHLCV data for any timeframe
+ * Represents OHLCV data for any timeframe.
+ *
+ * Equity convention: for AssetType::EQUITY symbols, the loader at
+ * postgres_database.cpp reads RAW prices plus the per-bar corporate-action
+ * primitives (div_cash, split_factor) and scales OHLC by the backward
+ * cumulative adjustment factor computed in market_data_utils. So for equities
+ * the OHLC stored here is split- AND dividend-adjusted (a continuous
+ * total-return price series), not the raw exchange price. Futures bars carry
+ * raw OHLC.
  */
 struct Bar {
     Timestamp timestamp;
@@ -287,6 +448,28 @@ struct Bar {
     Price close;
     double volume;  // Keep as double for now since volume is typically not a financial calculation
     std::string symbol;
+    /// The vendor's contract id behind a futures bar (futures_data.ohlcv_1d_raw.instrument_id,
+    /// joined to the kept bar by the loader); empty when unknown and on every equity bar.
+    /// A bar whose id differs from the previous consumed bar's is a change bar (roll_series.hpp).
+    std::string instrument_id;
+    /// On a roll bar of the per-contract series, the contract left (RollFrom).
+    std::optional<RollFrom> roll_from;
+    /// Carry (trade-ngin #185): the held contract's and its neighbour's closes on this date
+    /// (CarryQuote); set only by the per-contract source with carry on.
+    std::optional<CarryQuote> carry;
+    /// The volume the futures cost feed prices this bar's fills on, in place of
+    /// `volume` (futures_cost_feed.hpp). Set only by ListingDates::add_predecessor_bars: on a
+    /// listing predecessor's copied bar from the micro's change of price source on (the full-size
+    /// contract's own volume), and on an equity micro's own bars of its listing date's session (its
+    /// own_contract_volume); empty on every other bar. Every other reader (the session classifier, the strategies, the stored and
+    /// exported bars) reads `volume`.
+    std::optional<double> cost_volume;
+    /// On an equity micro's bar before its change of price source (the MicroAlias, the
+    /// series carries the full-size contract: MES, MNQ, MYM, M2K before 2026-02-22), the micro's own
+    /// contract of the same expiry, its volume on this date where it prints; empty on every other
+    /// bar. Read only by ListingDates::add_predecessor_bars, which prices the listed contract's own
+    /// switch legs on it (the listed symbol's cost_volume on its listing date's session).
+    std::optional<double> own_contract_volume;
 
     Bar() = default;
     Bar(Timestamp ts, Price o, Price h, Price l, Price c, double v, std::string s)
@@ -359,6 +542,28 @@ struct Position {
     Decimal unrealized_pnl;
     Decimal realized_pnl;
     Timestamp last_update;
+    /// The vendor's contract id the futures position is held in (positions.instrument_id,
+    /// final_positions.instrument_id, migration 016): the confirmed id of the symbol's
+    /// consumed sequence (roll_series.hpp), still the old contract on a pending change bar.
+    /// Empty (stored NULL) when unknown and on every equity row.
+    std::string instrument_id;
+    /// qt book only (trading.positions.moved_by, migration 021): the one-pass step that moved the
+    /// symbol from the desk's request to what the engine gave back. Empty (stored NULL) when
+    /// nothing moved it and on every system and qt_proposal row; storing a non-empty value on
+    /// another book is refused.
+    std::string moved_by;
+    /// What the book e-mail shows of the row (trading.positions, migration 041), written by the
+    /// live runners and NULL when unset:
+    /// - mark_price: a day-T row's mark, the T-1 close it is valued at; unset when the symbol
+    ///   printed no bar (the row is then valued at average_price, the last known price).
+    /// - settle_from_price / settle_to_price: a settled (Day T-1) row's two prices, the ones the
+    ///   settle's own P&L used; settle_to_price unset when the symbol printed no bar that day.
+    /// - settle_mark: why a settled row booked no move: "NO_BAR" (no bar that day), "ROLL" (the
+    ///   contract rolled), "WITHHELD" (the price was rejected); empty otherwise.
+    std::optional<double> mark_price;
+    std::optional<double> settle_from_price;
+    std::optional<double> settle_to_price;
+    std::string settle_mark;
     // Note: previous_price and contract_size fields removed
 
     // Constructors
@@ -406,7 +611,7 @@ struct ExecutionReport {
     std::string order_id;
     std::string exec_id;
     std::string symbol;
-    Side side;
+    Side side{Side::NONE};
     Quantity filled_quantity;
     Price fill_price;  // Reference fill price (no costs embedded)
     Timestamp fill_time;
@@ -416,8 +621,44 @@ struct ExecutionReport {
     Decimal implicit_price_impact;    // Spread + impact in price units
     Decimal slippage_market_impact;   // Implicit costs in dollars
     Decimal total_transaction_costs;  // commissions_fees + slippage_market_impact
+    // Migration 013: the part of total_transaction_costs the ACCOUNT did not pay (negative:
+    // paid on top) because two or more sleeves traded this symbol on the same day; 0 on a
+    // symbol-day with one sleeve row. net cost = total_transaction_costs - netting_adjustment:
+    // the cost every total, P&L and statistic charges (transaction_cost::net_cost, netting.hpp).
+    Decimal netting_adjustment;
 
-    bool is_partial;
+    bool is_partial{false};
+    /// Migration 015: STRATEGY, ROLL or BORROW (see ExecutionType); and the vendor
+    /// contract id a ROLL leg traded (the outgoing contract on the closing leg, the incoming on
+    /// the opening leg), empty (stored NULL) on every other row. Last, so every positional
+    /// initialiser of the older fields stays as it is.
+    ExecutionType execution_type{ExecutionType::STRATEGY};
+    std::string instrument_id;
+    /// Migration 040: the roll's split, on a per-contract roll's CLOSING
+    /// leg only (roll_series::attach_roll_split): the held contract's move booked on the roll bar
+    /// (dollars, P&L already in the day's P&L), the new close minus the old close on that bar
+    /// (points), and that gap x quantity x multiplier (dollars, never P&L). nullopt (stored NULL,
+    /// and not named by the writers' statements) on every other row and with the switch off.
+    std::optional<double> roll_bar_move;
+    std::optional<double> roll_gap_points;
+    std::optional<double> roll_gap_value;
+};
+
+/// One stored positions row's realised P&L, as PostgresDatabase::get_stored_realised_rows reads it
+/// (what earlier runs booked of a late roll's moves, live_roll_legs.hpp).
+struct StoredRealisedRow {
+    std::string symbol;
+    std::string sleeve;
+    std::string date;  ///< YYYY-MM-DD, the row's date
+    double quantity{0.0};
+    double realised{0.0};
+};
+
+/// One roll stored for an earlier date, as PostgresDatabase::get_previous_rolls reads it (issue
+/// #188: whether a re-run's own legs are stale, live_roll_legs.hpp contract_held_coming_into).
+struct StoredRoll {
+    std::string outgoing;  ///< the contract the closing leg rolled out of
+    std::string incoming;  ///< the contract the opening leg rolled into ("" when not stored)
 };
 
 /**
@@ -506,6 +747,8 @@ inline std::string get_schema_name(AssetClass asset_class) {
             return "commodities_data";
         case AssetClass::CRYPTO:
             return "crypto_data";
+        case AssetClass::OPTIONS:
+            return "options_data";
         default:
             return "unknown_data";
     }

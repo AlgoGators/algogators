@@ -1,0 +1,392 @@
+// src/risk/carver_risk_module.cpp
+#include "trade_ngin/risk/carver_risk_module.hpp"
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <ctime>
+#include <iterator>
+#include <map>
+#include <set>
+#include <unordered_map>
+#include "trade_ngin/core/logger.hpp"
+
+namespace trade_ngin {
+
+CarverRiskModule::CarverRiskModule(std::string id, RiskConfig config, int min_gate_dates)
+    : id_(std::move(id)), rm_(std::move(config)), min_gate_dates_(min_gate_dates) {}
+
+int CarverRiskModule::complete_dates_in_window() const {
+    if (window_.empty()) return 0;
+    // One pass: each symbol gets a bit, each date a mask of the symbols that printed on
+    // it. A date is complete when its mask holds every symbol the window has seen.
+    // Above 64 symbols the mask cannot hold them all, so the count falls back to the
+    // exact set comparison rather than quietly reporting the wrong number.
+    std::unordered_map<std::string, size_t> symbol_index;
+    std::unordered_map<int64_t, uint64_t> mask_by_date;
+    std::unordered_map<int64_t, std::set<std::string>> set_by_date;
+    bool wide = false;
+    for (const auto& bar : window_) {
+        const auto key = std::chrono::duration_cast<std::chrono::seconds>(
+                             bar.timestamp.time_since_epoch())
+                             .count();
+        auto [it, inserted] = symbol_index.emplace(bar.symbol, symbol_index.size());
+        (void)inserted;
+        if (it->second >= 64) wide = true;
+        if (wide) {
+            set_by_date[key].insert(bar.symbol);
+        } else {
+            mask_by_date[key] |= (uint64_t{1} << it->second);
+        }
+    }
+    const size_t symbols = symbol_index.size();
+    int complete = 0;
+    if (wide) {
+        // Rebuild the per-date sets from scratch: the masks collected before the 65th
+        // symbol appeared are incomplete.
+        set_by_date.clear();
+        for (const auto& bar : window_) {
+            const auto key = std::chrono::duration_cast<std::chrono::seconds>(
+                                 bar.timestamp.time_since_epoch())
+                                 .count();
+            set_by_date[key].insert(bar.symbol);
+        }
+        for (const auto& [date, syms] : set_by_date) {
+            (void)date;
+            if (syms.size() == symbols) ++complete;
+        }
+        return complete;
+    }
+    const uint64_t all = symbols >= 64 ? ~uint64_t{0} : ((uint64_t{1} << symbols) - 1);
+    for (const auto& [date, mask] : mask_by_date) {
+        (void)date;
+        if (mask == all) ++complete;
+    }
+    return complete;
+}
+
+std::set<RiskTerm> CarverRiskModule::terms() const {
+    return {RiskTerm::COMPOSITION, RiskTerm::MAGNITUDE};
+}
+
+std::set<RiskAction> CarverRiskModule::capabilities() const {
+    return {RiskAction::SCALE, RiskAction::WARN};
+}
+
+void CarverRiskModule::begin_rebalance(const RiskContext& ctx) {
+    (void)ctx;
+    appended_this_rebalance_ = false;
+    market_data_built_this_rebalance_ = false;
+    applied_level_ = 1.0;
+    level_partial_ = false;
+    last_requested_ = 1.0;
+}
+
+size_t CarverRiskModule::window_dates() const {
+    std::set<Timestamp> dates;
+    for (const auto& bar : window_) dates.insert(bar.timestamp);
+    return dates.size();
+}
+
+void CarverRiskModule::on_bars(const std::vector<Bar>& bars, const RiskContext& ctx) {
+    // (1) APPEND ONCE PER REBALANCE, not once per lap.
+    //
+    // The optimizer/risk loop calls this with the SAME day's bars up to five times; appending
+    // on every lap would fill the window with copies of one day and evict older dates, and at
+    // two or three return rows |rho| is 1.0 by arithmetic.
+    //
+    // "Is this a new rebalance?" is the EXPLICIT flag begin_rebalance resets, never something
+    // inferred from the bars. An inferred test ("is the newest timestamp in `data` already in
+    // the window?") is equivalent only when every later call of a rebalance carries the same
+    // bars. The PortfolioManager's own bar subscriber delivers ONE DATE ACROSS N CALLS, so such
+    // a test would discard bars 2..N of a date and the gate would measure a one-name book.
+    if (!appended_this_rebalance_) {
+        appended_this_rebalance_ = true;
+        for (auto const& bar : bars) {
+            window_.push_back(bar);
+        }
+
+        // (2) CAP THE WINDOW AT DATES, NOT BARS. lookback_period is 252 DISTINCT dates, of which
+        // the sparse-date filter below keeps the complete ones: about 187-200 on the shipped
+        // futures books, because a date on which only some symbols printed counts here and is
+        // dropped there.
+        //
+        // The bar cap made the window's span a function of how many symbols the book holds: the
+        // same 252 is a year for one symbol and seven sessions for thirty-six. The key is the bar
+        // timestamp, which is exactly what create_market_data keys prices and return rows by, and
+        // every bar in futures_data.ohlcv_1d and equities_data.ohlcv_1d is stamped 00:00:00 UTC,
+        // so one timestamp is one date. A date on which only some symbols printed is normal here
+        // (agricultural roots have no Sunday bar, MBT prints on Saturdays) and stays one date.
+        //
+        // Duplicate (symbol, timestamp) rows -- 970 extra rows inside the frozen window
+        // (project_futures_dup_bars) -- are deliberately NOT removed here: create_market_data
+        // collapses them into one price per (symbol, timestamp) anyway, and de-duplicating would
+        // make this run incomparable with the baseline, which does not.
+        const size_t lookback = rm_.get_config().lookback_period;
+        std::set<Timestamp> dates;
+        for (const auto& bar : window_) dates.insert(bar.timestamp);
+        if (dates.size() > lookback) {
+            const Timestamp cutoff = *std::prev(dates.end(), static_cast<long>(lookback));
+            window_.erase(std::remove_if(window_.begin(), window_.end(),
+                                         [&cutoff](const Bar& b) { return b.timestamp < cutoff; }),
+                          window_.end());
+        }
+    }
+
+    // The window changes ONCE per rebalance (see (1)), so everything below -- F5's scan and
+    // create_market_data -- produces the SAME MarketData on laps 2..n as it did on lap 1.
+    // Recomputing it was pure waste: measured at ~3 ms per lap on a 252-date, 36-symbol window
+    // (1.4 ms on the old 252-BAR one), against ~41,000 gate evaluations a day on the
+    // bus-driven multi-strategy runner. Byte-identical by construction: same inputs, same
+    // output, and market_data_ is not mutated between laps.
+    if (appended_this_rebalance_ && market_data_built_this_rebalance_) {
+        return;
+    }
+    // market_data_built_this_rebalance_ is set only AFTER market_data_ has been assigned below, so
+    // a build that throws on lap 1 is retried on lap 2 instead of leaving laps 2..n reading the
+    // PREVIOUS rebalance's MarketData.
+
+    // (3) F5: DROP SPARSE DATES FROM THE GATE'S WINDOW.
+    //
+    // create_market_data builds one return row per consecutive pair of timestamps in the window,
+    // initialises every symbol's cell to 0.0, and overwrites it only when that symbol printed on
+    // BOTH dates. A symbol that did not print therefore enters the covariance as a genuine
+    // observation of ZERO return, and a sparse date wedged between two dense ones destroys the
+    // real return across it. On a 252-date futures window that is 1,188 fabricated cells of 9,036
+    // (13.15 %) and 491 destroyed real returns -- and it REORDERS which pair binds the gate: the
+    // honest maximum |rho| is ZF/ZN at 0.9757, the zero-fill knocks that to 0.9331 and hands the
+    // maximum to MES/MNQ at 0.9520, so the gate reads correlation_mult 0.8928 where the honest
+    // answer is 0.8700.
+    //
+    // The rule is the STRICT one: a date survives only if EVERY symbol in the window printed on
+    // it, so every cell of every surviving row is a real return and it needs no new statistics.
+    // Deliberately NOT done: forward-filling absent prices (it invents prices and assigns a
+    // multi-day gap move to one date); a pairwise-overlap correlation (per-pair sample sets can
+    // produce a covariance that is not positive semi-definite, and the same matrix feeds
+    // w'Sigma w in the VaR gate where a negative quadratic form is swallowed by sqrt(max(0, v))).
+    // (4) THE PARTICIPANTS. The strict rule is over
+    // the symbols the book can hold this rebalance (RiskContext::gate_participants: signalled by
+    // some strategy, or targeted or held), not over every symbol with a bar in the window: a symbol
+    // nobody signals, targets or holds has zero weight in every term the gate computes, so its
+    // columns add nothing, while its missing dates would remove those dates from EVERY symbol's
+    // returns. The window itself keeps every bar, so a symbol that starts
+    // to signal enters with its whole history. An empty or absent set leaves the whole window.
+    std::vector<Bar> participant_bars;
+    std::set<std::string> left_out;
+    const bool participants_only = ctx.gate_participants != nullptr && !ctx.gate_participants->empty();
+    if (participants_only) {
+        participant_bars.reserve(window_.size());
+        for (const auto& bar : window_) {
+            if (ctx.gate_participants->count(bar.symbol)) {
+                participant_bars.push_back(bar);
+            } else {
+                left_out.insert(bar.symbol);
+            }
+        }
+    }
+    const std::vector<Bar>& pool =
+        participants_only && !participant_bars.empty() ? participant_bars : window_;
+    if (&pool == &participant_bars && !left_out.empty()) {
+        std::string list;
+        for (const auto& s : left_out) list += (list.empty() ? "" : ",") + s;
+        INFO("GATE_NOT_SIGNALLING count=" + std::to_string(left_out.size()) + " symbols=" + list +
+             ": no strategy signals, targets or holds them; left out of the risk gate's window and "
+             "its date intersection this rebalance");
+    }
+    std::set<std::string> symbols;
+    std::map<Timestamp, std::set<std::string>> by_date;
+    for (const auto& bar : pool) {
+        symbols.insert(bar.symbol);
+        by_date[bar.timestamp].insert(bar.symbol);
+    }
+    std::set<Timestamp> complete;
+    for (const auto& [ts, syms] : by_date) {
+        if (syms.size() == symbols.size()) complete.insert(ts);
+    }
+    f5_engaged_ = complete.size() >= kF5MinGateDates;
+    dates_dropped_ = f5_engaged_ ? by_date.size() - complete.size() : 0;
+    // Say so when the gate falls back to the unfiltered window. On ENTERING the fallback -- the
+    // first time in a run and again on any re-entry -- not on every lap: the bus-driven BASE runner
+    // evaluates ~7,000 times a day on a window that warms from empty, and a per-lap line would be
+    // most of its log.
+    if (!f5_engaged_ && !in_f5_fallback_) {
+        WARN("T4_F5_FALLBACK complete_dates=" + std::to_string(complete.size()) +
+             " window_dates=" + std::to_string(by_date.size()) +
+             " floor=" + std::to_string(kF5MinGateDates) +
+             ": the gate reads the UNFILTERED window (sparse dates zero-filled) until it holds "
+             "the floor's complete dates; logged on entering the fallback, not per lap");
+    }
+    in_f5_fallback_ = !f5_engaged_;
+
+    // The gate's returns are adjusted. The levels are built
+    // on the WHOLE pool (every date, F5's filter not yet applied), so a contract switch on a date
+    // the filter drops is removed from the level and the return across that gap is a real move.
+    const RiskManager::AdjustedLevels adjusted = RiskManager::adjusted_levels_of(pool);
+    // the divisors on the same whole pool
+    const RiskManager::AdjustedLevels resolved = RiskManager::base_closes_of(pool);
+    if (f5_engaged_) {
+        std::vector<Bar> filtered;
+        filtered.reserve(pool.size());
+        for (const auto& bar : pool) {
+            if (complete.count(bar.timestamp)) filtered.push_back(bar);
+        }
+        market_data_ = rm_.create_market_data(filtered, &adjusted, &resolved);
+        market_data_built_this_rebalance_ = true;
+    } else {
+        // Below the floor F5 does not engage and the gate reads the UNFILTERED date-capped
+        // window. The fallback is deliberately the larger, dirtier window: a small-sample matrix
+        // is the failure this change set removes, and a 2-date window additionally drives
+        // create_market_data into its divide-by-(n-1)==0 branch, where the gate goes blind with
+        // every multiplier at 1.0.
+        market_data_ = rm_.create_market_data(pool, &adjusted, &resolved);
+        market_data_built_this_rebalance_ = true;
+    }
+}
+
+RiskDecision CarverRiskModule::to_decision(const RiskResult& r, const std::string& module_id) {
+    RiskDecision d;
+    d.module_id = module_id;
+    if (r.risk_exceeded) {
+        d.action = RiskAction::SCALE;
+        d.scale = r.recommended_scale;
+    } else {
+        d.action = RiskAction::NONE;
+        d.scale = 1.0;
+    }
+    d.metrics = r;
+    return d;
+}
+
+Result<RiskDecision> CarverRiskModule::evaluate(
+    const std::unordered_map<std::string, Position>& book, const RiskContext& ctx) {
+    auto result = rm_.process_positions(book, market_data_, {});
+    if (result.is_error()) {
+        return make_error<RiskDecision>(result.error()->code(), result.error()->what(),
+                                        "RiskManager");
+    }
+
+    RiskResult risk_result = result.value();
+    // What the gate actually read: the window AFTER F5's filter, with the unfiltered span
+    // recoverable as window_dates. `dates` is the number of dates create_market_data saw.
+    INFO("T4_RISK_WINDOW dates=" +
+         std::to_string(market_data_.returns.empty() && market_data_.ordered_symbols.empty()
+                            ? 0
+                            : market_data_.returns.size() + 1) +
+         " symbols=" + std::to_string(market_data_.ordered_symbols.size()) +
+         " returns_rows=" + std::to_string(market_data_.returns.size()) +
+         " dates_dropped=" + std::to_string(dates_dropped_) +
+         " f5_engaged=" + std::to_string(f5_engaged_ ? 1 : 0) +
+         " window_dates=" + std::to_string(window_dates()) +
+         " window_bars=" + std::to_string(window_.size()));
+    INFO("Risk management result: risk_exceeded=" + std::to_string(risk_result.risk_exceeded) +
+         ", scale=" + std::to_string(risk_result.recommended_scale) +
+         ", portfolio_mult=" + std::to_string(risk_result.portfolio_multiplier) +
+         ", jump_mult=" + std::to_string(risk_result.jump_multiplier) +
+         ", correlation_mult=" + std::to_string(risk_result.correlation_multiplier) +
+         ", leverage_mult=" + std::to_string(risk_result.leverage_multiplier));
+
+    // ---- THE TERM-AWARE LEVEL CUT ------------------------------------------------------
+    //
+    // The gate is scale-invariant -- the weights are normalised by the book's own gross -- so
+    // s_k barely moves as the book shrinks; multiplying the book by s_k on EVERY lap would ship
+    // five laps of x0.85, 0.4437 of a book the gate asked to cut by 15 %.
+    //
+    // A LEVEL is the right rule only for a multiplier that reads the book's COMPOSITION, because
+    // such a reading does not change when the book is scaled. Three of the four are of that kind:
+    //     portfolio_multiplier (VaR), jump_multiplier, correlation_multiplier.
+    // The fourth is not. calculate_leverage_multiplier is gross = total_value / capital and
+    // net = sum(position_values) / capital, a MAGNITUDE reading of the book as it now stands.
+    // Comparing that with the level would treat a fresh magnitude measurement as an absolute
+    // request and discard every leverage request after lap 1.
+    //
+    // So the level tracks the three INVARIANT terms only, and the leverage term is applied as a
+    // RATE on every lap -- compared with 1.0, never with the level. Both are honoured with ONE
+    // factor, the largest that satisfies both:
+    //     s_inv = min(portfolio, jump, correlation)   (a level request)
+    //     s_lev = leverage_multiplier                  (a rate on this book)
+    //     f     = min(1, s_inv / applied_level_, s_lev)
+    // min(), not a product: a deep leverage cut also satisfies a shallower correlation request
+    // and must not be charged twice for it. A lap on which the gate goes blind has all four
+    // multipliers at 1.0 and risk_exceeded false, so it still applies nothing.
+    const double s_inv = std::min({static_cast<double>(risk_result.portfolio_multiplier),
+                                   static_cast<double>(risk_result.jump_multiplier),
+                                   static_cast<double>(risk_result.correlation_multiplier)});
+    const double s_lev = static_cast<double>(risk_result.leverage_multiplier);
+    last_invariant_ = s_inv;
+    last_leverage_ = s_lev;
+
+    RiskDecision decision = to_decision(risk_result, id_);
+    if (decision.action == RiskAction::SCALE) {
+        // The head-room the invariant terms still allow, given what has already been applied.
+        // A level marked PARTIAL is not a true statement about the book this module measured
+        // (a sleeve was pinned and skipped by the multiply), so nothing
+        // divides by it: that lap honours the leverage rate alone, which is measured fresh on
+        // the current book and is always valid. Zero laps on every shipped book.
+        //
+        // The level is the product of the QUANTISED factors the PM actually multiplied in
+        // (Decimal rounds each to 1e-8), while s_inv is the raw reading. When the reading has not
+        // moved since the lap that applied it, the two differ only by that rounding: a factor that
+        // rounded UP leaves s_inv / level = 0.99999999x, which is not a request, and returning it
+        // as a SCALE would turn whole contracts into 0.99999999 of one. So the invariant terms are
+        // satisfied whenever s_inv is within one Decimal quantum of the level already applied; a
+        // lap whose reading is genuinely deeper than that is charged exactly s_inv / level.
+        double headroom = 1.0;
+        if (!level_partial_ && applied_level_ > 0.0 && s_inv < applied_level_ - kLevelQuantum) {
+            headroom = s_inv / applied_level_;
+        }
+        const double factor = std::min({1.0, headroom, s_lev});
+        if (factor < 1.0) {
+            decision.scale = factor;
+        } else {
+            // The invariant terms are already satisfied at this level or deeper and the leverage
+            // term reads 1.0: there is nothing left to apply this lap.
+            decision.action = RiskAction::NONE;
+            decision.scale = 1.0;
+        }
+    }
+    last_requested_ = decision.scale;
+    // Blind: the same tests RiskManager's own early returns make, recorded as data only.
+    bool mapped = false;
+    for (const auto& [symbol, pos] : book) {
+        (void)pos;
+        if (market_data_.symbol_indices.count(symbol)) {
+            mapped = true;
+            break;
+        }
+    }
+    // ... plus the two the schema names: too few complete dates to estimate anything from, and
+    // a book with no capital to divide by. On the date-keyed window it is false on every shipped
+    // futures lap. Data only: it is not logged here.
+    decision.blind = market_data_.returns.empty() || market_data_.covariance.empty() ||
+                     market_data_.symbol_indices.empty() || market_data_.ordered_symbols.empty() ||
+                     !mapped || complete_dates_in_window() < min_gate_dates_ ||
+                     static_cast<double>(rm_.get_config().capital) <= 0.0;
+    return Result<RiskDecision>(std::move(decision));
+}
+
+void CarverRiskModule::on_applied(const RiskApplied& applied, const RiskContext& ctx) {
+    (void)ctx;
+    if (applied.action == RiskAction::SCALE) {
+        applied_level_ *= static_cast<double>(applied.factor);
+        // The multiply skipped a pinned sleeve, so the aggregated book this module measured was
+        // cut by less than `factor` and applied_level_ now OVER-STATES the cut. Recorded rather
+        // than guessed at: a rule that divided by it would under-cut by exactly the pinned
+        // sleeve's share. Zero laps on every shipped book (no sleeve module is assigned).
+        if (applied.partial) level_partial_ = true;
+    }
+}
+
+Result<void> CarverRiskModule::set_capital(Decimal capital) {
+    RiskConfig config = rm_.get_config();
+    config.capital = capital;
+    return rm_.update_config(config);
+}
+
+nlohmann::json CarverRiskModule::describe() const {
+    nlohmann::json terms_json = nlohmann::json::array();
+    for (auto t : terms()) terms_json.push_back(risk_term_name(t));
+    return nlohmann::json{
+        {"id", id_}, {"type", type_}, {"terms", terms_json}, {"config", rm_.get_config().to_json()}};
+}
+
+}  // namespace trade_ngin

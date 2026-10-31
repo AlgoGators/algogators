@@ -53,7 +53,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libeigen3-dev \
         libnlopt-dev \
         libnlopt-cxx-dev \
-        libcurl4-openssl-dev \
         cron \
     && rm -rf /var/lib/apt/lists/*
 
@@ -68,16 +67,41 @@ RUN sed -i '1i\#include <algorithm>' src/core/logger.cpp && \
     sed -i '1i\#include <thread>' tests/order/test_order_manager.cpp && \
     sed -i '1i\#include <thread>' tests/execution/test_execution_engine.cpp && \
     sed -i '1i\#include <cmath>' tests/portfolio/mock_strategy.hpp && \
-    sed -i '1i\#include <thread>' tests/portfolio/test_portfolio_manager.cpp && \
-    sed -i '1i\#include <chrono>' tests/backtesting/test_engine.cpp && \
-    sed -i '1i\#include <thread>' tests/backtesting/test_engine.cpp && \
-    sed -i 's/void BacktestEngineTest::patch_mock_db_to_return_test_data/void patch_mock_db_to_return_test_data/' tests/backtesting/test_engine.cpp
+    sed -i '1i\#include <thread>' tests/portfolio/test_portfolio_manager.cpp
 
 RUN cmake -S /app -B /app/build \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DNLopt_DIR=/usr/lib/x86_64-linux-gnu/cmake/nlopt && \
     cmake --build /app/build --config Release -j"$(nproc)"
+
+# rpc (docs/design/rpc.md): the engine's Python gRPC server (the QT desk is its first service),
+# shipped in this image as its second entrypoint. Built in its own stage so the C++ build above
+# is untouched and no build tool (pip, grpcio-tools, a compiler) reaches the runtime image.
+# Wheels only.
+FROM ubuntu:24.04 AS rpc-build
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY services/rpc/requirements.txt services/rpc/requirements-build.txt /src/services/rpc/
+RUN python3 -m venv /opt/rpc/venv && \
+    /opt/rpc/venv/bin/pip install --no-cache-dir --only-binary=:all: \
+        -r /src/services/rpc/requirements.txt && \
+    /opt/rpc/venv/bin/pip uninstall -y -q pip && \
+    python3 -m venv /tmp/gen && \
+    /tmp/gen/bin/pip install --no-cache-dir --only-binary=:all: \
+        -r /src/services/rpc/requirements-build.txt
+
+COPY proto /src/proto
+COPY services/rpc /src/services/rpc
+RUN PYTHON=/tmp/gen/bin/python OUT_DIR=/opt/rpc/app sh /src/services/rpc/gen.sh && \
+    cp -r /src/services/rpc/algogators_rpc /opt/rpc/app/ && \
+    find /opt/rpc/app -name __pycache__ -prune -exec rm -rf {} + && \
+    cd /opt/rpc/app && /opt/rpc/venv/bin/python -c \
+        "import algogators_rpc.server, algogators_rpc.services.desk.service, algogators_rpc.services.desk.catchup, algogators_rpc.services.report.renderer, psycopg, zoneinfo; zoneinfo.ZoneInfo('America/New_York')"
 
 FROM ubuntu:24.04
 
@@ -96,9 +120,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libarrow-dataset-dev \
         libpq5 \
         libnlopt0 \
-        libcurl4t64 \
         cron \
-        gnuplot-nox \
+        procps \
         tzdata \
     && apt-get purge -y --auto-remove gnupg lsb-release \
     && rm -rf /var/lib/apt/lists/*
@@ -108,11 +131,26 @@ RUN ldconfig
 
 COPY --from=builder /app /app
 
+# rpc runtime: the interpreter only; the venv comes whole from its build stage. The server runs
+# only when the container command is `rpc` (alias `desk-agent`; scripts/docker-entrypoint.sh).
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=rpc-build /opt/rpc /opt/rpc
+
 WORKDIR /app
 
-COPY live_trend.cron /etc/cron.d/live_trend
-RUN chmod 0644 /etc/cron.d/live_trend && \
-    crontab /etc/cron.d/live_trend && \
-    touch /var/log/cron.log
+COPY live_portfolio.cron /etc/cron.d/live_portfolio
+RUN chmod 0644 /etc/cron.d/live_portfolio && \
+    crontab /etc/cron.d/live_portfolio && \
+    chmod 0755 /app/scripts/run_live_portfolio.sh /app/scripts/docker-entrypoint.sh         /app/scripts/qt_model_run.sh /app/scripts/qt_catchup.sh
 
-CMD ["cron", "-f"]
+# The container's only job is running cron. If the cron daemon dies, the container
+# can sit there looking alive while nothing is scheduled -- externally
+# indistinguishable from the three-month silence this change addresses.
+# Pair with `restart: unless-stopped` in the compose file on the host.
+HEALTHCHECK --interval=5m --timeout=10s --start-period=30s --retries=3 \
+    CMD pgrep -x cron > /dev/null || exit 1
+
+# The entrypoint snapshots the container environment for cron (cron does not
+# inherit it) and then execs cron in the foreground.
+ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]

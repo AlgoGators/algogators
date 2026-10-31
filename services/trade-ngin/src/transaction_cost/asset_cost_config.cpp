@@ -8,6 +8,11 @@ AssetCostConfigRegistry::AssetCostConfigRegistry() {
 }
 
 void AssetCostConfigRegistry::initialize_default_configs() {
+    // FUTURES: each entry is the cost model's calibration for that contract (spread in ticks, its
+    // bounds, the spread multiplier, the impact caps). The contract specs themselves (point value,
+    // tick in price units, fee) are NOT here: TransactionCostManager reads them from the contract's
+    // metadata row through the instrument registry, the same row the strategy sizes with (CM1). A
+    // future with no metadata row is an ERROR there, never priced on a constant from this file.
     // E-mini S&P 500 (ES)
     // Very liquid, typically 1 tick spread
     {
@@ -17,8 +22,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 50.0;
-        config.tick_size = 0.25;
-        config.point_value = 50.0;
         configs_[config.symbol] = config;
     }
 
@@ -31,13 +34,10 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 50.0;
-        config.tick_size = 0.01;
-        config.point_value = 1000.0;
         configs_[config.symbol] = config;
     }
 
     // Gold (GC)
-    // CME: tick $0.10/oz, 100 oz → tick_value = 0.10 * 100 = $10. Price feed in $/oz.
     // Very liquid, typically 1 tick spread during regular hours
     {
         AssetCostConfig config;
@@ -46,8 +46,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 50.0;
-        config.tick_size = 0.10;   // $0.10 per oz
-        config.point_value = 100.0;  // $ per 1 $/oz (100 oz)
         configs_[config.symbol] = config;
     }
 
@@ -60,8 +58,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 50.0;
-        config.tick_size = 0.25;
-        config.point_value = 20.0;
         configs_[config.symbol] = config;
     }
 
@@ -74,8 +70,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 60.0;
-        config.tick_size = 0.10;
-        config.point_value = 50.0;
         configs_[config.symbol] = config;
     }
 
@@ -89,8 +83,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.max_spread_ticks = 3.0;
         config.spread_cost_multiplier = 0.25;  // Limit orders: lower effective spread cost
         config.max_impact_bps = 30.0;
-        config.tick_size = 0.015625;  // 1/64
-        config.point_value = 1000.0;
         configs_[config.symbol] = config;
     }
 
@@ -104,8 +96,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.max_spread_ticks = 3.0;
         config.spread_cost_multiplier = 0.25;  // Limit orders: lower effective spread cost
         config.max_impact_bps = 30.0;
-        config.tick_size = 0.03125;  // 1/32
-        config.point_value = 1000.0;
         configs_[config.symbol] = config;
     }
 
@@ -119,8 +109,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.max_spread_ticks = 5.0;
         config.spread_cost_multiplier = 0.25;  // Limit orders: lower effective spread cost
         config.max_impact_bps = 40.0;
-        config.tick_size = 0.00005;
-        config.point_value = 125000.0;
         configs_[config.symbol] = config;
     }
 
@@ -133,8 +121,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 10.0;
         config.max_impact_bps = 80.0;
-        config.tick_size = 0.001;
-        config.point_value = 10000.0;
         configs_[config.symbol] = config;
     }
 
@@ -147,13 +133,33 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 60.0;
-        config.tick_size = 0.005;
-        config.point_value = 5000.0;
+        configs_[config.symbol] = config;
+    }
+
+    // Micro Gold (MGC) and Micro Silver (SIL). Their data (daily bars, definitions,
+    // statistics) holds no quotes, so the spread in ticks is the full-size contract's
+    // (the same tick in price, 0.10 and 0.005); the impact model reads the micro's own volume
+    // (ImpactModel::get_adv), which is what makes a thin micro's fill cost more.
+    {
+        AssetCostConfig config;
+        config.symbol = "MGC";
+        config.baseline_spread_ticks = 1.0;
+        config.min_spread_ticks = 1.0;
+        config.max_spread_ticks = 5.0;
+        config.max_impact_bps = 50.0;
+        configs_[config.symbol] = config;
+    }
+    {
+        AssetCostConfig config;
+        config.symbol = "SIL";
+        config.baseline_spread_ticks = 1.0;
+        config.min_spread_ticks = 1.0;
+        config.max_spread_ticks = 5.0;
+        config.max_impact_bps = 60.0;
         configs_[config.symbol] = config;
     }
 
     // Corn (ZC)
-    // Price feed in cents (e.g. 435.25). 1 tick = 0.25 cents; $50 per 1 cent on 5000 bu → tick_value = 0.25 * 50 = $12.50
     {
         AssetCostConfig config;
         config.symbol = "ZC";
@@ -161,13 +167,10 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 60.0;
-        config.tick_size = 0.25;    // cents
-        config.point_value = 50.0;  // $ per 1 cent
         configs_[config.symbol] = config;
     }
 
     // Soybeans (ZS)
-    // Price feed in cents. 1 tick = 0.25 cents; $50 per 1 cent on 5000 bu → tick_value = 0.25 * 50 = $12.50
     {
         AssetCostConfig config;
         config.symbol = "ZS";
@@ -175,13 +178,10 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 60.0;
-        config.tick_size = 0.25;    // cents
-        config.point_value = 50.0;  // $ per 1 cent
         configs_[config.symbol] = config;
     }
 
     // Wheat (ZW)
-    // Price feed in cents. 1 tick = 0.25 cents; $50 per 1 cent on 5000 bu → tick_value = 0.25 * 50 = $12.50
     {
         AssetCostConfig config;
         config.symbol = "ZW";
@@ -189,8 +189,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 60.0;
-        config.tick_size = 0.25;    // cents
-        config.point_value = 50.0;  // $ per 1 cent
         configs_[config.symbol] = config;
     }
 
@@ -203,8 +201,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.max_spread_ticks = 5.0;
         config.spread_cost_multiplier = 0.25;  // Limit orders: lower effective spread cost
         config.max_impact_bps = 40.0;
-        config.tick_size = 0.0001;
-        config.point_value = 100000.0;
         configs_[config.symbol] = config;
     }
 
@@ -217,8 +213,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.max_spread_ticks = 5.0;
         config.spread_cost_multiplier = 0.25;  // Limit orders: lower effective spread cost
         config.max_impact_bps = 40.0;
-        config.tick_size = 0.0001;
-        config.point_value = 62500.0;
         configs_[config.symbol] = config;
     }
 
@@ -231,8 +225,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.max_spread_ticks = 5.0;
         config.spread_cost_multiplier = 0.25;  // Limit orders: lower effective spread cost
         config.max_impact_bps = 40.0;
-        config.tick_size = 0.00005;
-        config.point_value = 100000.0;
         configs_[config.symbol] = config;
     }
 
@@ -245,13 +237,10 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.max_spread_ticks = 5.0;
         config.spread_cost_multiplier = 0.25;  // Limit orders: lower effective spread cost
         config.max_impact_bps = 40.0;
-        config.tick_size = 0.0000005;
-        config.point_value = 12500000.0;
         configs_[config.symbol] = config;
     }
 
     // Brazilian Real (6L)
-    // CME: tick_size = 0.0001 (0.01 cents/BRL), contract_size = 100,000 BRL
     {
         AssetCostConfig config;
         config.symbol = "6L";
@@ -260,8 +249,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.max_spread_ticks = 10.0;
         config.spread_cost_multiplier = 0.25;  // Limit orders: lower effective spread cost
         config.max_impact_bps = 80.0;
-        config.tick_size = 0.0001;  // Fixed: was 0.00005
-        config.point_value = 100000.0;
         configs_[config.symbol] = config;
     }
 
@@ -274,13 +261,10 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.max_spread_ticks = 10.0;
         config.spread_cost_multiplier = 0.25;  // Limit orders: lower effective spread cost
         config.max_impact_bps = 80.0;
-        config.tick_size = 0.00001;
-        config.point_value = 500000.0;
         configs_[config.symbol] = config;
     }
 
     // New Zealand Dollar (6N)
-    // CME: tick_size = 0.00005 (0.005 cents/NZD), contract_size = 100,000 NZD
     {
         AssetCostConfig config;
         config.symbol = "6N";
@@ -289,13 +273,10 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.max_spread_ticks = 5.0;
         config.spread_cost_multiplier = 0.25;  // Limit orders: lower effective spread cost
         config.max_impact_bps = 50.0;
-        config.tick_size = 0.00005;  // Fixed: was 0.0001
-        config.point_value = 100000.0;
         configs_[config.symbol] = config;
     }
 
     // Swiss Franc (6S)
-    // CME: tick_size = 0.00005 (0.005 cents/CHF), contract_size = 125,000 CHF
     {
         AssetCostConfig config;
         config.symbol = "6S";
@@ -304,13 +285,10 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.max_spread_ticks = 5.0;
         config.spread_cost_multiplier = 0.25;  // Limit orders: lower effective spread cost
         config.max_impact_bps = 40.0;
-        config.tick_size = 0.00005;  // Fixed: was 0.0001
-        config.point_value = 125000.0;
         configs_[config.symbol] = config;
     }
 
     // Feeder Cattle (GF)
-    // Price feed in cents/lb (e.g. 364.45). 1 tick = 0.025 cents/lb; $500 per 1 cent on 50k lbs → tick_value = 0.025 * 500 = $12.50
     {
         AssetCostConfig config;
         config.symbol = "GF";
@@ -318,13 +296,10 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 80.0;
-        config.tick_size = 0.025;   // cents/lb (0.00025 dollars)
-        config.point_value = 500.0;  // $ per 1 cent/lb
         configs_[config.symbol] = config;
     }
 
     // Lean Hogs (HE)
-    // Price feed in cents/lb (e.g. 98.575). 1 tick = 0.025 cents/lb; $400 per 1 cent on 40k lbs → tick_value = 0.025 * 400 = $10
     {
         AssetCostConfig config;
         config.symbol = "HE";
@@ -332,8 +307,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 80.0;
-        config.tick_size = 0.025;   // cents/lb (0.00025 dollars)
-        config.point_value = 400.0;  // $ per 1 cent/lb
         configs_[config.symbol] = config;
     }
 
@@ -345,14 +318,10 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 60.0;
-        config.tick_size = 0.0005;
-        config.point_value = 25000.0;
         configs_[config.symbol] = config;
     }
 
     // Heating Oil (HO)
-    // CME: tick_size = 0.0001 ($0.0001/gallon), contract_size = 42,000 gallons
-    // tick_value = 0.0001 * 42000 = $4.20
     {
         AssetCostConfig config;
         config.symbol = "HO";
@@ -360,13 +329,10 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 60.0;
-        config.tick_size = 0.0001;  // Verified: tick_value = $4.20
-        config.point_value = 42000.0;
         configs_[config.symbol] = config;
     }
 
     // KC Wheat (KE)
-    // Price feed in cents. 1 tick = 0.25 cents; $50 per 1 cent on 5000 bu → tick_value = 0.25 * 50 = $12.50
     {
         AssetCostConfig config;
         config.symbol = "KE";
@@ -374,13 +340,10 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 60.0;
-        config.tick_size = 0.25;    // cents
-        config.point_value = 50.0;  // $ per 1 cent
         configs_[config.symbol] = config;
     }
 
     // Live Cattle (LE)
-    // Price feed in cents/lb (e.g. 235.65). 1 tick = 0.025 cents/lb; $400 per 1 cent on 40k lbs → tick_value = 0.025 * 400 = $10
     {
         AssetCostConfig config;
         config.symbol = "LE";
@@ -388,8 +351,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 80.0;
-        config.tick_size = 0.025;   // cents/lb (0.00025 dollars)
-        config.point_value = 400.0;  // $ per 1 cent/lb
         configs_[config.symbol] = config;
     }
 
@@ -401,8 +362,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 60.0;
-        config.tick_size = 0.10;
-        config.point_value = 5.0;
         configs_[config.symbol] = config;
     }
 
@@ -414,8 +373,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 10.0;
         config.max_impact_bps = 80.0;
-        config.tick_size = 5.0;
-        config.point_value = 0.10;
         configs_[config.symbol] = config;
     }
 
@@ -427,8 +384,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 50.0;
-        config.tick_size = 0.25;
-        config.point_value = 5.0;
         configs_[config.symbol] = config;
     }
 
@@ -440,8 +395,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 50.0;
-        config.tick_size = 0.25;
-        config.point_value = 2.0;
         configs_[config.symbol] = config;
     }
 
@@ -453,8 +406,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 50.0;
-        config.tick_size = 1.0;
-        config.point_value = 0.50;
         configs_[config.symbol] = config;
     }
 
@@ -466,8 +417,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 70.0;
-        config.tick_size = 0.10;
-        config.point_value = 50.0;
         configs_[config.symbol] = config;
     }
 
@@ -479,8 +428,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 60.0;
-        config.tick_size = 0.0001;
-        config.point_value = 42000.0;
         configs_[config.symbol] = config;
     }
 
@@ -493,8 +440,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.max_spread_ticks = 3.0;
         config.spread_cost_multiplier = 0.25;  // Limit orders: lower effective spread cost
         config.max_impact_bps = 30.0;
-        config.tick_size = 0.03125;
-        config.point_value = 1000.0;
         configs_[config.symbol] = config;
     }
 
@@ -506,8 +451,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 50.0;
-        config.tick_size = 1.0;
-        config.point_value = 5.0;
         configs_[config.symbol] = config;
     }
 
@@ -520,13 +463,10 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.max_spread_ticks = 3.0;
         config.spread_cost_multiplier = 0.25;  // Limit orders: lower effective spread cost
         config.max_impact_bps = 30.0;
-        config.tick_size = 0.0078125;  // 1/128
-        config.point_value = 1000.0;
         configs_[config.symbol] = config;
     }
 
     // Soybean Oil (ZL)
-    // Price feed in cents/lb (e.g. 55.63). 1 tick = 0.01 cents/lb; $600 per 1 cent on 60k lbs → tick_value = 0.01 * 600 = $6
     {
         AssetCostConfig config;
         config.symbol = "ZL";
@@ -534,8 +474,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 60.0;
-        config.tick_size = 0.01;     // cents/lb
-        config.point_value = 600.0;  // $ per 1 cent/lb
         configs_[config.symbol] = config;
     }
 
@@ -547,8 +485,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 5.0;
         config.max_impact_bps = 60.0;
-        config.tick_size = 0.10;
-        config.point_value = 100.0;
         configs_[config.symbol] = config;
     }
 
@@ -560,8 +496,6 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.min_spread_ticks = 1.0;
         config.max_spread_ticks = 10.0;
         config.max_impact_bps = 100.0;
-        config.tick_size = 0.005;
-        config.point_value = 2000.0;
         configs_[config.symbol] = config;
     }
 
@@ -574,13 +508,76 @@ void AssetCostConfigRegistry::initialize_default_configs() {
         config.max_spread_ticks = 3.0;
         config.spread_cost_multiplier = 0.25;  // Limit orders: lower effective spread cost
         config.max_impact_bps = 30.0;
-        config.tick_size = 0.0078125;  // 1/128
-        config.point_value = 2000.0;
+        configs_[config.symbol] = config;
+    }
+
+    // ========================================
+    // EQUITIES — point_value = 1.0 (shares, not contracts)
+    // ========================================
+
+    // Mega-cap equities: very tight spreads, deep liquidity
+    for (const auto& sym : {"AAPL", "MSFT", "AMZN", "GOOGL", "META"}) {
+        AssetCostConfig config;
+        config.symbol = sym;
+        config.asset_type = AssetType::EQUITY;
+        config.baseline_spread_ticks = 1.0;   // ~$0.01 spread (1 penny)
+        config.min_spread_ticks = 1.0;        // Cannot go below 1 tick ($0.01) for equities
+        config.max_spread_ticks = 3.0;
+        config.tick_size = 0.01;
+        config.point_value = 1.0;             // 1 share = 1 point
+        config.commission_per_unit = 0.005;   // IBKR Pro: $0.005/share
+        config.min_commission_per_order = 1.00;
+        config.max_commission_per_order = 1e9;
+        config.max_commission_pct = 0.01;   // IBKR Fixed 1%; 0.5% is the Tiered cap
+        config.apply_regulatory_fees = false;  // IBKR Fixed is all-inclusive
+        config.max_impact_bps = 50.0;
+        config.max_total_implicit_bps = 75.0;
+        configs_[config.symbol] = config;
+    }
+
+    // Large-cap equities: slightly wider spreads
+    for (const auto& sym : {"TMUS", "NSC", "ABT"}) {
+        AssetCostConfig config;
+        config.symbol = sym;
+        config.asset_type = AssetType::EQUITY;
+        config.baseline_spread_ticks = 2.0;   // ~$0.02 spread
+        config.min_spread_ticks = 1.0;
+        config.max_spread_ticks = 5.0;
+        config.tick_size = 0.01;
+        config.point_value = 1.0;
+        config.commission_per_unit = 0.005;
+        config.min_commission_per_order = 1.00;
+        config.max_commission_per_order = 1e9;
+        config.max_commission_pct = 0.01;   // IBKR Fixed 1%; 0.5% is the Tiered cap
+        config.apply_regulatory_fees = false;  // IBKR Fixed is all-inclusive
+        config.max_impact_bps = 75.0;
+        config.max_total_implicit_bps = 100.0;
+        configs_[config.symbol] = config;
+    }
+
+    // Mid-cap / ADR equities: wider spreads, thinner liquidity
+    for (const auto& sym : {"ABEV", "ABM"}) {
+        AssetCostConfig config;
+        config.symbol = sym;
+        config.asset_type = AssetType::EQUITY;
+        config.baseline_spread_ticks = 3.0;   // ~$0.03 spread
+        config.min_spread_ticks = 1.5;
+        config.max_spread_ticks = 8.0;
+        config.tick_size = 0.01;
+        config.point_value = 1.0;
+        config.commission_per_unit = 0.005;
+        config.min_commission_per_order = 1.00;
+        config.max_commission_per_order = 1e9;
+        config.max_commission_pct = 0.01;   // IBKR Fixed 1%; 0.5% is the Tiered cap
+        config.apply_regulatory_fees = false;  // IBKR Fixed is all-inclusive
+        config.max_impact_bps = 100.0;
+        config.max_total_implicit_bps = 150.0;
         configs_[config.symbol] = config;
     }
 }
 
-AssetCostConfig AssetCostConfigRegistry::get_config(const std::string& symbol) const {
+AssetCostConfig AssetCostConfigRegistry::get_config(const std::string& symbol,
+                                                    AssetType asset_type) const {
     // First try exact match
     auto it = configs_.find(symbol);
     if (it != configs_.end()) {
@@ -588,6 +585,7 @@ AssetCostConfig AssetCostConfigRegistry::get_config(const std::string& symbol) c
     }
 
     // Strip continuous contract suffix (e.g., ".v.0", ".v.1") and try again
+    // This is futures-specific; equity symbols don't use this suffix
     std::string base_symbol = symbol;
     size_t dot_pos = symbol.find('.');
     if (dot_pos != std::string::npos) {
@@ -600,7 +598,13 @@ AssetCostConfig AssetCostConfigRegistry::get_config(const std::string& symbol) c
         }
     }
 
-    // Return default config for unknown symbols
+    // Return asset-class-appropriate default for unknown symbols
+    if (asset_type == AssetType::EQUITY) {
+        auto config = get_equity_default_config();
+        config.symbol = symbol;
+        return config;
+    }
+
     auto default_config = get_default_config();
     default_config.symbol = symbol;
     return default_config;
@@ -615,9 +619,10 @@ bool AssetCostConfigRegistry::has_config(const std::string& symbol) const {
 }
 
 AssetCostConfig AssetCostConfigRegistry::get_default_config() {
-    // Conservative defaults for unknown instruments
+    // Conservative defaults for unknown futures instruments
     AssetCostConfig config;
     config.symbol = "UNKNOWN";
+    config.asset_type = AssetType::FUTURE;
     config.baseline_spread_ticks = 2.0;
     config.min_spread_ticks = 1.0;
     config.max_spread_ticks = 10.0;
@@ -625,6 +630,76 @@ AssetCostConfig AssetCostConfigRegistry::get_default_config() {
     config.tick_size = 0.01;
     config.point_value = 100.0;
     config.max_total_implicit_bps = 200.0;
+    return config;
+}
+
+AssetCostConfig AssetCostConfigRegistry::get_equity_default_config() {
+    // Sensible defaults for unknown equity symbols
+    // Prevents 100x cost scaling and 300x commission overstatement
+    AssetCostConfig config;
+    config.symbol = "EQUITY_DEFAULT";
+    config.asset_type = AssetType::EQUITY;
+    config.baseline_spread_ticks = 2.0;
+    config.min_spread_ticks = 1.0;
+    config.max_spread_ticks = 10.0;
+    config.tick_size = 0.01;
+    config.point_value = 1.0;              // 1 share = 1 point (not 100.0!)
+    config.commission_per_unit = 0.005;    // IBKR Pro: $0.005/share
+    config.min_commission_per_order = 1.00;
+    config.max_commission_per_order = 1e9;
+    config.max_commission_pct = 0.01;   // IBKR Fixed 1%; 0.5% is the Tiered cap
+    config.apply_regulatory_fees = false;  // IBKR Fixed is all-inclusive
+    config.max_impact_bps = 100.0;
+    config.max_total_implicit_bps = 200.0;
+    return config;
+}
+
+AssetCostConfig AssetCostConfigRegistry::get_tiered_equity_config(double price, double adv) {
+    auto config = get_equity_default_config();
+
+    // Sub-dollar stocks use different tick size (SEC Rule 612)
+    if (price < 1.0) {
+        config.tick_size = 0.0001;
+    }
+
+    // Tier by ADV (calibrated to TCA literature: Almgren 2005, Deutsche Bank, Virtu/ITG)
+    if (adv > 10000000.0) {
+        // Mega-cap / ultra-liquid
+        config.baseline_spread_ticks = 1.0;
+        config.min_spread_ticks = 1.0;
+        config.max_spread_ticks = 3.0;
+        config.max_impact_bps = 50.0;
+        config.max_total_implicit_bps = 75.0;
+    } else if (adv > 2000000.0) {
+        // Large-cap
+        config.baseline_spread_ticks = 2.0;
+        config.min_spread_ticks = 1.0;
+        config.max_spread_ticks = 5.0;
+        config.max_impact_bps = 75.0;
+        config.max_total_implicit_bps = 100.0;
+    } else if (adv > 500000.0) {
+        // Mid-cap
+        config.baseline_spread_ticks = 3.0;
+        config.min_spread_ticks = 1.5;
+        config.max_spread_ticks = 8.0;
+        config.max_impact_bps = 100.0;
+        config.max_total_implicit_bps = 150.0;
+    } else if (adv > 100000.0) {
+        // Small-cap
+        config.baseline_spread_ticks = 5.0;
+        config.min_spread_ticks = 2.0;
+        config.max_spread_ticks = 15.0;
+        config.max_impact_bps = 150.0;
+        config.max_total_implicit_bps = 250.0;
+    } else {
+        // Penny / illiquid
+        config.baseline_spread_ticks = 10.0;
+        config.min_spread_ticks = 5.0;
+        config.max_spread_ticks = 50.0;
+        config.max_impact_bps = 300.0;
+        config.max_total_implicit_bps = 500.0;
+    }
+
     return config;
 }
 

@@ -1,0 +1,713 @@
+// include/trade_ngin/live/session_book_gate.hpp
+#pragma once
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <ctime>
+#include <iomanip>
+#include <map>
+#include <optional>
+#include <set>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+#include "trade_ngin/core/error.hpp"
+#include "trade_ngin/core/logger.hpp"
+#include "trade_ngin/core/types.hpp"
+#include "trade_ngin/data/roll_series.hpp"
+#include "trade_ngin/data/session_classifier.hpp"
+#include "trade_ngin/live/data_freshness.hpp"
+#include "trade_ngin/live/execution_manager.hpp"
+#include "trade_ngin/live/live_roll_legs.hpp"
+
+namespace trade_ngin {
+
+/**
+ * The live futures runners' side of the per-symbol session rule. Both twins
+ * (live_portfolio_conservative.cpp, live_portfolio.cpp) call these helpers in the same order:
+ *
+ *   1. classify every symbol's T-1 (classify_t1) and log it (log_t1_classification);
+ *   2. above the live_run_metadata upsert: a held symbol whose feed hole is older than
+ *      live.data_staleness_tolerance_days REFUSES the run when the run date is the host's date,
+ *      and is a WARN on a replay of a past date (held_feed_holes_past_tolerance,
+ *      run_date_is_host_date);
+ *   3. the book-level rule stays the T-1 price map's `.empty()`: carry the whole book when no
+ *      symbol printed (log_whole_book_carry names the reason);
+ *   4. every WITHHELD bar of the window (a JUNK bar or a thin
+ *      first print, SymbolDayVerdict::k01_withheld) is kept out of the strategy and portfolio feed
+ *      on every run (k01_consumed_bars, session_classifier.hpp), so a withheld T-1 bar's signal is
+ *      not updated today and the bar is never fed later. The price manager is not given that feed;
+ *   5. every symbol whose verdict is not SESSION is held at its stored T-1 quantity on EVERY
+ *      per-strategy book (hold_non_session_symbols). The key is the verdict, never membership of
+ *      the price map: a JUNK symbol HAS a T-1 price and would otherwise trade at the junk print;
+ *   6. executions are generated with PricingPolicy::STRICT and a symbol that still could not be
+ *      priced is rolled back to its stored row (execute_strategy_day_strict, the pattern of
+ *      LiveDailyCycle::execute_day_t); afterwards no book change may be left without a price
+ *      (unpriced_book_changes), or the run fails.
+ */
+
+using StrategyBooks = std::unordered_map<std::string, std::unordered_map<std::string, Position>>;
+
+// ------------------------------------------------------------------------------------------------
+// 1. Logging the day's classification
+// ------------------------------------------------------------------------------------------------
+
+/// One summary line, then JUNK WARN / feed hole ERROR / closure INFO per symbol. A closure whose
+/// hole is older than `tolerance_days` (when given) is an ERROR too: a feed that
+/// has been dead for more than eight weeks is no longer "expected" and reads as a closure.
+inline void log_t1_classification(const T1Classification& t1, int tolerance_days = -1) {
+    INFO("T1_CLASSIFIER t1=" + t1.t1_date + " session=" + std::to_string(t1.session) +
+         " junk=" + std::to_string(t1.junk) + " closure=" + std::to_string(t1.closure) +
+         " feed_hole=" + std::to_string(t1.feed_hole) +
+         " max_hole_age_days=" + std::to_string(t1.max_hole_age_days));
+    for (const auto& v : t1.verdicts) {
+        // T-1 answers the previous session's unconfirmed instrument id change.
+        if (!v.id_note.empty()) {
+            INFO("T1_CLASSIFIER INSTRUMENT_ID " + v.symbol + " " + v.date + ": " + v.id_note);
+        }
+        switch (v.verdict) {
+            case SessionVerdict::SESSION:
+                break;
+            case SessionVerdict::JUNK:
+                WARN("T1_CLASSIFIER JUNK " + v.symbol + " " + v.date + ": " + v.reason +
+                     " -- marked at its close " + std::to_string(v.close) +
+                     ", withheld from signal update, sizing and orders");
+                break;
+            case SessionVerdict::NO_BAR_FEED_HOLE:
+                ERROR("T1_CLASSIFIER FEED HOLE " + v.symbol + " " + v.date + ": no bar; " +
+                      v.reason + "; last bar " +
+                      (v.last_bar_date.empty() ? std::string("none") : v.last_bar_date) + " (" +
+                      std::to_string(v.hole_age_days) +
+                      " day(s)) -- held at its last mark, no order");
+                break;
+            case SessionVerdict::NO_BAR_CLOSURE:
+                if (tolerance_days >= 0 && v.hole_age_days > tolerance_days) {
+                    ERROR("T1_CLASSIFIER closure " + v.symbol + " " + v.date + ": " + v.reason +
+                          "; last bar " + v.last_bar_date + " (" +
+                          std::to_string(v.hole_age_days) +
+                          " day(s)), past live.data_staleness_tolerance_days=" +
+                          std::to_string(tolerance_days) + " -- held at its last mark, no order");
+                } else {
+                    INFO("T1_CLASSIFIER closure " + v.symbol + " " + v.date + ": " + v.reason +
+                         " -- held at its last mark, no order");
+                }
+                break;
+        }
+    }
+}
+
+/// The reason line of the whole-book carry (no symbol has a T-1 price). ERROR when any symbol
+/// was expected to print (a book-level feed hole, e.g. the dead Sundays 2026-05-17 and 05-24),
+/// INFO when every symbol is a closure.
+inline void log_whole_book_carry(const T1Classification& t1) {
+    const std::string line = "T1_CLASSIFIER no symbol has a T-1 price (t1=" + t1.t1_date +
+                             ", closure=" + std::to_string(t1.closure) +
+                             ", feed_hole=" + std::to_string(t1.feed_hole) +
+                             "): the whole book is carried forward, no order";
+    if (t1.feed_hole > 0) {
+        ERROR(line + "; this is a FEED HOLE, not a closure: " +
+              std::to_string(t1.feed_hole) + " symbol(s) normally print on this weekday");
+    } else {
+        INFO(line + "; every symbol is a closure");
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+// 2. The feed-hole refusal (true live only)
+// ------------------------------------------------------------------------------------------------
+
+struct HeldFeedHole {
+    std::string symbol;
+    int age_days{0};
+    std::string last_bar_date;
+    double held_quantity{0.0};
+};
+
+/**
+ * @brief A no-bar verdict past the tolerance. A symbol with no bar
+ *        anywhere in the loaded history has no age to measure (hole_age_days is -1 and
+ *        last_bar_date is empty): it is older than every tolerance, never younger.
+ */
+inline bool no_bar_past_tolerance(const SymbolDayVerdict& v, int tolerance_days) {
+    if (v.has_bar) return false;
+    return v.hole_age_days < 0 || v.hole_age_days > tolerance_days;
+}
+
+/// True when any symbol's T-1 is a no-bar verdict past the tolerance: the held book is then read.
+inline bool any_no_bar_past_tolerance(const T1Classification& t1, int tolerance_days) {
+    for (const auto& v : t1.verdicts) {
+        if (no_bar_past_tolerance(v, tolerance_days)) return true;
+    }
+    return false;
+}
+
+/**
+ * @brief The held symbols (a non-zero stored T-1 quantity) with no bar for longer than the
+ *        tolerance: the per-symbol form of the feed
+ *        freshness guard, keyed on a HELD symbol; a hole on a symbol the book does not hold
+ *        changes nothing and is only logged. Keyed on ANY no-bar verdict: a
+ *        feed dead for more than eight weeks stops being "expected" and is reclassified as a
+ *        closure, and a nine-week-old mark must refuse like a one-week-old one.
+ */
+inline std::vector<HeldFeedHole> held_feed_holes_past_tolerance(
+    const T1Classification& t1, const std::unordered_map<std::string, Position>& held_book,
+    int tolerance_days) {
+    std::vector<HeldFeedHole> out;
+    for (const auto& v : t1.verdicts) {
+        if (!no_bar_past_tolerance(v, tolerance_days)) continue;
+        auto it = held_book.find(v.symbol);
+        if (it == held_book.end()) continue;
+        const double q = it->second.quantity.as_double();
+        if (std::abs(q) <= 1e-9) continue;
+        out.push_back({v.symbol, v.hole_age_days, v.last_bar_date, q});
+    }
+    return out;
+}
+
+/// The host-local calendar date of an instant, YYYY-MM-DD.
+inline std::string local_ymd(const Timestamp& t) {
+    const std::time_t tt = std::chrono::system_clock::to_time_t(t);
+    std::tm tm{};
+    localtime_r(&tt, &tm);
+    char buf[11];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d", &tm);
+    return buf;
+}
+
+/**
+ * @brief The run date a live futures runner was given on its command line, as the instant the
+ *        runner stamps it: `YYYY-MM-DD` read by std::mktime as the host's LOCAL midnight, with
+ *        tm_isdst left 0, so in the host's standard time all year (05:00Z on a New York host in
+ *        April as in January, 00:00Z on a UTC host). Empty when the argument is not a date. This
+ *        is the twins' own parse, kept here so that a test executes it. The date frame itself
+ *        is not touched here.
+ */
+inline std::optional<Timestamp> run_date_at_local_midnight(const std::string& arg) {
+    std::tm tm = {};
+    std::istringstream ss(arg);
+    ss >> std::get_time(&tm, "%Y-%m-%d");
+    if (ss.fail())
+        return std::nullopt;
+    return std::chrono::system_clock::from_time_t(std::mktime(&tm));
+}
+
+/**
+ * @brief True when the run is for the host's own date (the refusal is keyed on
+ *        "run date equals the host's date"). The runners' run date is `now` in the host's local
+ *        frame (the CLI date is parsed as local midnight, or `now` is the wall clock on a bare
+ *        invocation), so both sides are compared as host-local dates. The date frame itself is
+ *        not touched here.
+ */
+inline bool run_date_is_host_date(const Timestamp& run_now, const Timestamp& host_now) {
+    return local_ymd(run_now) == local_ymd(host_now);
+}
+
+/**
+ * @brief True when the run is live: for the host's own date or a later one. The QT data-driven
+ *        run (services/rpc catchup.py; issues #191, #192) can build the next trading day's book
+ *        ahead of that day (Saturday's run building Monday), from the same bars that day's own
+ *        run would read, so the feed-hole refusal applies to it as it does to that day's run.
+ *        Only a replay of a past date is not live.
+ */
+inline bool run_date_is_live(const Timestamp& run_now, const Timestamp& host_now) {
+    return local_ymd(run_now) >= local_ymd(host_now);
+}
+
+/// How long a held or requested symbol has been without a bar, in words.
+inline std::string no_bar_age_text(int age_days, const std::string& last_bar_date) {
+    if (age_days < 0 || last_bar_date.empty()) return "no bar anywhere in the loaded history";
+    return "no bar for " + std::to_string(age_days) + " day(s) (last bar " + last_bar_date + ")";
+}
+
+/**
+ * @brief The one rule on held feed holes, shared by every live runner: a HELD symbol with no
+ *        bar past the tolerance refuses the run
+ *        when the run date is the host's own date, and is a warning when the same date is run on
+ *        another day (the symbols are then held at their last price). `host_now` is read by the
+ *        caller at the moment of the test, so a run that crosses local midnight before it reaches
+ *        the test is ruled as a run made on another day.
+ */
+struct HeldFeedHoleRuling {
+    bool refuse{false};
+    std::vector<std::string> lines;  ///< one per held hole: ERROR lines when refused, WARN otherwise
+};
+
+inline HeldFeedHoleRuling rule_held_feed_holes(const std::vector<HeldFeedHole>& holes,
+                                               int tolerance_days, const Timestamp& run_now,
+                                               const Timestamp& host_now) {
+    HeldFeedHoleRuling ruling;
+    if (holes.empty()) return ruling;
+    ruling.refuse = run_date_is_host_date(run_now, host_now);
+    for (const auto& hole : holes) {
+        const std::string msg =
+            "FEED_HOLE_REFUSAL held symbol " + hole.symbol + " (quantity " +
+            std::to_string(hole.held_quantity) + ") has had " +
+            no_bar_age_text(hole.age_days, hole.last_bar_date) +
+            ", past live.data_staleness_tolerance_days=" + std::to_string(tolerance_days);
+        ruling.lines.push_back(ruling.refuse
+                                   ? msg + ". Refusing to run live: refresh the OHLCV feed, then "
+                                           "run this date."
+                                   : msg + ". Replay of a past date: not refused.");
+    }
+    return ruling;
+}
+
+/**
+ * @brief The requested symbols the book does NOT hold whose T-1 is a no-bar verdict past the
+ *        tolerance, as one line: they stop nothing, they cannot be entered today.
+ *        Empty when there is none.
+ */
+inline std::string unheld_no_bar_line(const T1Classification& t1,
+                                      const std::unordered_map<std::string, Position>& held_book,
+                                      int tolerance_days) {
+    std::vector<std::string> parts;
+    for (const auto& v : t1.verdicts) {
+        if (!no_bar_past_tolerance(v, tolerance_days)) continue;
+        auto it = held_book.find(v.symbol);
+        if (it != held_book.end() && std::abs(it->second.quantity.as_double()) > 1e-9) continue;
+        parts.push_back(v.symbol + " (" + no_bar_age_text(v.hole_age_days, v.last_bar_date) + ")");
+    }
+    if (parts.empty()) return {};
+    std::sort(parts.begin(), parts.end());
+    std::string line = "FEED_HOLE_NOT_HELD " + std::to_string(parts.size()) +
+                       " requested symbol(s) the book does not hold are past "
+                       "live.data_staleness_tolerance_days=" +
+                       std::to_string(tolerance_days) + " and cannot be entered today:";
+    for (const auto& part : parts) line += " " + part + ";";
+    return line;
+}
+
+/**
+ * @brief The same two selections for a runner that has no T-1 classifier (the equity runner):
+ *        each requested symbol's newest loaded bar date against the run's as-of date. A symbol
+ *        with no bar at all is past every tolerance. `held_quantity` holds the stored T-1
+ *        quantities; a symbol absent from it, or at zero, is not held.
+ */
+struct LastBarHoles {
+    std::vector<HeldFeedHole> held;
+    std::string not_held_line;  ///< empty when no un-held symbol is past the tolerance
+};
+
+inline LastBarHoles holes_from_last_bars(
+    const std::vector<std::string>& requested,
+    const std::unordered_map<std::string, std::string>& last_bar_date, const std::string& as_of_ymd,
+    const std::unordered_map<std::string, double>& held_quantity, int tolerance_days) {
+    LastBarHoles out;
+    T1Classification as_verdicts;
+    std::unordered_map<std::string, Position> held_book;
+    for (const auto& symbol : requested) {
+        SymbolDayVerdict v;
+        v.symbol = symbol;
+        v.date = as_of_ymd;
+        auto it = last_bar_date.find(symbol);
+        if (it != last_bar_date.end() && freshness_parse_ymd_utc(it->second) > 0) {
+            const long behind = calendar_days_between_utc(it->second, as_of_ymd);
+            v.has_bar = behind <= 0;
+            v.last_bar_date = it->second;
+            v.hole_age_days = static_cast<int>(behind);
+        }
+        as_verdicts.verdicts.push_back(v);
+        auto held = held_quantity.find(symbol);
+        if (held != held_quantity.end()) {
+            Position p;
+            p.symbol = symbol;
+            p.quantity = Decimal(held->second);
+            held_book[symbol] = p;
+        }
+    }
+    out.held = held_feed_holes_past_tolerance(as_verdicts, held_book, tolerance_days);
+    out.not_held_line = unheld_no_bar_line(as_verdicts, held_book, tolerance_days);
+    return out;
+}
+
+// ------------------------------------------------------------------------------------------------
+// 4b. The T-1 settlement on the consumed bars
+// ------------------------------------------------------------------------------------------------
+
+struct ConsumedT1Settlement {
+    /// Symbols whose T-1 bar books no move: a change bar (a roll's switch day or either bar of a
+    /// flip) or a WITHHELD bar.
+    std::unordered_set<std::string> zero_pnl_symbols;
+    /// The two kinds of zero_pnl_symbols, kept apart for the report: a CHANGE bar (a
+    /// roll's switch day, either bar of a flip, an unconfirmed id change the classifier holds) and
+    /// a WITHHELD bar. Their union is zero_pnl_symbols; nothing settles from these two.
+    std::unordered_set<std::string> roll_zero_symbols;
+    std::unordered_set<std::string> withheld_zero_symbols;
+    /// The symbols whose T-1 bar is a per-contract roll bar (it books the old
+    /// contract's move, to its close on the bar), for the report's roll footnote; empty with the
+    /// switch off, and without a symbol whose roll this run legs late.
+    std::unordered_set<std::string> per_contract_roll_symbols;
+    /// The close each symbol's T-1 move is booked against: its previous CONSUMED bar's close when its
+    /// last consumed bar is dated T-1 (a withheld bar in between is skipped); otherwise the raw T-2
+    /// close passed in (unused: no consumed T-1 bar books no move).
+    std::unordered_map<std::string, double> t2_close_prices;
+    /// The close each symbol's T-1 move is booked to: the raw T-1 map, except a symbol whose roll
+    /// this run legs LATE (section 6.5), which books every unbooked consumed bar's move on the T-1
+    /// row (its last consumed close against LateRollSettlement::settle_from), and a per-contract
+    /// roll bar (rolls step 3), which books to the old contract's close on it.
+    std::unordered_map<std::string, double> t1_close_prices;
+    /// For a symbol whose last consumed bar is NOT dated T-1 (it printed no bar on T-1, or its
+    /// T-1 print was withheld): the close of that last consumed bar, its last known close and the
+    /// close its next booked move will be booked against. No settlement reads it: it is what the
+    /// report's settled table prints as the previous price of a no-bar row
+    /// (core/report_settled_marks.hpp).
+    std::unordered_map<std::string, double> last_close_without_t1;
+};
+
+/**
+ * @brief The live T-1 finalize's inputs on the consumed bars. `consumed` is the window without the
+ *        withheld bars (k01_consumed_bars), `t1_date` the run's T-1, `roll_status` the status of
+ *        each symbol's last consumed bar (roll_series::roll_status_of(consumed)),
+ *        `withheld_t1_symbols` the symbols whose T-1 bar was withheld, `raw_t2` and `raw_t1` the
+ *        price manager's T-2 and T-1 maps, `late_rolls` LiveRollState::late.
+ */
+inline ConsumedT1Settlement consumed_t1_settlement(
+    const std::vector<Bar>& consumed, const std::string& t1_date,
+    const std::unordered_map<std::string, roll_series::RollTracker::Status>& roll_status,
+    const std::vector<std::string>& withheld_t1_symbols,
+    const std::unordered_map<std::string, double>& raw_t2,
+    const std::unordered_map<std::string, double>& raw_t1,
+    const std::unordered_map<std::string, LateRollSettlement>& late_rolls) {
+    ConsumedT1Settlement out;
+    out.zero_pnl_symbols.insert(withheld_t1_symbols.begin(), withheld_t1_symbols.end());
+    out.withheld_zero_symbols.insert(withheld_t1_symbols.begin(), withheld_t1_symbols.end());
+    out.t2_close_prices = raw_t2;
+    out.t1_close_prices = raw_t1;
+    std::map<std::string, std::vector<const Bar*>> by_symbol;
+    for (const auto& bar : consumed) by_symbol[bar.symbol].push_back(&bar);
+    for (auto& [symbol, seq] : by_symbol) {
+        std::stable_sort(seq.begin(), seq.end(),
+                         [](const Bar* a, const Bar* b) { return a->timestamp < b->timestamp; });
+        if (SessionClassifier::ymd(SessionClassifier::day_of(seq.back()->timestamp)) != t1_date) {
+            out.last_close_without_t1[symbol] = static_cast<double>(seq.back()->close);
+            continue;
+        }
+        if (seq.size() >= 2) out.t2_close_prices[symbol] = static_cast<double>(seq[seq.size() - 2]->close);
+        const auto rs = roll_status.find(symbol);
+        if (rs != roll_status.end() && rs->second.change && !rs->second.mark_close &&
+            !rs->second.previous_close) {
+            out.zero_pnl_symbols.insert(symbol);
+            if (!out.withheld_zero_symbols.count(symbol)) out.roll_zero_symbols.insert(symbol);
+        }
+        // With per_contract_rolls on, a roll bar books the old contract's own move over
+        // it, to the old contract's close on the bar; the bar that confirms a vendor switch books
+        // from the target's close on the switch bar.
+        if (rs != roll_status.end() && rs->second.mark_close) {
+            out.t1_close_prices[symbol] = *rs->second.mark_close;
+            // (a micro's change of price source is no roll: no footnote)
+            if (rs->second.confirm && !rs->second.price_source_change) {
+                out.per_contract_roll_symbols.insert(symbol);
+            }
+        }
+        if (rs != roll_status.end() && rs->second.previous_close) {
+            out.t2_close_prices[symbol] = *rs->second.previous_close;
+        }
+    }
+    // A late roll's symbol books its unbooked consumed bars on this run, whether or not it has a
+    // T-1 bar (a withheld T-1 print stays out: the sum is over consumed bars).
+    for (const auto& [symbol, late] : late_rolls) {
+        out.zero_pnl_symbols.erase(symbol);
+        out.roll_zero_symbols.erase(symbol);
+        out.withheld_zero_symbols.erase(symbol);
+        out.per_contract_roll_symbols.erase(symbol);
+        out.t1_close_prices[symbol] = late.settle_to;
+        out.t2_close_prices[symbol] = late.settle_from;
+    }
+    return out;
+}
+
+// ------------------------------------------------------------------------------------------------
+// 5. The hold
+// ------------------------------------------------------------------------------------------------
+
+struct BookHold {
+    std::string strategy_name;
+    std::string symbol;
+    SessionVerdict verdict{SessionVerdict::NO_BAR_CLOSURE};
+    double held_quantity{0.0};
+    double target_quantity{0.0};
+    bool reinserted{false};  ///< held yesterday, absent from today's target map
+    bool classified{true};   ///< false: outside the classified universe (no T-1 verdict)
+    bool change_bar{false};  ///< held under D37 (its last consumed bar is pending), T-1 a SESSION
+};
+
+/**
+ * @brief Holds every non-SESSION symbol, and every symbol of `change_bar_holds`, at its stored T-1
+ *        quantity, on every per-strategy book.
+ *
+ * `change_bar_holds` is the set of
+ * symbols whose last consumed bar is pending (a change bar, either bar of a flip, an id-less bar
+ * inside a pending roll). Such a bar can carry a SESSION verdict (a full-volume switch day, a flip's
+ * reverting bar, an id-less bar), so the verdict alone does not hold it; the hold applies on EVERY
+ * rebalance, never only on a day the risk gate cuts.
+ *
+ * For each sleeve: a symbol whose verdict is not SESSION and whose target differs from the
+ * sleeve's stored T-1 quantity gets that quantity back (flat if nothing was stored); the row's
+ * mark is left as the strategy wrote it (the last bar's close, the last mark), and the runner
+ * stores a JUNK symbol at its T-1 close because it is in the price map. A symbol held yesterday
+ * but absent from today's target map is re-inserted from its stored row, so the execution step's
+ * close-out loop cannot flatten it. Returns one record per held change; the caller logs and
+ * rebuilds the combined book.
+ */
+inline std::vector<BookHold> hold_non_session_symbols(
+    StrategyBooks& books, const StrategyBooks& previous, const T1Classification& t1,
+    const Timestamp& now, const std::unordered_set<std::string>& change_bar_holds) {
+    static const std::unordered_map<std::string, Position> kEmpty;
+    std::vector<BookHold> holds;
+    // Held only because its last consumed bar is pending: the verdict would have let it trade.
+    auto d37_only = [&](const std::string& symbol) {
+        return t1.is_session(symbol) && change_bar_holds.count(symbol) > 0;
+    };
+    // Deterministic order for the log.
+    std::vector<std::string> names;
+    for (const auto& [name, _] : books) names.push_back(name);
+    std::sort(names.begin(), names.end());
+    for (const auto& name : names) {
+        auto& book = books[name];
+        auto pit = previous.find(name);
+        const auto& prev = pit != previous.end() ? pit->second : kEmpty;
+
+        std::vector<std::string> symbols;
+        for (const auto& [symbol, _] : book) symbols.push_back(symbol);
+        std::sort(symbols.begin(), symbols.end());
+        for (const auto& symbol : symbols) {
+            if (t1.is_session(symbol) && !change_bar_holds.count(symbol)) continue;
+            auto& pos = book[symbol];
+            auto prev_it = prev.find(symbol);
+            const double prev_qty =
+                prev_it != prev.end() ? prev_it->second.quantity.as_double() : 0.0;
+            const double target = pos.quantity.as_double();
+            if (std::abs(target - prev_qty) <= 1e-6) continue;
+            pos.quantity = Decimal(prev_qty);
+            const auto* v = t1.find(symbol);
+            holds.push_back({name, symbol, v ? v->verdict : SessionVerdict::NO_BAR_CLOSURE,
+                             prev_qty, target, false, v != nullptr, d37_only(symbol)});
+        }
+
+        std::vector<std::string> prev_symbols;
+        for (const auto& [symbol, _] : prev) prev_symbols.push_back(symbol);
+        std::sort(prev_symbols.begin(), prev_symbols.end());
+        for (const auto& symbol : prev_symbols) {
+            if (book.count(symbol)) continue;
+            if (t1.is_session(symbol) && !change_bar_holds.count(symbol)) continue;
+            const Position& row = prev.at(symbol);
+            if (std::abs(row.quantity.as_double()) <= 1e-6) continue;
+            book[symbol] = row;
+            book[symbol].last_update = now;
+            const auto* v = t1.find(symbol);
+            holds.push_back({name, symbol, v ? v->verdict : SessionVerdict::NO_BAR_CLOSURE,
+                             row.quantity.as_double(), 0.0, true, v != nullptr, d37_only(symbol)});
+        }
+    }
+    return holds;
+}
+
+inline void log_book_holds(const std::vector<BookHold>& holds) {
+    size_t without_session = 0;
+    for (const auto& h : holds) {
+        const std::string what = h.reinserted
+                                     ? "absent from today's target, held at " +
+                                           std::to_string(h.held_quantity) + "; no close-out today"
+                                     : "book held at " + std::to_string(h.held_quantity) +
+                                           " instead of target " +
+                                           std::to_string(h.target_quantity) + "; no order today";
+        // D37 (section 6.1): a pending symbol whose T-1 is a SESSION is held by the change-bar rule,
+        // in its own family.
+        if (h.change_bar) {
+            WARN("CHANGE_BAR_HOLD " + h.symbol + " (" + h.strategy_name + "): " + what);
+            continue;
+        }
+        ++without_session;
+        // A symbol nobody classified (removed from the universe, or filtered out of
+        // get_symbols) is held because nothing vouched for it, not because T-1 was a closure.
+        WARN("BOOK_GATE " + h.symbol + " (" + h.strategy_name + "): " +
+             (h.classified ? "T-1 " + std::string(to_string(h.verdict))
+                           : std::string("outside the classified universe (no T-1 verdict)")) +
+             " -- " + what);
+    }
+    if (without_session > 0) {
+        INFO("BOOK_GATE held " + std::to_string(without_session) +
+             " book change(s) on symbols without a T-1 session");
+    }
+}
+
+/// The distinct held symbols, sorted (for live_results.config).
+inline std::vector<std::string> held_symbols(const std::vector<BookHold>& holds) {
+    std::set<std::string> s;
+    for (const auto& h : holds) s.insert(h.symbol);
+    return {s.begin(), s.end()};
+}
+
+/// The combined book as the runners build it: per symbol, the sum over sleeves (Σ qᵢ).
+inline void rebuild_combined_positions(std::unordered_map<std::string, Position>& positions,
+                                       const StrategyBooks& books) {
+    positions.clear();
+    for (const auto& [_, pos_map] : books) {
+        for (const auto& [symbol, pos] : pos_map) {
+            auto it = positions.find(symbol);
+            if (it == positions.end()) {
+                positions[symbol] = pos;
+            } else {
+                it->second.quantity += pos.quantity;
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+// 6. STRICT execution with the rollback, and the assertion
+// ------------------------------------------------------------------------------------------------
+
+struct StrictExecutionOutcome {
+    std::vector<ExecutionReport> executions;
+    std::vector<std::string> unpriced;     ///< symbols the execution step could not price
+    std::vector<std::string> rolled_back;  ///< of those, the ones put back to the stored row
+};
+
+/**
+ * @brief One sleeve's executions under PricingPolicy::STRICT, rolling back what did not trade.
+ *
+ * Copied from LiveDailyCycle::execute_day_t rule 3: a symbol that could not be priced did not
+ * trade, so the day-T book must not claim it did. Its target goes back to the stored T-1 row
+ * (or is dropped if it was never held). With the hold above, every symbol that reaches the
+ * execution step with a change has a positive T-1 price, so `unpriced` is empty by construction;
+ * this is the belt, and a non-empty `unpriced` is a tripwire the caller logs as an ERROR.
+ * The futures runners do not use MARK_FALLBACK (a fill at the position's own last mark).
+ */
+inline Result<StrictExecutionOutcome> execute_strategy_day_strict(
+    ExecutionManager& execution_manager, std::unordered_map<std::string, Position>& current,
+    const std::unordered_map<std::string, Position>& previous,
+    const std::unordered_map<std::string, double>& t1_closes, const Timestamp& now) {
+    StrictExecutionOutcome out;
+    auto res = execution_manager.generate_daily_executions(current, previous, t1_closes, now,
+                                                           PricingPolicy::STRICT, &out.unpriced);
+    if (res.is_error()) {
+        return make_error<StrictExecutionOutcome>(res.error()->code(), res.error()->what(),
+                                                  "execute_strategy_day_strict");
+    }
+    out.executions = res.value();
+    for (const auto& symbol : out.unpriced) {
+        auto prev_it = previous.find(symbol);
+        if (prev_it != previous.end() && prev_it->second.quantity.as_double() != 0.0) {
+            current[symbol] = prev_it->second;
+            current[symbol].last_update = now;
+        } else {
+            current.erase(symbol);
+        }
+        out.rolled_back.push_back(symbol);
+    }
+    return Result<StrictExecutionOutcome>(out);
+}
+
+/// The exec_id suffix of a forecast-sign close: the fill that takes a held
+/// position to flat before the day's search, stored ahead of the symbol's other fill of the day.
+inline constexpr const char* kSignCloseSuffix = "_SC";
+
+inline bool is_sign_close(const ExecutionReport& exec) {
+    const std::string suffix(kSignCloseSuffix);
+    return exec.exec_id.size() >= suffix.size() &&
+           exec.exec_id.compare(exec.exec_id.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+/**
+ * @brief execute_strategy_day_strict with the day's forecast-sign closes: a symbol
+ *        in `sign_closes` the sleeve held is first closed with ONE fill to flat (exec_id and
+ *        order_id suffixed kSignCloseSuffix), and the move from flat to today's quantity is a
+ *        second fill; every other symbol trades once, as before. Both fills are priced STRICT
+ *        from the same T-1 close, so a symbol is filled twice or rolled back to its stored row.
+ */
+inline Result<StrictExecutionOutcome> execute_strategy_day_strict(
+    ExecutionManager& execution_manager, std::unordered_map<std::string, Position>& current,
+    const std::unordered_map<std::string, Position>& previous,
+    const std::unordered_map<std::string, double>& t1_closes, const Timestamp& now,
+    const std::map<std::string, double>& sign_closes) {
+    if (sign_closes.empty()) {
+        return execute_strategy_day_strict(execution_manager, current, previous, t1_closes, now);
+    }
+    // The closed book: the stored T-1 rows with the sign-closed symbols at flat.
+    std::unordered_map<std::string, Position> closed = previous;
+    std::unordered_map<std::string, Position> closing = previous;
+    for (const auto& [symbol, fill] : sign_closes) {
+        (void)fill;
+        auto row = closed.find(symbol);
+        if (row == closed.end() || row->second.quantity.as_double() == 0.0) continue;
+        row->second.quantity = Decimal(0.0);
+        closing[symbol].quantity = Decimal(0.0);
+    }
+    StrictExecutionOutcome out;
+    std::vector<std::string> unpriced_close;
+    auto closes = execution_manager.generate_daily_executions(closing, previous, t1_closes, now,
+                                                              PricingPolicy::STRICT,
+                                                              &unpriced_close);
+    if (closes.is_error()) {
+        return make_error<StrictExecutionOutcome>(closes.error()->code(), closes.error()->what(),
+                                                  "execute_strategy_day_strict");
+    }
+    for (auto exec : closes.value()) {
+        exec.exec_id += kSignCloseSuffix;
+        exec.order_id += kSignCloseSuffix;
+        out.executions.push_back(std::move(exec));
+    }
+    // A close that could not be priced did not happen: the symbol's second step starts from its
+    // stored row, where the plain rule below rolls it back.
+    for (const auto& symbol : unpriced_close) {
+        auto prev_it = previous.find(symbol);
+        if (prev_it != previous.end()) closed[symbol] = prev_it->second;
+    }
+    auto rest = execute_strategy_day_strict(execution_manager, current, closed, t1_closes, now);
+    if (rest.is_error()) return rest;
+    for (const auto& symbol : rest.value().rolled_back) {
+        // rolled back to the STORED row, not to the closed book's flat row
+        auto prev_it = previous.find(symbol);
+        if (prev_it != previous.end() && prev_it->second.quantity.as_double() != 0.0) {
+            current[symbol] = prev_it->second;
+            current[symbol].last_update = now;
+        }
+    }
+    out.executions.insert(out.executions.end(), rest.value().executions.begin(),
+                          rest.value().executions.end());
+    out.unpriced = rest.value().unpriced;
+    out.rolled_back = rest.value().rolled_back;
+    return Result<StrictExecutionOutcome>(out);
+}
+
+/**
+ * @brief The assertion: every book change left on any sleeve has a positive T-1 price. A change
+ *        is a quantity that differs from the stored T-1 row, or a stored non-zero row absent from
+ *        today's book (a close-out). Returns "STRATEGY/SYMBOL" for each violation; empty is the
+ *        only acceptable answer.
+ */
+inline std::vector<std::string> unpriced_book_changes(
+    const StrategyBooks& books, const StrategyBooks& previous,
+    const std::unordered_map<std::string, double>& t1_closes) {
+    static const std::unordered_map<std::string, Position> kEmpty;
+    auto priced = [&t1_closes](const std::string& s) {
+        auto it = t1_closes.find(s);
+        return it != t1_closes.end() && it->second > 0.0;
+    };
+    std::vector<std::string> out;
+    for (const auto& [name, book] : books) {
+        auto pit = previous.find(name);
+        const auto& prev = pit != previous.end() ? pit->second : kEmpty;
+        for (const auto& [symbol, pos] : book) {
+            auto p = prev.find(symbol);
+            const double q0 = p != prev.end() ? p->second.quantity.as_double() : 0.0;
+            if (std::abs(pos.quantity.as_double() - q0) > 1e-6 && !priced(symbol)) {
+                out.push_back(name + "/" + symbol);
+            }
+        }
+        for (const auto& [symbol, row] : prev) {
+            if (!book.count(symbol) && row.quantity.as_double() != 0.0 && !priced(symbol)) {
+                out.push_back(name + "/" + symbol);
+            }
+        }
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+}  // namespace trade_ngin

@@ -12,14 +12,45 @@
 namespace trade_ngin {
 
 /**
- * ExecutionManager - Handles execution generation for live trading
+ * ExecutionManager - Offline execution synthesizer for the live trading flow.
  *
- * This class encapsulates the logic for:
- * - Generating execution reports from position changes
- * - Calculating commissions and transaction costs via TransactionCostManager
+ * Despite "live" in the path, this class is NOT a real broker adapter.
+ * It generates synthetic ExecutionReports from position deltas
+ * (target - current) priced at T-1 close, and computes commissions /
+ * transaction costs via TransactionCostManager. There is no order routing,
+ * no broker network call, no partial-fill handling.
  *
- * Extracted from live_trend.cpp lines 717-833 as part of Phase 3 refactoring
+ * This is paper-trading by design. A real broker adapter, with broker
+ * reconciliation, is separate work for when live brokerage integration ships.
+ *
+ * For historical simulation, see backtest::BacktestExecutionManager.
+ *
+ * The "live" prefix is kept for path stability; this docstring is the
+ * authoritative description of the role.
  */
+
+/**
+ * How generate_daily_executions() prices a fill when market_prices has no usable
+ * entry for the symbol.
+ *
+ * The distinction exists because Position::average_price does not mean the same
+ * thing in every strategy. Futures trend-following assigns it the latest mark
+ * (TrendFollowingStrategy, matching REALIZED_ONLY daily settlement), so falling
+ * back to it yields a real price. Equity mean reversion maintains it as a weighted
+ * cost basis, which for a position opened today is 0.00 until the fill being priced
+ * is itself processed -- so the same fallback books the trade at zero.
+ */
+enum class PricingPolicy {
+    /// Fall back to Position::average_price. Correct where that field holds a mark.
+    /// This is the historical behaviour and the default, so existing callers are
+    /// unaffected.
+    MARK_FALLBACK,
+
+    /// Never invent a price: skip the symbol with an ERROR and report it through
+    /// unpriced_out. For callers whose average_price is a cost basis.
+    STRICT
+};
+
 class ExecutionManager {
 private:
     // Transaction cost model (single source of truth)
@@ -42,15 +73,38 @@ public:
      *
      * @param current_positions Current day's positions
      * @param previous_positions Previous day's positions
-     * @param market_prices Market prices (typically T-1 close prices)
+     * @param market_prices Market prices (typically T-1 close prices).
      * @param timestamp Execution timestamp
+     * @param pricing How to handle a symbol with no usable price in market_prices.
+     *
+     *        MARK_FALLBACK (default): the fill is priced at
+     *        Position::average_price, which for futures is price_history.back(), the latest
+     *        mark (trend_following.cpp). That mark can be several sessions old on a feed hole
+     *        (MYM 2026-04-24 filled at a four-day-old close), so the futures
+     *        runners pass STRICT: their book gate holds every symbol without a T-1 SESSION,
+     *        so nothing reaches this step unpriced (session_book_gate.hpp).
+     *
+     *        STRICT is for callers whose average_price is a weighted COST BASIS rather
+     *        than a mark -- equity mean reversion. There, a position opened today has no
+     *        basis until the very fill being priced is processed, so the fallback books
+     *        the trade at 0.00, which then persists as the new basis. Such a symbol is
+     *        skipped with an ERROR and reported through unpriced_out.
+     *
+     *        The same field means opposite things by asset class; this parameter is the
+     *        seam. See docs/AVERAGE_PRICE_LIFECYCLE.md.
+     * @param unpriced_out Optional, STRICT only. Receives the symbols skipped for want of
+     *        a price. A skip is not a flat position and not a fill -- the caller must
+     *        reconcile these before persisting, or the book will silently disagree with
+     *        the executions.
      * @return Vector of execution reports
      */
     Result<std::vector<ExecutionReport>> generate_daily_executions(
         const std::unordered_map<std::string, Position>& current_positions,
         const std::unordered_map<std::string, Position>& previous_positions,
         const std::unordered_map<std::string, double>& market_prices,
-        const Timestamp& timestamp);
+        const Timestamp& timestamp,
+        PricingPolicy pricing = PricingPolicy::MARK_FALLBACK,
+        std::vector<std::string>* unpriced_out = nullptr);
 
     /**
      * Generate a single execution report
@@ -58,16 +112,14 @@ public:
      * @param symbol Symbol being traded
      * @param quantity_change Change in position quantity (positive for buy, negative for sell)
      * @param market_price Market price for the symbol
-     * @param timestamp Execution timestamp
-     * @param exec_sequence Sequence number for unique exec_id
+     * @param timestamp Execution timestamp (its UTC date names the ids)
      * @return Single execution report
      */
     ExecutionReport generate_execution(
         const std::string& symbol,
         double quantity_change,
         double market_price,
-        const Timestamp& timestamp,
-        size_t exec_sequence);
+        const Timestamp& timestamp);
 
     /**
      * Update market data for TransactionCostManager (ADV and volatility tracking)
@@ -88,17 +140,21 @@ public:
     static std::string generate_date_string(const Timestamp& timestamp);
 
     /**
-     * Generate unique execution ID
+     * Generate the execution ID: EXEC_<symbol>_<YYYYMMDD>, the date being
+     * generate_date_string(timestamp), the same date the order_id carries.
+     *
+     * Deterministic: a replay of the same date regenerates the same id, and a fill
+     * appearing or disappearing does not renumber another. Unique under
+     * trading.executions' key (portfolio_id, strategy_id, strategy_name, date, exec_id)
+     * because one generate_daily_executions call emits a symbol at most once.
      *
      * @param symbol Trading symbol
      * @param timestamp Execution timestamp
-     * @param sequence Sequence number
-     * @return Unique execution ID
+     * @return Execution ID
      */
     static std::string generate_exec_id(
         const std::string& symbol,
-        const Timestamp& timestamp,
-        size_t sequence);
+        const Timestamp& timestamp);
 
     transaction_cost::TransactionCostManager& get_transaction_cost_manager() {
         return *cost_manager_;

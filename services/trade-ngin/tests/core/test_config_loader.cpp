@@ -7,6 +7,7 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include "test_base.hpp"
+#include "trade_ngin/strategy/equity_strategy_builder.hpp"
 
 // Reach private merge_json/validate_config/load_legacy helpers. Pre-load std
 // headers before flipping the macro so libc++ internals stay valid.
@@ -34,13 +35,11 @@ nlohmann::json minimal_defaults() {
                           {"use_buffering", true}, {"buffer_size_factor", 0.05}}},
         {"backtest", {{"lookback_years", 2}, {"store_trade_details", true}}},
         {"live", {{"historical_days", 300}}},
+        // Schema 2: no use_optimization (it moved to portfolio.json), no
+        // use_risk_management (deleted), no risk_defaults (every value is per book).
         {"strategy_defaults", {{"max_strategy_allocation", 1.0},
                                 {"min_strategy_allocation", 0.1},
-                                {"use_optimization", true},
-                                {"use_risk_management", true},
                                 {"fdm", nlohmann::json::array({{1, 1.0}, {2, 1.03}})}}},
-        {"risk_defaults", {{"confidence_level", 0.99}, {"lookback_period", 252},
-                           {"max_correlation", 0.7}}},
     };
 }
 
@@ -48,20 +47,55 @@ nlohmann::json minimal_portfolio() {
     return {
         {"portfolio_id", "TEST_PORTFOLIO"},
         {"initial_capital", 1'000'000.0},
-        {"reserve_capital_pct", 0.10},
         {"max_drawdown", 0.4},
         {"max_leverage", 4.0},
+        {"use_optimization", true},
         // Validation requires at least one strategy entry.
         {"strategies", {{"TREND_FOLLOWING", {{"weight", 1.0}, {"allocation", 1.0}}}}},
     };
 }
 
-nlohmann::json minimal_risk() {
+// The seven gating values, written literally, plus the reporter and the two strategy
+// limits schema 2 makes required.
+nlohmann::json carver_module(const char* id = "carver") {
     return {
+        {"id", id},
+        {"type", "carver"},
         {"var_limit", 0.15},
         {"jump_risk_limit", 0.10},
+        {"max_correlation", 0.7},
         {"max_gross_leverage", 4.0},
         {"max_net_leverage", 2.0},
+        {"confidence_level", 0.99},
+        {"lookback_period", 252},
+        {"lookback_unit", "dates"},
+        {"min_gate_dates", 21},
+        {"missing_symbol_policy", "ignore"},
+        {"_missing_symbol_policy_reason", "unit test"},
+    };
+}
+
+nlohmann::json reporting_block() {
+    return {
+        {"type", "carver"},
+        {"window", "all_bars"},
+        {"var_limit", 0.15},
+        {"jump_risk_limit", 0.10},
+        {"max_correlation", 0.7},
+        {"max_gross_leverage", 4.0},
+        {"max_net_leverage", 2.0},
+        {"confidence_level", 0.99},
+        {"lookback_period", 252},
+    };
+}
+
+nlohmann::json minimal_risk() {
+    return {
+        {"schema", 2},
+        {"modules", nlohmann::json::array({carver_module()})},
+        {"risk_reporting", reporting_block()},
+        {"max_drawdown", 0.4},
+        {"max_leverage", 4.0},
     };
 }
 
@@ -103,7 +137,8 @@ protected:
 
     void write_full_set(const std::string& portfolio_name,
                          const nlohmann::json& defaults_override = {},
-                         const nlohmann::json& portfolio_override = {}) {
+                         const nlohmann::json& portfolio_override = {},
+                         const nlohmann::json& risk = minimal_risk()) {
         auto defaults = minimal_defaults();
         for (auto& [k, v] : defaults_override.items()) defaults[k] = v;
         write_json(base_ / "defaults.json", defaults);
@@ -112,8 +147,19 @@ protected:
         for (auto& [k, v] : portfolio_override.items()) portfolio[k] = v;
         write_json(base_ / "portfolios" / portfolio_name / "portfolio.json", portfolio);
 
-        write_json(base_ / "portfolios" / portfolio_name / "risk.json", minimal_risk());
+        write_json(base_ / "portfolios" / portfolio_name / "risk.json", risk);
         write_json(base_ / "portfolios" / portfolio_name / "email.json", minimal_email());
+    }
+
+    /// Loads a config whose risk.json is `risk` and returns the error text (empty on
+    /// success), so a rule's test reads as "this file -> this message".
+    std::string load_error(const nlohmann::json& risk,
+                            const nlohmann::json& portfolio_override = {},
+                            const nlohmann::json& defaults_override = {}) {
+        write_full_set("base", defaults_override, portfolio_override, risk);
+        auto r = ConfigLoader::load(base_, "base");
+        if (r.is_ok()) return "";
+        return r.error()->what();
     }
 
     std::filesystem::path base_;
@@ -134,6 +180,37 @@ TEST_F(ConfigLoaderTest, LoadValidConfigPopulatesAllFields) {
     EXPECT_DOUBLE_EQ(c.opt_config.tau, 1.0);
     EXPECT_DOUBLE_EQ(c.risk_config.var_limit, 0.15);
     EXPECT_EQ(c.email.smtp_host, "smtp.test.com");
+}
+
+// The sessions a year the live statistics annualise with, frozen per series. A config without
+// the block runs on the two default values.
+TEST_F(ConfigLoaderTest, StatisticsSessionsPerYearDefaultToTheRuledValues) {
+    write_full_set("base");
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "no error");
+    EXPECT_DOUBLE_EQ(r.value().statistics.futures_sessions_per_year, 311.0574);
+    EXPECT_DOUBLE_EQ(r.value().statistics.equity_sessions_per_year, 252.0);
+    // 3,111 grid dates over 2016-01-01..2025-12-31, 3,653 days, per Julian year.
+    EXPECT_NEAR(r.value().statistics.futures_sessions_per_year, 3111.0 / (3653.0 / 365.25), 5e-5);
+    const auto j = r.value().to_json();
+    EXPECT_DOUBLE_EQ(j["statistics"]["sessions_per_year"]["futures"].get<double>(), 311.0574);
+}
+
+TEST_F(ConfigLoaderTest, StatisticsSessionsPerYearAreReadPerSeries) {
+    write_full_set("base", {{"statistics", {{"sessions_per_year", {{"futures", 312.5}}}}}});
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "no error");
+    EXPECT_DOUBLE_EQ(r.value().statistics.futures_sessions_per_year, 312.5);
+    EXPECT_DOUBLE_EQ(r.value().statistics.equity_sessions_per_year, 252.0)
+        << "a series the block does not name keeps its default";
+}
+
+TEST_F(ConfigLoaderTest, StatisticsSessionsPerYearMustBePositive) {
+    write_full_set("base", {{"statistics", {{"sessions_per_year", {{"equities", 0.0}}}}}});
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_error());
+    EXPECT_NE(std::string(r.error()->what()).find("statistics.sessions_per_year"),
+              std::string::npos);
 }
 
 TEST_F(ConfigLoaderTest, PortfolioFileOverridesDefaults) {
@@ -230,12 +307,12 @@ TEST_F(ConfigLoaderTest, EmailConfigJsonRoundTrip) {
 }
 
 TEST_F(ConfigLoaderTest, ExecutionConfigJsonRoundTrip) {
-    ExecutionConfig ex;
+    ExecutionSettingsConfig ex;
     ex.commission_rate = 0.001;
     ex.slippage_bps = 2.5;
     ex.position_limit_backtest = 5000.0;
     ex.position_limit_live = 1000.0;
-    ExecutionConfig r;
+    ExecutionSettingsConfig r;
     r.from_json(ex.to_json());
     EXPECT_DOUBLE_EQ(r.commission_rate, 0.001);
     EXPECT_DOUBLE_EQ(r.slippage_bps, 2.5);
@@ -265,15 +342,19 @@ TEST_F(ConfigLoaderTest, StrategyDefaultsConfigJsonRoundTrip) {
     s.fdm = {{1, 1.0}, {2, 1.5}, {3, 2.0}};
     s.max_strategy_allocation = 0.5;
     s.min_strategy_allocation = 0.1;
-    s.use_optimization = false;
-    s.use_risk_management = true;
     StrategyDefaultsConfig r;
-    r.from_json(s.to_json());
+    const auto j = s.to_json();
+    r.from_json(j);
     EXPECT_EQ(r.fdm.size(), 3u);
     EXPECT_DOUBLE_EQ(r.fdm[2].second, 2.0);
     EXPECT_DOUBLE_EQ(r.max_strategy_allocation, 0.5);
-    EXPECT_FALSE(r.use_optimization);
-    EXPECT_TRUE(r.use_risk_management);
+    // Schema 2 deleted both: a block that still serialised them would put a key back into
+    // the merged config that the loader refuses (S7), and an override round trip
+    // would fail on a key nobody wrote.
+    EXPECT_FALSE(j.contains("use_optimization"))
+        << "use_optimization moved to portfolio.json in schema 2";
+    EXPECT_FALSE(j.contains("use_risk_management"))
+        << "use_risk_management was deleted in schema 2";
 }
 
 TEST_F(ConfigLoaderTest, DatabaseConfigJsonRoundTrip) {
@@ -366,19 +447,6 @@ TEST_F(ConfigLoaderTest, ValidateRejectsNonPositiveInitialCapital) {
     EXPECT_TRUE(ConfigLoader::validate_config(c).is_error());
 }
 
-TEST_F(ConfigLoaderTest, ValidateRejectsReserveCapitalPctOutOfRange) {
-    AppConfig c;
-    c.portfolio_id = "P";
-    c.database.host = "h";
-    c.database.username = "u";
-    c.database.password = "p";
-    c.database.name = "n";
-    c.initial_capital = 100.0;
-    c.reserve_capital_pct = 1.0;  // must be < 1.0
-    c.strategies_config = {{"s", {{"w", 1.0}}}};
-    EXPECT_TRUE(ConfigLoader::validate_config(c).is_error());
-}
-
 TEST_F(ConfigLoaderTest, ValidateRejectsEmptyStrategies) {
     AppConfig c;
     c.portfolio_id = "P";
@@ -424,4 +492,1403 @@ TEST_F(ConfigLoaderTest, DeepMergeReplacesNonObjectsWithoutRecursion) {
     ConfigLoader::merge_json(target, source);
     EXPECT_EQ(target["x"].size(), 1u);
     EXPECT_EQ(target["x"][0], 4);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// The staleness bounds must be CONFIGURABLE, not
+// hardcoded defaults that only look configurable.
+//
+// LiveSpecificConfig reads both keys from JSON, and config_template/defaults.json
+// declares both. The template is the tracked artefact a fresh checkout copies, so a
+// key missing there is a key nobody can set, and the value in force would always be
+// the struct default.
+// ──────────────────────────────────────────────────────────────────────────
+
+TEST(LiveStalenessConfig, BothBoundsRoundTripThroughJson) {
+    LiveSpecificConfig c;
+    // The documented defaults: 4 absorbs a weekend plus a holiday; 5 covers a
+    // three-day weekend plus a further holiday.
+    EXPECT_EQ(c.data_staleness_tolerance_days, 4);
+    EXPECT_EQ(c.execution_price_max_staleness_days, 5);
+
+    c.from_json(nlohmann::json{{"data_staleness_tolerance_days", 9},
+                               {"execution_price_max_staleness_days", 11}});
+    EXPECT_EQ(c.data_staleness_tolerance_days, 9) << "the configured value must win";
+    EXPECT_EQ(c.execution_price_max_staleness_days, 11);
+
+    const auto j = c.to_json();
+    EXPECT_EQ(j.at("data_staleness_tolerance_days").get<int>(), 9);
+    EXPECT_EQ(j.at("execution_price_max_staleness_days").get<int>(), 11);
+}
+
+TEST(LiveStalenessConfig, OmittedKeysKeepTheDocumentedDefaults) {
+    LiveSpecificConfig c;
+    c.from_json(nlohmann::json{{"historical_days", 730}});
+    EXPECT_EQ(c.data_staleness_tolerance_days, 4) << "default unchanged";
+    EXPECT_EQ(c.execution_price_max_staleness_days, 5) << "default unchanged";
+}
+
+// The drift pin. A field the struct grows and the tracked template does not is a
+// knob that exists in code and nowhere an
+// operator could reach it. Asserting the template declares every key the struct
+// serialises catches the next one automatically.
+TEST(LiveStalenessConfig, TrackedTemplateDeclaresEveryLiveKeyTheStructSerialises) {
+    namespace fs = std::filesystem;
+    fs::path dir = fs::current_path();
+    fs::path found;
+    for (int i = 0; i < 8 && !dir.empty(); ++i) {
+        if (fs::exists(dir / "config_template" / "defaults.json")) {
+            found = dir / "config_template" / "defaults.json";
+            break;
+        }
+        dir = dir.parent_path();
+    }
+    if (found.empty()) GTEST_SKIP() << "config_template/defaults.json not reachable";
+
+    std::ifstream in(found);
+    const nlohmann::json tmpl = nlohmann::json::parse(in);
+    ASSERT_TRUE(tmpl.contains("live")) << "the template must carry a live block";
+    const auto& live = tmpl.at("live");
+
+    // Bound to a local: to_json() returns by value and items() holds a reference
+    // into it, so iterating the temporary directly reads freed memory.
+    const nlohmann::json serialised = LiveSpecificConfig{}.to_json();
+    for (const auto& [key, _] : serialised.items()) {
+        EXPECT_TRUE(live.contains(key))
+            << "config_template/defaults.json omits live." << key
+            << " -- the struct reads it but no operator can set it, so the hardcoded "
+               "default is silently in force (C-1 C5 / T2.9)";
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// The resolved risk configuration per book, loaded from the TRACKED template.
+//
+// These are the regression net for the risk-config schema (schema 2). They assert what
+// ConfigLoader::load resolves TODAY for each of the
+// three books, field by field, so a re-nesting that silently falls back to a
+// struct default fails here instead of moving positions:
+//
+//   * max_drawdown / max_leverage are read from the TOP LEVEL of risk.json
+//     (config_loader.cpp extract_config). Moving them under a sub-object without
+//     moving the reader falls back to AppConfig's 0.4 / 4.0; max_leverage sizes
+//     the trend-following book (capital * max_leverage), so CONSERVATIVE 2.0 and
+//     EQUITY_MR 1 going to 4.0 moves every position. BASE already equals the
+//     fallback, so only the other two books catch it.
+//   * AppConfig::risk_config's seven gating fields feed the reporter
+//     (snapshot_rm) on every runner; emptying the object moves the stored
+//     risk_scale on every row.
+//   * max_correlation is ABSENT from base/risk.json and equity_mr/risk.json;
+//     their 0.7 comes from defaults.json risk_defaults, not from the book. The
+//     provenance test below pins that path explicitly.
+//
+// The template mirrors the values the runners load (verified for all three
+// books); it is used rather than config/ so the test is hermetic.
+// ──────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+// The repository's config_template/, located from this source file's path
+// (tests/core/ -> repo root) and, failing that, by walking up from the working
+// directory. Returns an empty path when neither finds it.
+std::filesystem::path tracked_config_template() {
+    namespace fs = std::filesystem;
+    const fs::path from_source =
+        fs::path(__FILE__).parent_path().parent_path().parent_path() / "config_template";
+    if (fs::exists(from_source / "defaults.json")) return from_source;
+    fs::path dir = fs::current_path();
+    for (int i = 0; i < 8 && !dir.empty(); ++i) {
+        if (fs::exists(dir / "config_template" / "defaults.json")) return dir / "config_template";
+        dir = dir.parent_path();
+    }
+    return {};
+}
+
+struct ResolvedRiskExpectation {
+    const char* book;          // portfolio directory under config_template/portfolios
+    const char* portfolio_id;
+    double max_drawdown;
+    double max_leverage;
+    double var_limit;
+    double jump_risk_limit;
+    double max_correlation;
+    double max_gross_leverage;
+    double max_net_leverage;
+    double confidence_level;
+    int lookback_period;
+    double capital;            // risk_config.capital = initial_capital
+    bool use_optimization;     // portfolio.json's top level, as resolved
+    const char* none_ruled_on = nullptr;  // set when the book is assigned `none`
+    // The book's carver module carries the overlay's limits: var_limit,
+    // jump_risk_limit, max_correlation and the top-level max_leverage are RETIRED in its files,
+    // so the values above are the structs' own unread defaults, and the module carries
+    // per_name_cap 2 and trim_max 5.
+    bool overlay_book = false;
+    // The overlay's three limits and covariance on an overlay book (the conservative book carries
+    // the chosen setup's).
+    double r_max = 2.25;
+    double r_jump_max = 4.5;
+    double r_shock_max = 4.0;
+    const char* overlay_covariance = "sample";
+};
+
+void expect_resolved_risk_config(const ResolvedRiskExpectation& e) {
+    const auto tmpl = tracked_config_template();
+    ASSERT_FALSE(tmpl.empty()) << "config_template/ not found from " << __FILE__
+                               << " or the working directory; this test must not skip";
+    auto loaded = ConfigLoader::load(tmpl, e.book);
+    ASSERT_TRUE(loaded.is_ok()) << e.book << ": ConfigLoader::load failed: "
+                                << (loaded.is_error() ? loaded.error()->what() : "");
+    const AppConfig& c = loaded.value();
+    const std::string b = e.book;
+
+    EXPECT_EQ(c.portfolio_id, e.portfolio_id) << b << ": portfolio_id";
+
+    // Strategy limits, read from risk.json's top level.
+    EXPECT_EQ(c.max_drawdown, e.max_drawdown) << b << ": max_drawdown";
+    EXPECT_EQ(c.max_leverage, e.max_leverage)
+        << b << ": max_leverage (sizes the book; 4.0 here on a non-BASE book is the "
+                "AppConfig fallback, i.e. the reader lost the key)";
+
+    // The seven gating fields of AppConfig::risk_config.
+    const RiskConfig& r = c.risk_config;
+    EXPECT_EQ(r.var_limit, e.var_limit) << b << ": risk_config.var_limit";
+    EXPECT_EQ(r.jump_risk_limit, e.jump_risk_limit) << b << ": risk_config.jump_risk_limit";
+    EXPECT_EQ(r.max_correlation, e.max_correlation) << b << ": risk_config.max_correlation";
+    EXPECT_EQ(r.max_gross_leverage, e.max_gross_leverage)
+        << b << ": risk_config.max_gross_leverage";
+    EXPECT_EQ(r.max_net_leverage, e.max_net_leverage) << b << ": risk_config.max_net_leverage";
+    EXPECT_EQ(r.confidence_level, e.confidence_level) << b << ": risk_config.confidence_level";
+    EXPECT_EQ(r.lookback_period, e.lookback_period) << b << ": risk_config.lookback_period";
+    EXPECT_EQ(r.capital.as_double(), e.capital) << b << ": risk_config.capital";
+
+    EXPECT_EQ(c.use_optimization, e.use_optimization) << b << ": use_optimization";
+
+    // Schema 2: the SAME seven values are also on the book's own carver module, and the
+    // module -- not AppConfig::risk_config -- is what the PortfolioManager gates with.
+    // Rule C1 makes the two equal; these assertions are what proves it on the shipped
+    // books rather than on a fixture.
+    ASSERT_EQ(c.risk_schema.portfolio.size(), 1u) << b << ": one portfolio-scope module";
+    const RiskModuleConfig& m = c.risk_schema.portfolio.front();
+    EXPECT_TRUE(c.risk_schema.sleeves.empty()) << b << ": no shipped book assigns a sleeve module";
+    if (e.none_ruled_on != nullptr) {
+        // This book runs NO risk module. The seven values above are the reporter's
+        // (risk_reporting still measures the book); the module is `none`, carrying its reason
+        // and who assigned it, and there is no carver whose values could be compared.
+        EXPECT_EQ(m.type, "none") << b << ": module type";
+        const auto* none = std::get_if<NoneModuleConfig>(&m.params);
+        ASSERT_NE(none, nullptr) << b << ": module params";
+        EXPECT_EQ(none->ruled_by, "HD") << b << ": _ruled_by";
+        EXPECT_EQ(none->ruled_on, e.none_ruled_on) << b << ": _ruled_on";
+        EXPECT_FALSE(none->reason.empty()) << b << ": _reason";
+        return;
+    }
+    EXPECT_EQ(m.type, "carver") << b << ": module type";
+    const auto* carver = std::get_if<CarverModuleConfig>(&m.params);
+    ASSERT_NE(carver, nullptr) << b << ": module params";
+    EXPECT_EQ(carver->var_limit, e.var_limit) << b << ": module.var_limit";
+    EXPECT_EQ(carver->jump_risk_limit, e.jump_risk_limit) << b << ": module.jump_risk_limit";
+    EXPECT_EQ(carver->max_correlation, e.max_correlation) << b << ": module.max_correlation";
+    EXPECT_EQ(carver->max_gross_leverage, e.max_gross_leverage)
+        << b << ": module.max_gross_leverage";
+    EXPECT_EQ(carver->max_net_leverage, e.max_net_leverage) << b << ": module.max_net_leverage";
+    EXPECT_EQ(carver->confidence_level, e.confidence_level) << b << ": module.confidence_level";
+    EXPECT_EQ(carver->lookback_period, e.lookback_period) << b << ": module.lookback_period";
+    EXPECT_EQ(carver->lookback_unit, "dates") << b << ": module.lookback_unit";
+    EXPECT_EQ(carver->min_gate_dates, 21) << b << ": module.min_gate_dates";
+    EXPECT_EQ(carver->overlay_limits(), e.overlay_book) << b << ": the overlay's limits";
+    if (e.overlay_book) {
+        EXPECT_EQ(carver->r_max, e.r_max) << b << ": module.R_max";
+        EXPECT_EQ(carver->r_jump_max, e.r_jump_max) << b << ": module.R_jump_max";
+        EXPECT_EQ(carver->r_shock_max, e.r_shock_max) << b << ": module.R_shock_max";
+        EXPECT_EQ(carver->per_name_cap, 2.0) << b << ": module.per_name_cap";
+        EXPECT_EQ(carver->trim_max, 5) << b << ": module.trim_max";
+        EXPECT_EQ(carver->overlay_covariance, e.overlay_covariance) << b << ": module.overlay_covariance";
+        EXPECT_EQ(e.max_leverage, AppConfig().max_leverage) << b << ": max_leverage is retired";
+        EXPECT_EQ(e.var_limit, RiskConfig().var_limit) << b << ": var_limit is retired";
+        EXPECT_EQ(e.jump_risk_limit, RiskConfig().jump_risk_limit) << b;
+        EXPECT_EQ(e.max_correlation, RiskConfig().max_correlation) << b;
+        EXPECT_TRUE(ConfigLoader::require_loop_keys(c).is_ok())
+            << b << ": the shipped futures book carries every loop key and no retired one: "
+            << (ConfigLoader::require_loop_keys(c).is_error()
+                    ? ConfigLoader::require_loop_keys(c).error()->what()
+                    : "");
+        EXPECT_EQ(c.opt_config.cost_penalty_scalar, 100.0) << b;
+        EXPECT_EQ(c.sign_close_band, 2.0) << b;
+        EXPECT_EQ(c.b_sigma_floor, 0.05) << b;
+    }
+    EXPECT_EQ(carver->missing_symbol_policy, "ignore") << b << ": module.missing_symbol_policy";
+    EXPECT_FALSE(carver->missing_symbol_policy_reason.empty())
+        << b << ": \"ignore\" is the fail-open policy and must say why it is chosen";
+}
+
+}  // namespace
+
+TEST(TrackedTemplateResolvedRiskConfig, Conservative) {
+    expect_resolved_risk_config({"conservative", "CONSERVATIVE_PORTFOLIO",
+                                 /*max_drawdown*/ 0.3, /*max_leverage*/ 4.0,  // retired: the unread default
+                                 /*var_limit*/ 0.15, /*jump_risk_limit*/ 0.1,  // retired: the unread defaults
+                                 /*max_correlation*/ 0.7,  // retired: the unread default
+                                 /*max_gross*/ 7.25, /*max_net*/ 5.5,  // L_max and L_net_max
+                                 /*confidence*/ 0.99, /*lookback*/ 252,
+                                 /*capital*/ 500000.0,
+                                 /*use_optimization*/ true,
+                                 /*none_ruled_on*/ nullptr,
+                                 /*overlay_book*/ true,
+                                 /*R_max*/ 1.75, /*R_jump_max*/ 4.75, /*R_shock_max*/ 3.0,
+                                 /*overlay_covariance*/ "carver"});
+}
+
+TEST(TrackedTemplateResolvedRiskConfig, Base) {
+    expect_resolved_risk_config({"base", "BASE_PORTFOLIO",
+                                 /*max_drawdown*/ 0.4, /*max_leverage*/ 4.0,  // retired: the unread default
+                                 /*var_limit*/ 0.15, /*jump_risk_limit*/ 0.1,  // retired: the unread defaults
+                                 /*max_correlation*/ 0.7,  // retired: the unread default
+                                 /*max_gross*/ 8.0, /*max_net*/ 6.0,  // L_max and L_net_max
+                                 /*confidence*/ 0.99, /*lookback*/ 252,
+                                 /*capital*/ 500000.0,
+                                 /*use_optimization*/ true,
+                                 /*none_ruled_on*/ nullptr,
+                                 /*overlay_book*/ true});
+}
+
+// use_optimization resolves FALSE here: schema 2 moved the key into portfolio.json and
+// EQUITY_MR writes false, which is what both equity runners have always done in code
+// (live_equity_mean_reversion.cpp, bt_equity_mean_reversion.cpp). Moving the key must not
+// turn the equity optimizer on; the runners additionally
+// refuse to start on a `true` (refuse_if_optimizer_requested, tested below).
+TEST(TrackedTemplateResolvedRiskConfig, EquityMr) {
+    expect_resolved_risk_config({"equity_mr", "EQUITY_MR_PORTFOLIO",
+                                 /*max_drawdown*/ 0.3, /*max_leverage*/ 1.0,
+                                 /*var_limit*/ 0.25, /*jump_risk_limit*/ 0.08,
+                                 /*max_correlation*/ 0.7,  // literal in its risk.json (schema 2)
+                                 /*max_gross*/ 1.0, /*max_net*/ 1.0,
+                                 /*confidence*/ 0.99, /*lookback*/ 252,
+                                 /*capital*/ 100000.0,
+                                 /*use_optimization*/ false,
+                                 /*none_ruled_on*/ "2026-09-18"});
+}
+
+// The max_correlation trap. A book's risk.json that carries NO max_correlation and resolves
+// 0.7 from a defaults.json risk_defaults block takes a value no book has written,
+// indistinguishable from RiskConfig's struct default (also 0.7), so changing the global
+// silently moves that book's gate. Schema 2 has no risk_defaults and writes every gating
+// value per book: the value must come from the book's OWN file, and there must be no global
+// left to move it with.
+TEST(TrackedTemplateResolvedRiskConfig, EveryGatingValueIsLiteralInTheBooksOwnRiskJson) {
+    const auto tmpl = tracked_config_template();
+    ASSERT_FALSE(tmpl.empty()) << "config_template/ not found; this test must not skip";
+
+    std::ifstream din(tmpl / "defaults.json");
+    const auto defaults = nlohmann::json::parse(din);
+    EXPECT_FALSE(defaults.contains("risk_defaults"))
+        << "defaults.json still carries risk_defaults: a gating value no book wrote can "
+           "still reach a book's gate (and the loader now refuses the key outright)";
+    ASSERT_TRUE(defaults.contains("strategy_defaults"));
+    EXPECT_FALSE(defaults.at("strategy_defaults").contains("use_optimization"))
+        << "use_optimization moved to portfolio.json in schema 2";
+    EXPECT_FALSE(defaults.at("strategy_defaults").contains("use_risk_management"))
+        << "use_risk_management was deleted in schema 2";
+
+    // A futures book's gate is the overlay: its literal values are the
+    // overlay's, and the old gate's three limits are in neither its module nor its reporter.
+    struct Book { const char* dir; double max_correlation; bool use_optimization; bool overlay; };
+    for (const Book& b : {Book{"conservative", 0.0, true, true}, Book{"base", 0.0, true, true},
+                          Book{"equity_mr", 0.7, false, false}}) {
+        std::ifstream in(tmpl / "portfolios" / b.dir / "risk.json");
+        const auto risk = nlohmann::json::parse(in);
+        ASSERT_TRUE(risk.contains("modules")) << b.dir << ": risk.json must be schema 2";
+        ASSERT_EQ(risk.at("modules").size(), 1u) << b.dir;
+        // A `none` book (EQUITY_MR) has no gating module; its values are written literally in
+        // its reporter block, which is what measures it.
+        const bool none_book = risk.at("modules").at(0).at("type") == "none";
+        const auto& module = none_book ? risk.at("risk_reporting") : risk.at("modules").at(0);
+        if (b.overlay) {
+            for (const char* field : {"R_max", "R_jump_max", "R_shock_max", "per_name_cap",
+                                      "trim_max", "overlay_covariance", "max_gross_leverage",
+                                      "max_net_leverage",
+                                      "confidence_level", "lookback_period"}) {
+                EXPECT_TRUE(module.contains(field))
+                    << b.dir << ": risk.json does not write " << field << " literally";
+            }
+            for (const char* retired : {"var_limit", "jump_risk_limit", "max_correlation"}) {
+                EXPECT_FALSE(module.contains(retired)) << b.dir << ": module still names " << retired;
+                EXPECT_FALSE(risk.at("risk_reporting").contains(retired))
+                    << b.dir << ": risk_reporting still names " << retired;
+            }
+            EXPECT_FALSE(risk.contains("max_leverage")) << b.dir << ": max_leverage is retired";
+        } else {
+            for (const char* field : {"var_limit", "jump_risk_limit", "max_correlation",
+                                      "max_gross_leverage", "max_net_leverage",
+                                      "confidence_level", "lookback_period"}) {
+                EXPECT_TRUE(module.contains(field))
+                    << b.dir << ": risk.json does not write " << field
+                    << " literally -- schema 2 has no layer for it to come from";
+            }
+            EXPECT_EQ(module.at("max_correlation").get<double>(), b.max_correlation)
+                << b.dir << ": max_correlation, written in the book's own file";
+        }
+
+        std::ifstream pin(tmpl / "portfolios" / b.dir / "portfolio.json");
+        const auto portfolio = nlohmann::json::parse(pin);
+        ASSERT_TRUE(portfolio.contains("use_optimization")) << b.dir;
+        EXPECT_EQ(portfolio.at("use_optimization").get<bool>(), b.use_optimization) << b.dir;
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// The loader's own schema-2 rules: the removed keys (S7), use_optimization (P1),
+// the schema-1 message (T0), and the two strategy limits (R9). The per-module
+// rules live in tests/risk/test_risk_module_config.cpp, against parse_risk_schema.
+// Each asserts the EXACT text, because the text is the whole value of a
+// fail-closed rule: an operator reading it has to know what to do next.
+// ──────────────────────────────────────────────────────────────────────────
+
+TEST_F(ConfigLoaderTest, Schema1RiskJsonIsNamedAsSuchWithTheMigrationCommand) {
+    nlohmann::json schema1 = {{"var_limit", 0.15}, {"jump_risk_limit", 0.1},
+                              {"max_gross_leverage", 4.0}, {"max_net_leverage", 2.0},
+                              {"max_drawdown", 0.4}, {"max_leverage", 4.0}};
+    EXPECT_EQ(load_error(schema1),
+              "risk config for TEST_PORTFOLIO: risk.json is schema 1 (flat gating keys, no "
+              "\"schema\"/\"modules\"); migrate it with: python3 scripts/migrate_risk_json.py "
+              "<config dir> --in-place");
+}
+
+TEST_F(ConfigLoaderTest, RemovedKeyUseRiskManagementIsALoadErrorWhereverItHides) {
+    // Nested inside a strategy's config block: the place a half-finished migration
+    // leaves one, and the place a recursive walk is the only thing that finds it.
+    nlohmann::json portfolio_override = {
+        {"strategies", {{"TREND_FOLLOWING",
+                         {{"weight", 1.0}, {"config", {{"use_risk_management", false}}}}}}}};
+    EXPECT_EQ(load_error(minimal_risk(), portfolio_override),
+              "config for TEST_PORTFOLIO: strategies.TREND_FOLLOWING.config.use_risk_management "
+              "(use_risk_management) was removed in schema 2; risk is assigned by risk.json "
+              "\"modules\". Delete the key (a leftover false would silently turn risk back on"
+              ")");
+}
+
+TEST_F(ConfigLoaderTest, RemovedKeyRiskDefaultsIsALoadError) {
+    nlohmann::json defaults_override = {
+        {"risk_defaults", {{"max_correlation", 0.9}}}};
+    EXPECT_EQ(load_error(minimal_risk(), {}, defaults_override),
+              "config for TEST_PORTFOLIO: risk_defaults was removed in schema 2; every gating "
+              "value is written literally in each portfolio's risk.json (run "
+              "scripts/migrate_risk_json.py)");
+}
+
+TEST_F(ConfigLoaderTest, RemovedKeyStrategyDefaultsUseOptimizationIsALoadError) {
+    nlohmann::json defaults_override = {
+        {"strategy_defaults", {{"max_strategy_allocation", 1.0}, {"use_optimization", true}}}};
+    EXPECT_EQ(load_error(minimal_risk(), {}, defaults_override),
+              "config for TEST_PORTFOLIO: strategy_defaults.use_optimization moved to "
+              "portfolio.json \"use_optimization\" in schema 2");
+}
+
+TEST_F(ConfigLoaderTest, RemovedShockThresholdKeysUnderRiskAreALoadError) {
+    auto risk = minimal_risk();
+    risk["modules"][0]["corr_shock_threshold"] = 0.65;
+    EXPECT_EQ(load_error(risk),
+              "risk config for TEST_PORTFOLIO: risk.modules[0].corr_shock_threshold has had no "
+              "reader since the carver_shock methods were deleted; delete it");
+    auto risk2 = minimal_risk();
+    risk2["risk_reporting"]["jump_shock_threshold"] = 0.75;
+    EXPECT_EQ(load_error(risk2),
+              "risk config for TEST_PORTFOLIO: risk.risk_reporting.jump_shock_threshold has had "
+              "no reader since the carver_shock methods were deleted; delete it");
+}
+
+TEST_F(ConfigLoaderTest, UseOptimizationIsRequiredAndBoolean) {
+    auto portfolio = minimal_portfolio();
+    portfolio.erase("use_optimization");
+    write_json(base_ / "defaults.json", minimal_defaults());
+    write_json(base_ / "portfolios" / "base" / "portfolio.json", portfolio);
+    write_json(base_ / "portfolios" / "base" / "risk.json", minimal_risk());
+    write_json(base_ / "portfolios" / "base" / "email.json", minimal_email());
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_error());
+    EXPECT_EQ(std::string(r.error()->what()),
+              "config for TEST_PORTFOLIO: portfolio.json must set \"use_optimization\" (true or "
+              "false) at its top level; schema 2 has no default");
+
+    // A quoted "true" is a typo; it is refused, not read as absent and given the default.
+    EXPECT_EQ(load_error(minimal_risk(), {{"use_optimization", "true"}}),
+              "config for TEST_PORTFOLIO: portfolio.json must set \"use_optimization\" (true or "
+              "false) at its top level; schema 2 has no default");
+}
+
+TEST_F(ConfigLoaderTest, UseOptimizationResolvesFromPortfolioJson) {
+    write_full_set("base", {}, {{"use_optimization", false}});
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "");
+    EXPECT_FALSE(r.value().use_optimization);
+}
+
+// portfolio.json "covariance_history_prices", the PortfolioManager's covariance history length
+// in prices per symbol, read through to_json().
+TEST_F(ConfigLoaderTest, CovarianceHistoryPricesAbsentMeans756) {
+    write_full_set("base");  // minimal_portfolio() does not write the key
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "");
+    EXPECT_EQ(r.value().to_json().value("covariance_history_prices", -1), 756)
+        << "an absent covariance_history_prices must mean 756";
+
+    write_full_set("base", {}, {{"covariance_history_prices", 500}});
+    auto r2 = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r2.is_ok()) << (r2.error() ? r2.error()->what() : "");
+    EXPECT_EQ(r2.value().to_json().value("covariance_history_prices", -1), 500);
+}
+
+TEST_F(ConfigLoaderTest, CovarianceHistoryPricesBelowTwoOrNotAWholeNumberIsRefused) {
+    for (const nlohmann::json& bad :
+         {nlohmann::json(1), nlohmann::json(0), nlohmann::json(-5), nlohmann::json(2.5),
+          nlohmann::json("756"), nlohmann::json(true), nlohmann::json(nullptr)}) {
+        EXPECT_EQ(load_error(minimal_risk(), {{"covariance_history_prices", bad}}),
+                  "config for TEST_PORTFOLIO: portfolio.json \"covariance_history_prices\" must be "
+                  "a whole number of at least 2 (prices per symbol kept for the optimiser's "
+                  "covariance; absent means 756), got " + bad.dump())
+            << "value " << bad.dump();
+    }
+    EXPECT_EQ(load_error(minimal_risk(), {{"covariance_history_prices", 2}}), "")
+        << "2 is the smallest value that gives a return";
+}
+
+TEST(TrackedTemplateCovarianceHistory, EveryBookDeclares756) {
+    const auto tmpl = tracked_config_template();
+    ASSERT_FALSE(tmpl.empty()) << "config_template/ not found; this test must not skip";
+    for (const char* book : {"base", "conservative", "equity_mr"}) {
+        std::ifstream f(tmpl / "portfolios" / book / "portfolio.json");
+        ASSERT_TRUE(f.good()) << book;
+        const auto portfolio = nlohmann::json::parse(f);
+        ASSERT_TRUE(portfolio.contains("covariance_history_prices")) << book;
+        EXPECT_EQ(portfolio.at("covariance_history_prices").get<int>(), 756) << book;
+        auto loaded = ConfigLoader::load(tmpl, book);
+        ASSERT_TRUE(loaded.is_ok()) << book << ": " << (loaded.is_error() ? loaded.error()->what() : "");
+        EXPECT_EQ(loaded.value().to_json().value("covariance_history_prices", -1), 756) << book;
+    }
+}
+
+// portfolio.json "covariance_stale_dates", how many union dates a covariance participant's last
+// date may trail the newest before the optimizer leaves it out of the date intersection, read
+// through to_json().
+TEST_F(ConfigLoaderTest, CovarianceStaleDatesAbsentMeans5) {
+    write_full_set("base");
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "");
+    EXPECT_EQ(r.value().to_json().value("covariance_stale_dates", -1), 5)
+        << "an absent covariance_stale_dates must mean 5";
+
+    write_full_set("base", {}, {{"covariance_stale_dates", 3}});
+    auto r2 = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r2.is_ok()) << (r2.error() ? r2.error()->what() : "");
+    EXPECT_EQ(r2.value().to_json().value("covariance_stale_dates", -1), 3);
+}
+
+TEST_F(ConfigLoaderTest, CovarianceStaleDatesNotAWholeNumberIsRefused) {
+    for (const nlohmann::json& bad : {nlohmann::json(-1), nlohmann::json(2.5), nlohmann::json("5"),
+                                      nlohmann::json(true), nlohmann::json(nullptr)}) {
+        EXPECT_EQ(load_error(minimal_risk(), {{"covariance_stale_dates", bad}}),
+                  "config for TEST_PORTFOLIO: portfolio.json \"covariance_stale_dates\" must be a "
+                  "whole number of at least 0 (union dates a covariance participant's last date "
+                  "may trail the newest before the optimiser leaves it out of the date "
+                  "intersection; absent means 5), got " + bad.dump())
+            << "value " << bad.dump();
+    }
+    EXPECT_EQ(load_error(minimal_risk(), {{"covariance_stale_dates", 0}}), "")
+        << "0 is allowed: every participant must print on the newest date";
+}
+
+TEST(TrackedTemplateCovarianceStaleDates, EveryBookDeclares5) {
+    const auto tmpl = tracked_config_template();
+    ASSERT_FALSE(tmpl.empty()) << "config_template/ not found; this test must not skip";
+    for (const char* book : {"base", "conservative", "equity_mr"}) {
+        std::ifstream f(tmpl / "portfolios" / book / "portfolio.json");
+        ASSERT_TRUE(f.good()) << book;
+        const auto portfolio = nlohmann::json::parse(f);
+        ASSERT_TRUE(portfolio.contains("covariance_stale_dates")) << book;
+        EXPECT_EQ(portfolio.at("covariance_stale_dates").get<int>(), 5) << book;
+        auto loaded = ConfigLoader::load(tmpl, book);
+        ASSERT_TRUE(loaded.is_ok()) << book << ": " << (loaded.is_error() ? loaded.error()->what() : "");
+        EXPECT_EQ(loaded.value().to_json().value("covariance_stale_dates", -1), 5) << book;
+    }
+}
+
+// CONSERVATIVE's trend sleeve runs IDM 2.5, Carver's table row for
+// 30 or more instruments (the universe is 36 names); the subsystem-return formula, correlations
+// floored at 0, reaches the 2.5 cap on the same 36. BASE runs 2.5 on both sleeves.
+// Read through the loader's strategies block, which is what the futures runners size with.
+TEST(TrackedTemplateTrendIdm, ConservativeResolvesCarversThirtyPlusRowAndBaseStays25) {
+    const auto tmpl = tracked_config_template();
+    ASSERT_FALSE(tmpl.empty()) << "config_template/ not found; this test must not skip";
+
+    auto cons = ConfigLoader::load(tmpl, "conservative");
+    ASSERT_TRUE(cons.is_ok()) << (cons.is_error() ? cons.error()->what() : "");
+    const auto& tf = cons.value().strategies_config.at("TREND_FOLLOWING").at("config");
+    ASSERT_TRUE(tf.contains("idm"));
+    EXPECT_EQ(tf.at("idm").get<double>(), 2.5)
+        << "CONSERVATIVE TREND_FOLLOWING idm: Carver's row for 30+ instruments is 2.50";
+    ASSERT_TRUE(tf.contains("_idm_rationale"));
+    const auto why = tf.at("_idm_rationale").get<std::string>();
+    EXPECT_NE(why.find("30+ instruments -> 2.50"), std::string::npos) << why;
+    EXPECT_NE(why.find("36 names"), std::string::npos) << why;
+
+    auto base = ConfigLoader::load(tmpl, "base");
+    ASSERT_TRUE(base.is_ok()) << (base.is_error() ? base.error()->what() : "");
+    for (const char* sleeve : {"TREND_FOLLOWING", "TREND_FOLLOWING_FAST"}) {
+        EXPECT_EQ(base.value().strategies_config.at(sleeve).at("config").at("idm").get<double>(), 2.5)
+            << "BASE " << sleeve << " idm";
+    }
+}
+
+TEST_F(ConfigLoaderTest, StrategyLimitsAreRequiredInRiskJson) {
+    auto risk = minimal_risk();
+    risk.erase("max_drawdown");
+    EXPECT_EQ(load_error(risk),
+              "risk config for TEST_PORTFOLIO: risk.max_drawdown is required and must be in "
+              "(0, 1]");
+    auto risk2 = minimal_risk();
+    risk2.erase("max_leverage");
+    EXPECT_EQ(load_error(risk2),
+              "risk config for TEST_PORTFOLIO: risk.max_leverage is required and must be > 0 (it "
+              "sizes the book)");
+    auto risk3 = minimal_risk();
+    risk3["max_drawdown"] = 1.2;
+    EXPECT_EQ(load_error(risk3),
+              "risk config for TEST_PORTFOLIO: risk.max_drawdown is required and must be in "
+              "(0, 1]");
+}
+
+TEST_F(ConfigLoaderTest, RiskConfigIsBackFilledFromTheReporterNotTheModule) {
+    // The reporter is the single source of AppConfig::risk_config. Rule C1 keeps the two
+    // equal while a carver module is assigned, so to see which one the back-fill reads,
+    // the book has to have no carver module at all.
+    nlohmann::json none_module = {{"id", "none"}, {"type", "none"},
+                                  {"_reason", "unit test"}, {"_ruled_by", "tests"},
+                                  {"_ruled_on", "2026-09-19"}};
+    auto risk = minimal_risk();
+    risk["modules"] = nlohmann::json::array({none_module});
+    risk["risk_reporting"]["var_limit"] = 0.33;
+    risk["risk_reporting"]["max_gross_leverage"] = 1.0;
+    risk["risk_reporting"]["max_net_leverage"] = 1.0;
+    write_full_set("base", {}, {}, risk);
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "");
+    EXPECT_DOUBLE_EQ(r.value().risk_config.var_limit, 0.33);
+    // The equity start-up guard reads exactly this value; without the back-fill it would
+    // fall to RiskConfig's struct 4.0 and both equity binaries would refuse to start.
+    EXPECT_DOUBLE_EQ(r.value().risk_config.max_gross_leverage, 1.0);
+    EXPECT_DOUBLE_EQ(r.value().risk_config.capital.as_double(), 1'000'000.0);
+    ASSERT_EQ(r.value().risk_schema.portfolio.size(), 1u);
+    EXPECT_EQ(r.value().risk_schema.portfolio.front().type, "none");
+}
+
+// A DB override is merged back through to_json -> merge_json ->
+// extract_config. Under schema 2 that only survives if to_json emits the schema-2 risk
+// object and no removed key; otherwise extract_config fails, the loader WARNs and every
+// DB override is silently discarded.
+TEST_F(ConfigLoaderTest, AppConfigToJsonRoundTripsThroughExtractConfig) {
+    write_full_set("base");
+    auto direct = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(direct.is_ok()) << (direct.error() ? direct.error()->what() : "");
+
+    nlohmann::json j = direct.value().to_json();
+    ConfigLoader::merge_json(j, nlohmann::json::object());
+    auto round_tripped = ConfigLoader::extract_config(j);
+    ASSERT_TRUE(round_tripped.is_ok())
+        << "AppConfig::to_json no longer produces a config extract_config accepts, so every DB "
+           "override would be discarded with a WARN: "
+        << (round_tripped.is_error() ? round_tripped.error()->what() : "");
+    const AppConfig& a = direct.value();
+    const AppConfig& b = round_tripped.value();
+    EXPECT_EQ(b.use_optimization, a.use_optimization);
+    EXPECT_DOUBLE_EQ(b.max_drawdown, a.max_drawdown);
+    EXPECT_DOUBLE_EQ(b.max_leverage, a.max_leverage);
+    EXPECT_DOUBLE_EQ(b.risk_config.var_limit, a.risk_config.var_limit);
+    EXPECT_DOUBLE_EQ(b.risk_config.max_correlation, a.risk_config.max_correlation);
+    ASSERT_EQ(b.risk_schema.portfolio.size(), a.risk_schema.portfolio.size());
+    EXPECT_EQ(b.risk_schema.portfolio.front().id, a.risk_schema.portfolio.front().id);
+    EXPECT_EQ(b.risk_schema.to_json(), a.risk_schema.to_json());
+}
+
+// #60's limit asymmetry (QT plan E2): to_json wrote max_drawdown / max_leverage at the top
+// level, where extract_config never reads them, beside the risk object's copies, which it
+// does. A re-extract read the risk object, so the top-level pair was a second, unread
+// statement of the limits (on CONSERVATIVE an invented 4.0, the struct fallback, since its
+// risk.json retires max_leverage). The limits have one home, the risk object, and a shipped
+// book's config must survive to_json -> extract_config with nothing moved.
+TEST(TrackedTemplateRoundTrip, EveryBookSurvivesToJsonThenExtractWithItsOwnLimits) {
+    const auto tmpl = tracked_config_template();
+    ASSERT_FALSE(tmpl.empty()) << "config_template/ not found; this test must not skip";
+    for (const char* book : {"conservative", "base", "equity_mr"}) {
+        auto direct = ConfigLoader::load(tmpl, book);
+        ASSERT_TRUE(direct.is_ok()) << book << ": " << (direct.is_error() ? direct.error()->what() : "");
+        const nlohmann::json j = direct.value().to_json();
+        EXPECT_FALSE(j.contains("max_drawdown"))
+            << book << ": to_json states max_drawdown outside the risk object, where no reader looks";
+        EXPECT_FALSE(j.contains("max_leverage"))
+            << book << ": to_json states max_leverage outside the risk object, where no reader looks";
+        auto again = ConfigLoader::extract_config(j);
+        ASSERT_TRUE(again.is_ok()) << book << ": " << (again.is_error() ? again.error()->what() : "");
+        EXPECT_EQ(again.value().max_drawdown, direct.value().max_drawdown) << book;
+        EXPECT_EQ(again.value().max_leverage, direct.value().max_leverage) << book;
+        EXPECT_EQ(again.value().risk_schema.max_drawdown, direct.value().risk_schema.max_drawdown) << book;
+        EXPECT_EQ(again.value().risk_schema.max_leverage, direct.value().risk_schema.max_leverage) << book;
+        EXPECT_EQ(again.value().to_json(), j) << book << ": to_json -> extract_config is not lossless";
+    }
+    // The values the books' own risk.json files carry.
+    auto conservative = ConfigLoader::load(tmpl, "conservative");
+    ASSERT_TRUE(conservative.is_ok());
+    EXPECT_EQ(conservative.value().to_json().at("risk").at("max_drawdown"), 0.3);
+    EXPECT_FALSE(conservative.value().to_json().at("risk").contains("max_leverage"))
+        << "CONSERVATIVE's risk.json retires max_leverage (overlay book); none may be invented";
+}
+
+// The equity runners keep the hard-coded false AND refuse to start on a config
+// true. The guard is shared by both runners so they cannot drift; this is it.
+TEST(EquityOptimizerGuard, RefusesOnlyWhenTheConfigAsksForTheOptimizer) {
+    EXPECT_TRUE(apps::refuse_if_optimizer_requested(false).is_ok())
+        << "today's EQUITY_MR config says false: the guard must be silent";
+    auto refused = apps::refuse_if_optimizer_requested(true);
+    ASSERT_TRUE(refused.is_error());
+    EXPECT_EQ(std::string(refused.error()->what()),
+              "Refusing to start: portfolio.json sets use_optimization=true, but the equity "
+              "runners do not run the optimizer (see the comment at the "
+              "hard-code).");
+}
+
+// portfolio.json "equity_slow_rule". Parsed strictly when
+// present; a futures book requires it (the four futures runners call require_loop_keys).
+// A risk.json whose carver module carries the overlay's three risk limits (ratios to tau).
+// With them the module is the overlay: it carries the per-name cap and
+// the trim cap, and the old gate's three limits and the top-level max_leverage are not in the file.
+nlohmann::json overlay_risk() {
+    nlohmann::json risk = minimal_risk();
+    for (const char* retired : {"var_limit", "jump_risk_limit", "max_correlation"}) {
+        risk["modules"][0].erase(retired);
+        risk["risk_reporting"].erase(retired);
+    }
+    risk.erase("max_leverage");
+    risk["modules"][0]["R_max"] = 2.25;
+    risk["modules"][0]["R_jump_max"] = 4.5;
+    risk["modules"][0]["R_shock_max"] = 4.0;
+    risk["modules"][0]["per_name_cap"] = 2;
+    risk["modules"][0]["trim_max"] = 5;
+    risk["modules"][0]["overlay_covariance"] = "sample";
+    return risk;
+}
+
+// defaults.json's optimization block of a futures book: the one pass's three keys and none of the
+// optimiser's retired ones.
+nlohmann::json loop_defaults() {
+    return {{"optimization",
+             {{"capital", 500000.0}, {"cost_penalty_scalar", 100}, {"sign_close_band", 2},
+              {"b_sigma_floor", 0.05}, {"max_iterations", 100}, {"convergence_threshold", 1e-6},
+              {"use_buffering", true}}}};
+}
+
+// portfolio.json's three loop keys.
+nlohmann::json loop_portfolio() {
+    return {{"equity_slow_rule",
+             {{"symbols", {"MES"}}, {"pairs", nlohmann::json::array({{32, 128}})}}},
+            {"sizing_mode", "half_compounding"},
+            {"starting_capital", 1'000'000.0}};
+}
+
+TEST_F(ConfigLoaderTest, EquitySlowRuleIsParsed) {
+    write_full_set("base", loop_defaults(),
+                   {{"equity_slow_rule",
+                     {{"symbols", {"M2K", "MES", "MNQ", "MYM"}},
+                      {"pairs", nlohmann::json::array({{32, 128}, {64, 256}})}}},
+                    {"sizing_mode", "half_compounding"},
+                    {"starting_capital", 1'000'000.0}},
+                   overlay_risk());
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "no error");
+    const auto& rule = r.value().equity_slow_rule;
+    EXPECT_TRUE(rule.present);
+    EXPECT_EQ(rule.symbols, (std::vector<std::string>{"M2K", "MES", "MNQ", "MYM"}));
+    EXPECT_EQ(rule.pairs, (std::vector<std::pair<int, int>>{{32, 128}, {64, 256}}));
+    EXPECT_TRUE(ConfigLoader::require_loop_keys(r.value()).is_ok());
+}
+
+TEST_F(ConfigLoaderTest, AFuturesBookWithoutTheEquitySlowRuleDoesNotRun) {
+    write_full_set("base");
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << "the key is not required of every book: an equity book loads";
+    EXPECT_FALSE(r.value().equity_slow_rule.present);
+    auto required = ConfigLoader::require_loop_keys(r.value());
+    ASSERT_TRUE(required.is_error());
+    EXPECT_NE(std::string(required.error()->what()).find("equity_slow_rule"), std::string::npos);
+}
+
+TEST_F(ConfigLoaderTest, AMalformedEquitySlowRuleIsALoadError) {
+    const nlohmann::json pairs = nlohmann::json::array({{32, 128}, {64, 256}});
+    const std::vector<nlohmann::json> bad = {
+        nlohmann::json(true),
+        nlohmann::json{{"symbols", {"MES"}}},
+        nlohmann::json{{"pairs", pairs}},
+        nlohmann::json{{"symbols", nlohmann::json::array()}, {"pairs", pairs}},
+        nlohmann::json{{"symbols", {"MES"}}, {"pairs", nlohmann::json::array()}},
+        nlohmann::json{{"symbols", {"MES", 5}}, {"pairs", pairs}},
+        nlohmann::json{{"symbols", {"MES"}}, {"pairs", nlohmann::json::array({{32, 128, 256}})}},
+        nlohmann::json{{"symbols", {"MES"}}, {"pairs", nlohmann::json::array({{32, 1.5}})}},
+        nlohmann::json{{"symbols", {"MES"}}, {"pairs", nlohmann::json::array({{0, 128}})}},
+    };
+    for (const auto& value : bad) {
+        write_full_set("base", {}, {{"equity_slow_rule", value}});
+        auto r = ConfigLoader::load(base_, "base");
+        ASSERT_TRUE(r.is_error()) << value.dump();
+        EXPECT_NE(std::string(r.error()->what()).find("equity_slow_rule"), std::string::npos)
+            << value.dump();
+    }
+}
+
+// portfolio.json "sizing_mode" and "starting_capital", both
+// required on a futures book; the one mode is "half_compounding" and the starting capital is the
+// book's initial_capital.
+TEST_F(ConfigLoaderTest, TheSizingModeAndStartingCapitalAreRequiredOnAFuturesBook) {
+    const nlohmann::json rule = {{"symbols", {"MES"}}, {"pairs", nlohmann::json::array({{32, 128}})}};
+    write_full_set("base", loop_defaults(), {{"equity_slow_rule", rule}}, overlay_risk());
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "");
+    auto required = ConfigLoader::require_loop_keys(r.value());
+    ASSERT_TRUE(required.is_error());
+    EXPECT_NE(std::string(required.error()->what()).find("sizing_mode"), std::string::npos);
+
+    write_full_set("base", loop_defaults(), {{"equity_slow_rule", rule}, {"sizing_mode", "half_compounding"}},
+                   overlay_risk());
+    r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok());
+    required = ConfigLoader::require_loop_keys(r.value());
+    ASSERT_TRUE(required.is_error());
+    EXPECT_NE(std::string(required.error()->what()).find("starting_capital"), std::string::npos);
+
+    write_full_set("base", loop_defaults(),
+                   {{"equity_slow_rule", rule},
+                    {"sizing_mode", "half_compounding"},
+                    {"starting_capital", 1'000'000.0}},
+                   overlay_risk());
+    r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "");
+    EXPECT_EQ(r.value().sizing_mode, "half_compounding");
+    EXPECT_DOUBLE_EQ(r.value().starting_capital, 1'000'000.0);
+    EXPECT_TRUE(ConfigLoader::require_loop_keys(r.value()).is_ok());
+}
+
+TEST_F(ConfigLoaderTest, ABadSizingModeOrStartingCapitalIsALoadError) {
+    for (const nlohmann::json& bad : {nlohmann::json("full_compounding"), nlohmann::json("fixed"),
+                                      nlohmann::json(""), nlohmann::json(1), nlohmann::json(true)}) {
+        write_full_set("base", {}, {{"sizing_mode", bad}});
+        auto r = ConfigLoader::load(base_, "base");
+        ASSERT_TRUE(r.is_error()) << bad.dump();
+        EXPECT_NE(std::string(r.error()->what()).find("sizing_mode"), std::string::npos);
+    }
+    // not a positive number; and not the book's initial_capital (1,000,000 in this fixture)
+    for (const nlohmann::json& bad : {nlohmann::json(0), nlohmann::json(-5.0), nlohmann::json("500000"),
+                                      nlohmann::json(500'000.0)}) {
+        write_full_set("base", {}, {{"starting_capital", bad}});
+        auto r = ConfigLoader::load(base_, "base");
+        ASSERT_TRUE(r.is_error()) << bad.dump();
+        EXPECT_NE(std::string(r.error()->what()).find("starting_capital"), std::string::npos);
+    }
+}
+
+
+// The overlay's three risk limits on the carver module, ratios to tau. All three or none; a
+// futures book requires them.
+TEST_F(ConfigLoaderTest, TheOverlayLimitsAreParsedAndRequiredOnAFuturesBook) {
+    const nlohmann::json keys = {
+        {"equity_slow_rule", {{"symbols", {"MES"}}, {"pairs", nlohmann::json::array({{32, 128}})}}},
+        {"sizing_mode", "half_compounding"},
+        {"starting_capital", 1'000'000.0}};
+    write_full_set("base", {}, keys);
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "");
+    auto required = ConfigLoader::require_loop_keys(r.value());
+    ASSERT_TRUE(required.is_error()) << "a carver module without the three limits";
+    EXPECT_NE(std::string(required.error()->what()).find("R_max"), std::string::npos);
+
+    write_full_set("base", loop_defaults(), keys, overlay_risk());
+    r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "");
+    EXPECT_TRUE(ConfigLoader::require_loop_keys(r.value()).is_ok());
+    const auto* carver = std::get_if<CarverModuleConfig>(&r.value().risk_schema.portfolio.at(0).params);
+    ASSERT_NE(carver, nullptr);
+    EXPECT_DOUBLE_EQ(carver->r_max, 2.25);
+    EXPECT_DOUBLE_EQ(carver->r_jump_max, 4.5);
+    EXPECT_DOUBLE_EQ(carver->r_shock_max, 4.0);
+    EXPECT_EQ(r.value().risk_schema.portfolio.at(0).to_json().value("R_max", 0.0), 2.25);
+
+    // some of the three, or a value that is not a positive number, is a load error
+    nlohmann::json some = minimal_risk();
+    some["modules"][0]["R_max"] = 2.25;
+    EXPECT_NE(load_error(some).find("come together"), std::string::npos);
+    for (const nlohmann::json& bad : {nlohmann::json(0), nlohmann::json(-1.0), nlohmann::json("2.25")}) {
+        nlohmann::json risk = overlay_risk();
+        risk["modules"][0]["R_jump_max"] = bad;
+        EXPECT_NE(load_error(risk).find("R_jump_max"), std::string::npos) << bad.dump();
+    }
+}
+
+// The one pass's keys are required on a futures book, each named when it
+// is missing: cost_penalty_scalar, sign_close_band and b_sigma_floor in defaults.json's
+// optimization block; per_name_cap and trim_max on the module that carries the overlay's limits.
+TEST_F(ConfigLoaderTest, TheOnePassKeysAreRequiredOnAFuturesBook) {
+    write_full_set("base", loop_defaults(), loop_portfolio(), overlay_risk());
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "");
+    ASSERT_TRUE(ConfigLoader::require_loop_keys(r.value()).is_ok());
+    EXPECT_DOUBLE_EQ(r.value().opt_config.cost_penalty_scalar, 100.0);
+    EXPECT_DOUBLE_EQ(r.value().sign_close_band, 2.0);
+    EXPECT_DOUBLE_EQ(r.value().b_sigma_floor, 0.05);
+    const auto* carver = std::get_if<CarverModuleConfig>(&r.value().risk_schema.portfolio.at(0).params);
+    ASSERT_NE(carver, nullptr);
+    EXPECT_DOUBLE_EQ(carver->per_name_cap, 2.0);
+    EXPECT_EQ(carver->trim_max, 5);
+    EXPECT_EQ(r.value().risk_schema.portfolio.at(0).to_json().value("per_name_cap", 0.0), 2.0);
+    EXPECT_EQ(r.value().risk_schema.portfolio.at(0).to_json().value("trim_max", -1), 5);
+
+    for (const char* key : {"cost_penalty_scalar", "sign_close_band", "b_sigma_floor"}) {
+        nlohmann::json defaults = loop_defaults();
+        defaults["optimization"].erase(key);
+        write_full_set("base", defaults, loop_portfolio(), overlay_risk());
+        r = ConfigLoader::load(base_, "base");
+        ASSERT_TRUE(r.is_ok()) << key << ": the key is not required of every book";
+        auto required = ConfigLoader::require_loop_keys(r.value());
+        ASSERT_TRUE(required.is_error()) << key;
+        EXPECT_NE(std::string(required.error()->what()).find(key), std::string::npos) << key;
+    }
+    for (const char* key : {"sign_close_band", "b_sigma_floor"}) {
+        for (const nlohmann::json& bad : {nlohmann::json(0), nlohmann::json(-1.0), nlohmann::json("2")}) {
+            nlohmann::json defaults = loop_defaults();
+            defaults["optimization"][key] = bad;
+            write_full_set("base", defaults, loop_portfolio(), overlay_risk());
+            r = ConfigLoader::load(base_, "base");
+            ASSERT_TRUE(r.is_error()) << key << " " << bad.dump();
+            EXPECT_NE(std::string(r.error()->what()).find(key), std::string::npos);
+        }
+    }
+    for (const char* key : {"per_name_cap", "trim_max", "overlay_covariance"}) {
+        nlohmann::json risk = overlay_risk();
+        risk["modules"][0].erase(key);
+        EXPECT_NE(load_error(risk).find(std::string(key) + " is required"), std::string::npos) << key;
+    }
+    for (const nlohmann::json& bad : {nlohmann::json(0), nlohmann::json(-2.0), nlohmann::json("2")}) {
+        nlohmann::json risk = overlay_risk();
+        risk["modules"][0]["per_name_cap"] = bad;
+        EXPECT_NE(load_error(risk).find("per_name_cap"), std::string::npos) << bad.dump();
+    }
+    for (const nlohmann::json& bad : {nlohmann::json(-1), nlohmann::json(2.5), nlohmann::json("5")}) {
+        nlohmann::json risk = overlay_risk();
+        risk["modules"][0]["trim_max"] = bad;
+        EXPECT_NE(load_error(risk).find("trim_max"), std::string::npos) << bad.dump();
+    }
+    for (const nlohmann::json& bad :
+         {nlohmann::json(""), nlohmann::json("Carver"), nlohmann::json(1), nlohmann::json(true)}) {
+        nlohmann::json risk = overlay_risk();
+        risk["modules"][0]["overlay_covariance"] = bad;
+        EXPECT_NE(load_error(risk).find("overlay_covariance"), std::string::npos) << bad.dump();
+    }
+    for (const char* rule : {"sample", "carver"}) {
+        nlohmann::json risk = overlay_risk();
+        risk["modules"][0]["overlay_covariance"] = rule;
+        write_full_set("base", loop_defaults(), loop_portfolio(), risk);
+        auto loaded = ConfigLoader::load(base_, "base");
+        ASSERT_TRUE(loaded.is_ok()) << rule;
+        const auto* module =
+            std::get_if<CarverModuleConfig>(&loaded.value().risk_schema.portfolio.at(0).params);
+        ASSERT_NE(module, nullptr);
+        EXPECT_EQ(module->overlay_covariance, rule);
+        EXPECT_EQ(loaded.value().risk_schema.portfolio.at(0).to_json().value("overlay_covariance", ""),
+                  rule);
+    }
+}
+
+// Every retired key is REFUSED on a futures book, never ignored, and the
+// refusal names the key. The same keys stay legal on a book that runs no overlay.
+TEST_F(ConfigLoaderTest, EveryRetiredKeyIsRefusedOnAFuturesBook) {
+    // risk.json: the old gate's limits on the overlay's module and in its reporter, and the
+    // top-level max_leverage, are load errors.
+    for (const char* key : {"var_limit", "jump_risk_limit", "max_correlation"}) {
+        nlohmann::json risk = overlay_risk();
+        risk["modules"][0][key] = 0.2;
+        EXPECT_NE(load_error(risk).find(std::string("risk.modules[0].") + key + " is retired"),
+                  std::string::npos) << key;
+        risk = overlay_risk();
+        risk["risk_reporting"][key] = 0.2;
+        EXPECT_NE(load_error(risk).find(std::string("risk.risk_reporting.") + key + " is retired"),
+                  std::string::npos) << key;
+    }
+    {
+        nlohmann::json risk = overlay_risk();
+        risk["max_leverage"] = 2.0;
+        EXPECT_NE(load_error(risk).find("risk.max_leverage is retired"), std::string::npos);
+    }
+    // defaults.json and portfolio.json: noted at load, refused by require_loop_keys.
+    auto refused = [&](const nlohmann::json& defaults, const nlohmann::json& portfolio,
+                       const std::string& key) {
+        write_full_set("base", defaults, portfolio, overlay_risk());
+        auto r = ConfigLoader::load(base_, "base");
+        ASSERT_TRUE(r.is_ok()) << key << ": " << (r.error() ? r.error()->what() : "");
+        auto required = ConfigLoader::require_loop_keys(r.value());
+        ASSERT_TRUE(required.is_error()) << key << " was not refused";
+        const std::string what = required.error()->what();
+        EXPECT_NE(what.find("retired"), std::string::npos) << what;
+        EXPECT_NE(what.find(key), std::string::npos) << what;
+    };
+    for (const char* key : {"tau", "asymmetric_risk_buffer", "buffer_size_factor"}) {
+        nlohmann::json defaults = loop_defaults();
+        defaults["optimization"][key] = 0.1;
+        refused(defaults, loop_portfolio(), key);
+    }
+    for (const char* key : {"carver_buffer_floor", "carver_buffer_position_factor"}) {
+        nlohmann::json defaults = loop_defaults();
+        defaults["strategy_defaults"] = minimal_defaults()["strategy_defaults"];
+        defaults["strategy_defaults"][key] = 0.5;
+        refused(defaults, loop_portfolio(), key);
+    }
+    for (const char* key : {"weight", "max_symbol_concentration", "use_position_buffering",
+                            "carver_buffer_floor", "carver_buffer_position_factor"}) {
+        nlohmann::json portfolio = loop_portfolio();
+        portfolio["strategies"] = {{"TREND_FOLLOWING", {{"allocation", 1.0}, {"config", {{key, 1}}}}}};
+        refused(loop_defaults(), portfolio, key);
+    }
+    // A book with no overlay keeps every one of them: it loads, and nothing is refused at load.
+    write_full_set("base");
+    auto plain = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(plain.is_ok()) << (plain.error() ? plain.error()->what() : "");
+    EXPECT_DOUBLE_EQ(plain.value().risk_config.var_limit, 0.15);
+    EXPECT_DOUBLE_EQ(plain.value().max_leverage, 4.0);
+}
+
+// portfolio.json's optional "listing_dates" block (data/listing_dates.hpp): absent means no
+// contract; present it is parsed strictly, and a block that names no rule takes open_at_target.
+TEST_F(ConfigLoaderTest, ListingDatesAbsentMeansNoContract) {
+    write_full_set("base");
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "no error");
+    EXPECT_TRUE(r.value().listing_dates.empty());
+    EXPECT_EQ(r.value().listing_switch_rule, ListingSwitchRule::kOpenAtTarget);
+}
+
+TEST_F(ConfigLoaderTest, ListingDatesWithNoRuleTakesOpenAtTarget) {
+    const nlohmann::json contracts = nlohmann::json::array(
+        {{{"symbol", "MES"}, {"listed", "2019-05-06"}, {"before", "ES"}, {"ratio", 10}}});
+    write_full_set("base", nlohmann::json::object(), {{"listing_dates", {{"contracts", contracts}}}});
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "no error");
+    ASSERT_EQ(r.value().listing_dates.size(), 1u);
+    EXPECT_EQ(r.value().listing_dates[0].symbol, "MES");
+    EXPECT_EQ(r.value().listing_dates[0].before, "ES");
+    EXPECT_EQ(r.value().listing_dates[0].listed, "2019-05-06");
+    EXPECT_DOUBLE_EQ(r.value().listing_dates[0].ratio, 10.0);
+    EXPECT_EQ(r.value().listing_switch_rule, ListingSwitchRule::kOpenAtTarget);
+
+    for (const auto& [name, rule] : std::vector<std::pair<std::string, ListingSwitchRule>>{
+             {"close_reenter", ListingSwitchRule::kCloseReenter},
+             {"convert", ListingSwitchRule::kConvert},
+             {"open_at_target", ListingSwitchRule::kOpenAtTarget},
+             {"carry_to_target", ListingSwitchRule::kCarryToTarget}}) {
+        write_full_set("base", nlohmann::json::object(),
+                       {{"listing_dates", {{"contracts", contracts}, {"switch_rule", name}}}});
+        auto named = ConfigLoader::load(base_, "base");
+        ASSERT_TRUE(named.is_ok()) << name;
+        EXPECT_EQ(named.value().listing_switch_rule, rule) << name;
+    }
+}
+
+TEST_F(ConfigLoaderTest, AnUnusableListingDatesBlockRefusesTheConfig) {
+    const nlohmann::json good = {{"symbol", "MES"}, {"listed", "2019-05-06"}, {"before", "ES"}, {"ratio", 10}};
+    std::vector<nlohmann::json> bad_blocks;
+    bad_blocks.push_back(nlohmann::json::array({good}));                                   // not an object
+    bad_blocks.push_back({{"contracts", nlohmann::json::array({good})}, {"switch_rule", "carry"}});
+    bad_blocks.push_back({{"contracts", nlohmann::json::array({good})}, {"switch_rule", 3}});
+    for (const char* key : {"symbol", "listed", "before", "ratio"}) {
+        nlohmann::json entry = good;
+        entry.erase(key);
+        bad_blocks.push_back({{"contracts", nlohmann::json::array({entry})}});
+    }
+    {
+        nlohmann::json entry = good;
+        entry["listed"] = "2019-5-6";
+        bad_blocks.push_back({{"contracts", nlohmann::json::array({entry})}});
+        entry = good;
+        entry["ratio"] = 0;
+        bad_blocks.push_back({{"contracts", nlohmann::json::array({entry})}});
+        entry = good;
+        entry["ratio"] = 2.5;  // a ratio is a whole number of contracts
+        bad_blocks.push_back({{"contracts", nlohmann::json::array({entry})}});
+    }
+    for (const auto& block : bad_blocks) {
+        write_full_set("base", nlohmann::json::object(), {{"listing_dates", block}});
+        auto r = ConfigLoader::load(base_, "base");
+        ASSERT_TRUE(r.is_error()) << block.dump();
+        EXPECT_NE(std::string(r.error()->what()).find("\"listing_dates\""), std::string::npos)
+            << r.error()->what();
+    }
+}
+
+// portfolio.json's optional "instrument_id_relabels" list (data/listing_dates.hpp): absent means
+// none; present it is parsed strictly.
+TEST_F(ConfigLoaderTest, InstrumentIdRelabelsAreParsedAndAbsentMeansNone) {
+    write_full_set("base");
+    auto none = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(none.is_ok()) << (none.error() ? none.error()->what() : "no error");
+    EXPECT_TRUE(none.value().instrument_id_relabels.empty());
+
+    const nlohmann::json good = {{"symbol", "MES"}, {"date", "2026-02-22"}, {"from", "42140878"}, {"to", "42003800"}};
+    write_full_set("base", nlohmann::json::object(),
+                   {{"instrument_id_relabels", nlohmann::json::array({good})}});
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "no error");
+    ASSERT_EQ(r.value().instrument_id_relabels.size(), 1u);
+    EXPECT_EQ(r.value().instrument_id_relabels[0].symbol, "MES");
+    EXPECT_EQ(r.value().instrument_id_relabels[0].date, "2026-02-22");
+    EXPECT_EQ(r.value().instrument_id_relabels[0].from, "42140878");
+    EXPECT_EQ(r.value().instrument_id_relabels[0].to, "42003800");
+    EXPECT_TRUE(r.value().listing_dates.empty()) << "the two blocks are independent";
+
+    std::vector<nlohmann::json> bad;
+    bad.push_back(good);  // an object, not a list
+    for (const char* key : {"symbol", "date", "from", "to"}) {
+        nlohmann::json entry = good;
+        entry.erase(key);
+        bad.push_back(nlohmann::json::array({entry}));
+    }
+    {
+        nlohmann::json entry = good;
+        entry["from"] = 42140878;  // an id is text
+        bad.push_back(nlohmann::json::array({entry}));
+        entry = good;
+        entry["date"] = "2026-2-22";
+        bad.push_back(nlohmann::json::array({entry}));
+        entry = good;
+        entry["to"] = entry["from"];
+        bad.push_back(nlohmann::json::array({entry}));
+        entry = good;
+        entry["symbol"] = "MES.v.0";
+        bad.push_back(nlohmann::json::array({entry}));
+    }
+    for (const auto& block : bad) {
+        write_full_set("base", nlohmann::json::object(), {{"instrument_id_relabels", block}});
+        auto refused = ConfigLoader::load(base_, "base");
+        ASSERT_TRUE(refused.is_error()) << block.dump();
+        EXPECT_NE(std::string(refused.error()->what()).find("\"instrument_id_relabels\""), std::string::npos)
+            << refused.error()->what();
+    }
+}
+
+// The shipped CONSERVATIVE template declares the four equity index pairs and the two metal pairs
+// with the default rule written out and the four relabels of 2026-02-22; BASE declares only the two
+// metal pairs.
+TEST_F(ConfigLoaderTest, TheConservativeTemplateDeclaresThePairsAndTheRelabels) {
+    const auto tmpl = tracked_config_template();
+    ASSERT_FALSE(tmpl.empty()) << "config_template/ not found; this test must not skip";
+    auto conservative = ConfigLoader::load(tmpl, "conservative");
+    ASSERT_TRUE(conservative.is_ok()) << (conservative.is_error() ? conservative.error()->what() : "");
+    const AppConfig& c = conservative.value();
+    EXPECT_EQ(c.listing_switch_rule, ListingSwitchRule::kOpenAtTarget);
+    std::vector<std::string> pairs;
+    for (const auto& contract : c.listing_dates) {
+        pairs.push_back(contract.symbol + " " + contract.before + " " + contract.listed + " " +
+                        std::to_string(static_cast<int>(contract.ratio)));
+    }
+    EXPECT_EQ(pairs, (std::vector<std::string>{"MES ES 2019-05-06 10", "MNQ NQ 2019-05-06 10",
+                                               "MYM YM 2019-05-06 10", "M2K RTY 2019-05-06 10",
+                                               "MGC GC 2010-10-04 10", "SIL SI 2013-06-17 5"}));
+    std::vector<std::string> relabels;
+    for (const auto& r : c.instrument_id_relabels) {
+        relabels.push_back(r.symbol + " " + r.date + " " + r.from + " " + r.to);
+    }
+    EXPECT_EQ(relabels,
+              (std::vector<std::string>{"MES 2026-02-22 42140878 42003800", "MNQ 2026-02-22 42002475 42004946",
+                                        "MYM 2026-02-22 42005850 42001953", "M2K 2026-02-22 42005017 42002147"}));
+    // every equity index contract is one of the book's equity slow rule symbols: the pair is ruled
+    // as one; the metals are not under that rule
+    for (const auto& contract : c.listing_dates) {
+        if (contract.symbol == "MGC" || contract.symbol == "SIL") continue;
+        EXPECT_NE(std::find(c.equity_slow_rule.symbols.begin(), c.equity_slow_rule.symbols.end(),
+                            contract.symbol),
+                  c.equity_slow_rule.symbols.end())
+            << contract.symbol;
+    }
+    auto base = ConfigLoader::load(tmpl, "base");
+    ASSERT_TRUE(base.is_ok()) << (base.is_error() ? base.error()->what() : "");
+    ASSERT_EQ(base.value().listing_dates.size(), 2u);
+    EXPECT_EQ(base.value().listing_dates[0].symbol, "MGC");
+    EXPECT_EQ(base.value().listing_dates[1].symbol, "SIL");
+    EXPECT_TRUE(base.value().instrument_id_relabels.empty());
+}
+
+// A key that is not one of the block's own is refused: a misspelt key would be read as absent and a
+// default would apply. A key starting with an underscore is a note. A misspelt block name is refused
+// too, and so is a relabel named twice.
+TEST_F(ConfigLoaderTest, UnknownKeysInsideTheListingAndRelabelBlocksAreRefused) {
+    const nlohmann::json contract = {{"symbol", "MES"}, {"listed", "2019-05-06"}, {"before", "ES"}, {"ratio", 10}};
+    const nlohmann::json relabel = {{"symbol", "MES"}, {"date", "2026-02-22"}, {"from", "42140878"}, {"to", "42003800"}};
+    auto refused = [&](const nlohmann::json& portfolio, const std::string& named) {
+        write_full_set("base", nlohmann::json::object(), portfolio);
+        auto r = ConfigLoader::load(base_, "base");
+        ASSERT_TRUE(r.is_error()) << portfolio.dump();
+        EXPECT_NE(std::string(r.error()->what()).find(named), std::string::npos) << r.error()->what();
+    };
+    // the misspelt rule key: without the check the default rule would apply silently
+    refused({{"listing_dates", {{"contracts", nlohmann::json::array({contract})}, {"switch_rules", "convert"}}}},
+            "unknown key \"switch_rules\"");
+    nlohmann::json bad_contract = contract;
+    bad_contract["listed_on"] = "2019-05-06";
+    refused({{"listing_dates", {{"contracts", nlohmann::json::array({bad_contract})}}}}, "unknown key \"listed_on\"");
+    nlohmann::json bad_relabel = relabel;
+    bad_relabel["form"] = "x";
+    refused({{"instrument_id_relabels", nlohmann::json::array({bad_relabel})}}, "unknown key \"form\"");
+    refused({{"instrument_id_relabels", nlohmann::json::array({relabel, relabel})}}, "named twice");
+    refused({{"listing_date", {{"contracts", nlohmann::json::array({contract})}}}}, "\"listing_date\"");
+    refused({{"instrument_id_relabel", nlohmann::json::array({relabel})}}, "\"instrument_id_relabel\"");
+
+    // notes are allowed, and the blocks still parse
+    nlohmann::json noted = contract;
+    noted["_note"] = "CME listed the micros on this date";
+    write_full_set("base", nlohmann::json::object(),
+                   {{"listing_dates", {{"contracts", nlohmann::json::array({noted})}, {"_note", "x"}}},
+                    {"_listing_dates_note", "a note beside the block is not a misspelt block"}});
+    auto ok = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(ok.is_ok()) << (ok.error() ? ok.error()->what() : "");
+    EXPECT_EQ(ok.value().listing_dates.size(), 1u);
+}
+
+// portfolio.json's optional "trading_rule_removals" block: symbol to the EMA pairs the contract
+// does not run (removed by cost; the sleeve checks the list against its own pairs). Absent means
+// no contract; present it is parsed strictly, and only a book of one trend sleeve may carry it.
+namespace {
+nlohmann::json one_trend_sleeve() {
+    return {{"TREND_FOLLOWING",
+             {{"enabled_backtest", true}, {"enabled_live", true}, {"type", "TrendFollowingStrategy"}}}};
+}
+}  // namespace
+
+TEST_F(ConfigLoaderTest, TradingRuleRemovalsAbsentMeansNoContract) {
+    write_full_set("base");
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "no error");
+    EXPECT_TRUE(r.value().trading_rule_removals.empty());
+}
+
+TEST_F(ConfigLoaderTest, TradingRuleRemovalsAreReadAsWritten) {
+    using Pairs = std::vector<std::pair<int, int>>;
+    write_full_set("base", nlohmann::json::object(),
+                   {{"strategies", one_trend_sleeve()},
+                    {"trading_rule_removals",
+                     {{"ZR", nlohmann::json::array({{2, 8}, {4, 16}, {8, 32}})},
+                      {"ZC", nlohmann::json::array({{2, 8}})},
+                      {"_note", "a note inside the block is not a contract"}}},
+                    {"_trading_rule_removals_note", "a note beside the block is not a misspelt block"}});
+    auto r = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(r.is_ok()) << (r.error() ? r.error()->what() : "no error");
+    const auto& removals = r.value().trading_rule_removals;
+    ASSERT_EQ(removals.size(), 2u);
+    EXPECT_EQ(removals.at("ZR"), (Pairs{{2, 8}, {4, 16}, {8, 32}}));
+    EXPECT_EQ(removals.at("ZC"), (Pairs{{2, 8}}));
+}
+
+TEST_F(ConfigLoaderTest, AMalformedTradingRuleRemovalsBlockIsRefused) {
+    auto refused = [&](const nlohmann::json& portfolio, const std::string& named) {
+        nlohmann::json with_sleeve = portfolio;
+        if (!with_sleeve.contains("strategies")) with_sleeve["strategies"] = one_trend_sleeve();
+        write_full_set("base", nlohmann::json::object(), with_sleeve);
+        auto r = ConfigLoader::load(base_, "base");
+        ASSERT_TRUE(r.is_error()) << portfolio.dump();
+        EXPECT_NE(std::string(r.error()->what()).find(named), std::string::npos) << r.error()->what();
+    };
+    const nlohmann::json one = nlohmann::json::array({{2, 8}});
+    refused({{"trading_rule_removals", nlohmann::json::array({"ZR"})}}, "must be an object");
+    refused({{"trading_rule_removals", {{"ZR", nlohmann::json::array()}}}}, "non-empty list of pairs for ZR");
+    refused({{"trading_rule_removals", {{"ZR", "2/8"}}}}, "non-empty list of pairs for ZR");
+    refused({{"trading_rule_removals", {{"ZR", nlohmann::json::array({2, 8})}}}}, "not two positive whole numbers");
+    refused({{"trading_rule_removals", {{"ZR", nlohmann::json::array({{2, 8, 32}})}}}}, "not two positive whole numbers");
+    refused({{"trading_rule_removals", {{"ZR", nlohmann::json::array({{0, 8}})}}}}, "not two positive whole numbers");
+    refused({{"trading_rule_removals", {{"ZR", nlohmann::json::array({{2.5, 8}})}}}}, "not two positive whole numbers");
+    refused({{"trading_rule_removals", {{"ZR", nlohmann::json::array({{2, 0}})}}}}, "not two positive whole numbers");
+    refused({{"trading_rule_removals", {{"ZR", nlohmann::json::array({{2, -8}})}}}}, "not two positive whole numbers");
+    refused({{"trading_rule_removals", {{"ZR", nlohmann::json::array({{2, 8.5}})}}}}, "not two positive whole numbers");
+    refused({{"trading_rule_removals", {{"ZR", nlohmann::json::array({{2, 4294967304LL}})}}}},
+            "not two positive whole numbers");
+    refused({{"trading_rule_removals", {{"ZR", nlohmann::json::array({{4294967298LL, 8}})}}}},
+            "not two positive whole numbers");
+    refused({{"trading_rule_removals", {{"ZR.v.0", one}}}}, "not a base symbol");
+    // a misspelt block is an absent block: every contract would silently run every rule
+    refused({{"trading_rule_removal", {{"ZR", one}}}}, "\"trading_rule_removal\"");
+    refused({{"trading_rule_removals_", {{"ZR", one}}}}, "\"trading_rule_removals_\"");
+}
+
+// The rule sets the forecast weights of ONE trend sleeve: a book of several sleeves (BASE) or of
+// another kind of sleeve is refused with the block, never run as if the block were absent.
+TEST_F(ConfigLoaderTest, TradingRuleRemovalsNeedABookOfOneTrendSleeve) {
+    const nlohmann::json block = {{"ZR", nlohmann::json::array({{2, 8}})}};
+    auto error_of = [&](const nlohmann::json& strategies) {
+        write_full_set("base", nlohmann::json::object(),
+                       {{"strategies", strategies}, {"trading_rule_removals", block}});
+        auto r = ConfigLoader::load(base_, "base");
+        return r.is_ok() ? std::string() : std::string(r.error()->what());
+    };
+    EXPECT_EQ(error_of(one_trend_sleeve()), "");
+    nlohmann::json two = one_trend_sleeve();
+    two["TREND_FOLLOWING_FAST"] = {{"enabled_backtest", true}, {"enabled_live", true},
+                                   {"type", "TrendFollowingFastStrategy"}};
+    EXPECT_NE(error_of(two).find("exactly one enabled TrendFollowingStrategy sleeve; this book enables 2"),
+              std::string::npos);
+    // a second sleeve that is switched off does not count
+    two["TREND_FOLLOWING_FAST"]["enabled_backtest"] = false;
+    two["TREND_FOLLOWING_FAST"]["enabled_live"] = false;
+    EXPECT_EQ(error_of(two), "");
+    EXPECT_NE(error_of({{"FAST", {{"enabled_backtest", true}, {"type", "TrendFollowingFastStrategy"}}}})
+                  .find("exactly one enabled TrendFollowingStrategy sleeve; this book enables 1"),
+              std::string::npos);
+    // two trend sleeves are two sleeves, whichever of the two flags enables the second
+    for (const char* flag : {"enabled_backtest", "enabled_live"}) {
+        nlohmann::json both = one_trend_sleeve();
+        both["TREND_FOLLOWING_2"] = {{flag, true}, {"type", "TrendFollowingStrategy"}};
+        EXPECT_NE(error_of(both).find("this book enables 2"), std::string::npos) << flag;
+    }
+    EXPECT_NE(error_of({{"TREND_FOLLOWING", {{"weight", 1.0}}}}).find("this book enables 0"), std::string::npos);
+}
+
+// A run takes the forecast diversification multiplier rows from defaults.json. With trading rule
+// removals the rows for five, four, three, two and one rule size real contracts, so the shipped
+// file's six values are pinned: Carver's table 36.
+TEST_F(ConfigLoaderTest, TheTemplatesMultiplierRowsAreTableThirtySix) {
+    const auto tmpl = tracked_config_template();
+    ASSERT_FALSE(tmpl.empty()) << "config_template/ not found; this test must not skip";
+    const std::vector<std::pair<int, double>> table = {{1, 1.0},  {2, 1.03}, {3, 1.08},
+                                                       {4, 1.13}, {5, 1.19}, {6, 1.26}};
+    for (const char* book : {"conservative", "base"}) {
+        auto loaded = ConfigLoader::load(tmpl, book);
+        ASSERT_TRUE(loaded.is_ok()) << book << ": " << (loaded.is_error() ? loaded.error()->what() : "");
+        EXPECT_EQ(loaded.value().strategy_defaults.fdm, table) << book;
+    }
+    // and the file itself, not a default the loader fell back on
+    std::ifstream in(tmpl / "defaults.json");
+    ASSERT_TRUE(in.good());
+    const nlohmann::json defaults = nlohmann::json::parse(in);
+    ASSERT_TRUE(defaults.contains("strategy_defaults") && defaults["strategy_defaults"].contains("fdm"));
+    EXPECT_EQ(defaults["strategy_defaults"]["fdm"],
+              nlohmann::json::array({{1, 1.0}, {2, 1.03}, {3, 1.08}, {4, 1.13}, {5, 1.19}, {6, 1.26}}));
+}
+
+// The shipped CONSERVATIVE template carries the owner's list: eighteen rules on
+// twelve contracts, each entry the contract's fastest pairs, none on an equity index contract.
+// BASE carries no list.
+TEST_F(ConfigLoaderTest, TheConservativeTemplateCarriesTheTradingRuleRemovals) {
+    using Pairs = std::vector<std::pair<int, int>>;
+    const auto tmpl = tracked_config_template();
+    ASSERT_FALSE(tmpl.empty()) << "config_template/ not found; this test must not skip";
+    auto conservative = ConfigLoader::load(tmpl, "conservative");
+    ASSERT_TRUE(conservative.is_ok()) << (conservative.is_error() ? conservative.error()->what() : "");
+    const AppConfig& c = conservative.value();
+    const Pairs one = {{2, 8}}, two = {{2, 8}, {4, 16}}, three = {{2, 8}, {4, 16}, {8, 32}};
+    const std::map<std::string, Pairs> expected = {
+        {"6L", two}, {"6M", one}, {"GF", one}, {"HE", one}, {"KE", two},   {"LE", one},
+        {"NG", one}, {"ZC", two}, {"ZL", one}, {"ZR", three}, {"ZS", one}, {"ZW", two}};
+    EXPECT_EQ(c.trading_rule_removals, expected);
+    std::size_t rules = 0;
+    for (const auto& [symbol, removed] : c.trading_rule_removals) {
+        rules += removed.size();
+        EXPECT_EQ(std::find(c.equity_slow_rule.symbols.begin(), c.equity_slow_rule.symbols.end(), symbol),
+                  c.equity_slow_rule.symbols.end())
+            << symbol << " is an equity slow rule symbol";
+        for (const auto& contract : c.listing_dates) {
+            EXPECT_NE(symbol, contract.symbol) << "a listing-date pair is on the list";
+            EXPECT_NE(symbol, contract.before) << "a listing-date pair is on the list";
+        }
+    }
+    EXPECT_EQ(rules, 18u);
+    auto base = ConfigLoader::load(tmpl, "base");
+    ASSERT_TRUE(base.is_ok()) << (base.is_error() ? base.error()->what() : "");
+    EXPECT_TRUE(base.value().trading_rule_removals.empty());
+}
+
+// portfolio.json's optional "carry" block: absent or weight 0 is carry off;
+// present it is parsed strictly, and with weight above 0 only a book of one trend sleeve may carry it.
+TEST_F(ConfigLoaderTest, CarryAbsentIsOffAndTheBlockIsReadAsWritten) {
+    write_full_set("base");
+    auto absent = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(absent.is_ok()) << (absent.error() ? absent.error()->what() : "");
+    EXPECT_FALSE(absent.value().carry.present);
+    EXPECT_FALSE(absent.value().carry.enabled());
+
+    write_full_set("base", nlohmann::json::object(),
+                   {{"strategies", one_trend_sleeve()},
+                    {"carry", {{"weight", 0.4}, {"spans", {5, 20, 60, 120}}, {"scalar", 30}, {"_note", "x"}}},
+                    {"_carry_note", "a note beside the block is not a misspelt block"}});
+    auto on = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(on.is_ok()) << (on.error() ? on.error()->what() : "");
+    EXPECT_TRUE(on.value().carry.enabled());
+    EXPECT_EQ(on.value().carry.weight, 0.4);
+    EXPECT_EQ(on.value().carry.spans, (std::vector<int>{5, 20, 60, 120}));
+    EXPECT_EQ(on.value().carry.scalar, 30.0);
+
+    // weight 0 is present and off, and needs no particular book
+    nlohmann::json two = one_trend_sleeve();
+    two["TREND_FOLLOWING_FAST"] = {{"enabled_backtest", true}, {"type", "TrendFollowingFastStrategy"}};
+    write_full_set("base", nlohmann::json::object(), {{"strategies", two}, {"carry", {{"weight", 0.0}}}});
+    auto off = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(off.is_ok()) << (off.error() ? off.error()->what() : "");
+    EXPECT_TRUE(off.value().carry.present);
+    EXPECT_FALSE(off.value().carry.enabled());
+    EXPECT_EQ(off.value().carry.spans, (std::vector<int>{5, 20, 60, 120})) << "Carver's spans by default";
+    EXPECT_EQ(off.value().carry.scalar, 30.0) << "Carver's scalar by default";
+    // carry on with only the weight written: the spans and the scalar are Carver's (the README allows it)
+    write_full_set("base", nlohmann::json::object(), {{"strategies", one_trend_sleeve()}, {"carry", {{"weight", 0.4}}}});
+    auto weight_only = ConfigLoader::load(base_, "base");
+    ASSERT_TRUE(weight_only.is_ok()) << (weight_only.error() ? weight_only.error()->what() : "");
+    EXPECT_TRUE(weight_only.value().carry.enabled());
+    EXPECT_EQ(weight_only.value().carry.spans, (std::vector<int>{5, 20, 60, 120}));
+    EXPECT_EQ(weight_only.value().carry.scalar, 30.0);
+    EXPECT_EQ(CarryConfig{}.scalar, 30.0);
+    EXPECT_EQ(CarryConfig{}.spans, (std::vector<int>{5, 20, 60, 120}));
+    EXPECT_EQ(CarryConfig{}.weight, 0.0);
+}
+
+TEST_F(ConfigLoaderTest, AMalformedCarryBlockIsRefused) {
+    auto refused = [&](const nlohmann::json& portfolio, const std::string& named) {
+        nlohmann::json with_sleeve = portfolio;
+        if (!with_sleeve.contains("strategies")) with_sleeve["strategies"] = one_trend_sleeve();
+        write_full_set("base", nlohmann::json::object(), with_sleeve);
+        auto r = ConfigLoader::load(base_, "base");
+        ASSERT_TRUE(r.is_error()) << portfolio.dump();
+        EXPECT_NE(std::string(r.error()->what()).find(named), std::string::npos) << r.error()->what();
+    };
+    refused({{"carry", 0.4}}, "must be an object");
+    refused({{"carry", {{"spans", {5}}}}}, "needs a weight from 0 to 1");
+    refused({{"carry", {{"weight", 1.5}}}}, "needs a weight from 0 to 1");
+    refused({{"carry", {{"weight", -0.1}}}}, "needs a weight from 0 to 1");
+    refused({{"carry", {{"weight", "0.4"}}}}, "needs a weight from 0 to 1");
+    refused({{"carry", {{"weight", 0.4}, {"spans", nlohmann::json::array()}}}}, "non-empty list of spans");
+    refused({{"carry", {{"weight", 0.4}, {"spans", {20, 5}}}}}, "fastest first");
+    refused({{"carry", {{"weight", 0.4}, {"spans", {5, 5}}}}}, "fastest first");
+    refused({{"carry", {{"weight", 0.4}, {"spans", {0, 5}}}}}, "fastest first");
+    refused({{"carry", {{"weight", 0.4}, {"spans", {5.5}}}}}, "fastest first");
+    refused({{"carry", {{"weight", 0.4}, {"scalar", 0}}}}, "positive scalar");
+    refused({{"carry", {{"weight", 0.4}, {"wieght", 0.4}}}}, "unknown key \"wieght\"");
+    // a misspelt block is an absent block: carry would silently be off
+    refused({{"carry_rules", {{"weight", 0.4}}}}, "\"carry_rules\"");
+    // carry on joins ONE trend sleeve
+    nlohmann::json two = one_trend_sleeve();
+    two["TREND_FOLLOWING_FAST"] = {{"enabled_backtest", true}, {"type", "TrendFollowingFastStrategy"}};
+    refused({{"strategies", two}, {"carry", {{"weight", 0.4}}}},
+            "exactly one enabled TrendFollowingStrategy sleeve; this book enables 2");
+}
+
+// The shipped templates leave the block out: carry is off and the book is today's to the last stored
+// digit (the run-metadata settings snapshot holds the whole file, so a block at weight 0 would change it).
+TEST_F(ConfigLoaderTest, TheTemplatesShipWithCarryOff) {
+    const auto tmpl = tracked_config_template();
+    ASSERT_FALSE(tmpl.empty()) << "config_template/ not found; this test must not skip";
+    for (const char* book : {"conservative", "base"}) {
+        auto loaded = ConfigLoader::load(tmpl, book);
+        ASSERT_TRUE(loaded.is_ok()) << book << ": " << (loaded.is_error() ? loaded.error()->what() : "");
+        EXPECT_FALSE(loaded.value().carry.present) << book;
+        EXPECT_FALSE(loaded.value().carry.enabled()) << book;
+        std::ifstream in(tmpl / "portfolios" / book / "portfolio.json");
+        ASSERT_TRUE(in.good()) << book;
+        EXPECT_FALSE(nlohmann::json::parse(in).contains("carry")) << book;
+    }
 }

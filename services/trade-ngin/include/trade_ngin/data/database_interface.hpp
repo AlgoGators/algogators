@@ -16,6 +16,36 @@ namespace trade_ngin {
  * @brief Abstract interface for database operations
  * Defines the contract that any database implementation must fulfill
  */
+/**
+ * @brief The write stream a live equity-curve row belongs to.
+ *
+ * trading.equity_curve is keyed UNIQUE (portfolio_id, strategy_id, timestamp,
+ * portfolio_type) and store_trading_equity_curve's ON CONFLICT has always named
+ * all four -- but the signature carried only three, so the fourth was whatever
+ * the column DEFAULT happened to be. It is 'system' today, which is why the
+ * upsert works; the writer simply had no way to say so, and no way to write any
+ * other stream. Naming it here makes the SQL and the signature agree, and the
+ * default reproduces the column default exactly, so nothing stored moves.
+ */
+inline constexpr const char* kDefaultEquityCurveStream = "system";
+
+/**
+ * @brief The book a live trading row belongs to (portfolio_type; migration 021).
+ *
+ * Three books live side by side in trading.positions, trading.executions,
+ * trading.live_results and trading.equity_curve: "system" (the model run's answer),
+ * "qt_proposal" (the desk's request) and "qt" (what the engine gave back, what goes out).
+ * Every read, write and delete of those tables names exactly one book, and every call that
+ * names none means "system" -- the only book that existed before 021, so a caller that does
+ * not know about books reads and writes exactly what it did before.
+ */
+inline constexpr const char* kDefaultBook = "system";
+
+/// True for the three books migration 021 allows, and nothing else (case-sensitive, exact).
+inline bool is_valid_book(const std::string& book) {
+    return book == "system" || book == "qt_proposal" || book == "qt";
+}
+
 class DatabaseInterface {
 public:
     virtual ~DatabaseInterface() = default;
@@ -58,13 +88,15 @@ public:
      * @param strategy_name Individual strategy name (e.g., TREND_FOLLOWING)
      * @param portfolio_id Portfolio identifier (e.g., BASE_PORTFOLIO, CONSERVATIVE_PORTFOLIO)
      * @param table_name Name of the table to insert into
+     * @param book system, qt_proposal or qt (migration 021); anything else is refused
      * @return Result indicating success or failure
      */
     virtual Result<void> store_executions(const std::vector<ExecutionReport>& executions,
                                           const std::string& strategy_id,
                                           const std::string& strategy_name,
                                           const std::string& portfolio_id,
-                                          const std::string& table_name = "trading.executions") = 0;
+                                          const std::string& table_name = "trading.executions",
+                                          const std::string& book = kDefaultBook) = 0;
 
     /**
      * @brief Store position data
@@ -74,13 +106,15 @@ public:
      * @param strategy_name Individual strategy name (e.g., TREND_FOLLOWING)
      * @param portfolio_id Portfolio identifier (e.g., BASE_PORTFOLIO, CONSERVATIVE_PORTFOLIO)
      * @param table_name Name of the table to insert into
+     * @param book system, qt_proposal or qt (migration 021); the re-run DELETE is scoped to it
      * @return Result indicating success or failure
      */
     virtual Result<void> store_positions(const std::vector<Position>& positions,
                                          const std::string& strategy_id,
                                          const std::string& strategy_name,
                                          const std::string& portfolio_id,
-                                         const std::string& table_name = "trading.positions") = 0;
+                                         const std::string& table_name = "trading.positions",
+                                         const std::string& book = kDefaultBook) = 0;
 
     /**
      * @brief Get latest market prices for symbols
@@ -103,12 +137,14 @@ public:
      * @param portfolio_id Portfolio identifier (e.g., BASE_PORTFOLIO, CONSERVATIVE_PORTFOLIO)
      * @param date Date to load positions for
      * @param table_name Name of the positions table
+     * @param book system, qt_proposal or qt (migration 021): only that book's rows are read
      * @return Result containing map of symbol to position
      */
     virtual Result<std::unordered_map<std::string, Position>> load_positions_by_date(
         const std::string& strategy_id, const std::string& strategy_name,
         const std::string& portfolio_id, const Timestamp& date,
-        const std::string& table_name = "trading.positions") = 0;
+        const std::string& table_name = "trading.positions",
+        const std::string& book = kDefaultBook) = 0;
 
     /**
      * @brief Store strategy signals
@@ -141,54 +177,6 @@ public:
      * @return Result containing Arrow table with query results
      */
     virtual Result<std::shared_ptr<arrow::Table>> execute_query(const std::string& query) = 0;
-
-    // ============================================================================
-    // NEW METHODS FOR BACKTEST DATA STORAGE
-    // ============================================================================
-
-    /**
-     * @brief Store backtest execution data
-     * @param executions Vector of execution reports
-     * @param run_id Backtest run identifier
-     * @param table_name Name of the table to insert into
-     * @return Result indicating success or failure
-     */
-    virtual Result<void> store_backtest_executions(
-        const std::vector<ExecutionReport>& executions, const std::string& run_id,
-        const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "backtest.executions") = 0;
-
-    /**
-     * @brief Store backtest signals
-     * @param signals Map of symbol to signal value
-     * @param strategy_id ID of the strategy generating signals
-     * @param run_id Backtest run identifier
-     * @param timestamp Timestamp of signals
-     * @param table_name Name of the table to insert into
-     * @return Result indicating success or failure
-     */
-    virtual Result<void> store_backtest_signals(
-        const std::unordered_map<std::string, double>& signals, const std::string& strategy_id,
-        const std::string& run_id, const Timestamp& timestamp,
-        const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "backtest.signals") = 0;
-
-    /**
-     * @brief Store backtest run metadata
-     * @param run_id Backtest run identifier
-     * @param name Run name
-     * @param description Run description
-     * @param start_date Start date
-     * @param end_date End date
-     * @param hyperparameters JSON configuration
-     * @param table_name Name of the table to insert into
-     * @return Result indicating success or failure
-     */
-    virtual Result<void> store_backtest_metadata(
-        const std::string& run_id, const std::string& name, const std::string& description,
-        const Timestamp& start_date, const Timestamp& end_date,
-        const nlohmann::json& hyperparameters, const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "backtest.run_metadata") = 0;
 
     // ============================================================================
     // NEW METHODS FOR LIVE TRADING DATA STORAGE
@@ -229,37 +217,6 @@ public:
         double cvar_95, double beta, double correlation, double downside_volatility,
         const nlohmann::json& config, const std::string& table_name = "trading.results") = 0;
 
-    /**
-     * @brief Store live trading results with new schema
-     * @param strategy_id Strategy identifier
-     * @param date Trading date
-     * @param total_return Total return for the day
-     * @param volatility Portfolio volatility
-     * @param total_pnl Total P&L
-     * @param unrealized_pnl Unrealized P&L
-     * @param realized_pnl Realized P&L
-     * @param current_portfolio_value Current portfolio value
-     * @param portfolio_var Portfolio VaR
-     * @param net_leverage Net leverage
-     * @param gross_leverage Gross leverage
-     * @param max_correlation Max correlation risk
-     * @param jump_risk Jump risk (99th percentile)
-     * @param risk_scale Risk scale factor
-     * @param total_notional Total notional exposure
-     * @param active_positions Number of active positions
-     * @param config Strategy configuration JSON
-     * @param table_name Name of the table to insert into
-     * @return Result indicating success or failure
-     */
-    virtual Result<void> store_live_results(
-        const std::string& strategy_id, const Timestamp& date, double total_return,
-        double volatility, double total_pnl, double unrealized_pnl, double realized_pnl,
-        double current_portfolio_value, double daily_realized_pnl, double daily_unrealized_pnl,
-        double portfolio_var, double net_leverage, double gross_leverage,
-        double margin_leverage, double margin_cushion, double max_correlation, double jump_risk,
-        double risk_scale, double gross_notional, double net_notional, int active_positions,
-        double total_transaction_costs, double margin_posted, double cash_available,
-        const nlohmann::json& config, const std::string& table_name = "trading.live_results") = 0;
 
     /**
      * @brief Fetch previous day's cumulative aggregates from live_results
@@ -272,7 +229,8 @@ public:
      */
     virtual Result<std::tuple<double, double, double>> get_previous_live_aggregates(
         const std::string& strategy_id, const std::string& portfolio_id, const Timestamp& date,
-        const std::string& table_name = "trading.live_results") = 0;
+        const std::string& table_name = "trading.live_results",
+        const std::string& book = kDefaultBook) = 0;
 
     /**
      * @brief Store live trading equity curve point
@@ -286,7 +244,8 @@ public:
     virtual Result<void> store_trading_equity_curve(
         const std::string& strategy_id, const Timestamp& timestamp, double equity,
         const std::string& portfolio_id,
-        const std::string& table_name = "trading.equity_curve") = 0;
+        const std::string& table_name = "trading.equity_curve",
+        const std::string& portfolio_type = kDefaultEquityCurveStream) = 0;
 
     /**
      * @brief Store multiple live trading equity curve points
@@ -300,7 +259,8 @@ public:
         const std::string& strategy_id,
         const std::vector<std::pair<Timestamp, double>>& equity_points,
         const std::string& portfolio_id,
-        const std::string& table_name = "trading.equity_curve") = 0;
+        const std::string& table_name = "trading.equity_curve",
+        const std::string& portfolio_type = kDefaultEquityCurveStream) = 0;
 
 protected:
     /**

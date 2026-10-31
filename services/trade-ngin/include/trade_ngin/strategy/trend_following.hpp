@@ -2,13 +2,19 @@
 #pragma once
 
 #include <deque>
+#include <map>
 #include <memory>
 #include <utility>
 #include <vector>
+#include "trade_ngin/data/roll_series.hpp"
 #include "trade_ngin/core/error.hpp"
 #include "trade_ngin/core/types.hpp"
+#include "trade_ngin/data/market_data_source.hpp"
 #include "trade_ngin/instruments/instrument_registry.hpp"
 #include "trade_ngin/strategy/base_strategy.hpp"
+#include "trade_ngin/strategy/carry_estimator.hpp"
+#include "trade_ngin/strategy/trend_estimator.hpp"
+#include "trade_ngin/strategy/vol_annualisation.hpp"
 
 namespace trade_ngin {
 
@@ -16,29 +22,56 @@ namespace trade_ngin {
  * @brief Configuration specific to trend following strategy
  */
 struct TrendFollowingConfig {
-    double weight{1.0};                 // Weight for position sizing
     double risk_target{0.2};            // Target annualized risk level
     double fx_rate{1.0};                // FX conversion rate
     double idm{2.5};                    // Instrument diversification multiplier
-    double max_symbol_concentration{0.15};  // Max % of gross exposure per symbol (15% default)
-    bool use_position_buffering{true};  // Whether to use position buffers to reduce trading
-    // Minimum buffer width in contracts. Carver formula yields 0.02-0.28 for micros, which is
-    // sub-tick and a no-op for integer positions. 0.5 is the smallest value that can absorb a
-    // breach for typical 0-3 contract holdings; set to 0.0 to disable.
-    double carver_buffer_floor{0.5};
-    // Position-proportional buffer: buffer_width = max(floor, factor × |raw_position|).
-    // Targets high-magnitude positions (MBT/M2K/MYM) where day-over-day raw can move
-    // > 0.5 contracts, breaching the floor. Set to 0.0 to disable (floor-only).
-    double carver_buffer_position_factor{0.2};
     std::vector<std::pair<int, int>> ema_windows{
         // EMA window pairs for crossovers
         {2, 8}, {4, 16}, {8, 32}, {16, 64}, {32, 128}, {64, 256}};
     int vol_lookback_short{32};   // Short lookback for volatility calculation
-    int vol_lookback_long{2520};  // Long lookback for volatility calculation
-    size_t max_history_size{0};   // 0 = auto-compute from vol_lookback_long
+    int vol_lookback_long{2520};  // Not read by the estimator: its long-run mean is 2,520 values
+    size_t max_history_size{0};   // Set to the estimators' window (trend_estimator::kWindowBars)
     std::vector<std::pair<int, double>> fdm{{1, 1.0},  {2, 1.03}, {3, 1.08},
                                             {4, 1.13}, {5, 1.19}, {6, 1.26}};
+    // The equity slow rule: for these symbols (base names, "MES" for
+    // "MES.v.0") a negative combined forecast stands only when every one of these pairs' scaled
+    // forecasts is negative, and is 0 otherwise. Empty symbols: the sleeve is not ruled. The runner
+    // sets both on the book's first sleeve from portfolio.json's equity_slow_rule; every pair
+    // named must be one of the sleeve's ema_windows.
+    std::vector<std::string> equity_slow_symbols;
+    std::vector<std::pair<int, int>> equity_slow_pairs;
+    // Trading rules removed from a contract by cost (Carver, strategy nine, "Removing expensive
+    // trading rules"): symbol (base name, the contract's own: "ZR" for "ZR.v.0") to the pairs it
+    // does not run. Such a contract's combined forecast is the equal-weight mean of the pairs left
+    // times the multiplier for that number of pairs; each pair left is scaled and capped as on any
+    // contract. The pairs removed are the contract's fastest (trend_estimator::pairs_after_removal),
+    // the multiplier table names the number left, and a pair the equity slow rule reads is never
+    // removed from a ruled symbol: anything else is refused when the sleeve is built. Empty: every
+    // contract runs every pair. The runner sets it from portfolio.json's trading_rule_removals.
+    std::map<std::string, std::vector<std::pair<int, int>>> rule_removals;
+    // Carry (Carver, strategies ten and eleven): the carry style's weight in the
+    // blend (0 is off: every value is today's), its spans and its forecast scalar. With weight above
+    // 0 an instrument whose window holds a carry quote trades FDM x ((1 - weight) x its trend average
+    // + weight x its carry average), capped at 20, the FDM table 52's for its number of rules
+    // (carry_estimator.hpp); an instrument with no quote yet trades its trend forecast alone. The
+    // runner sets them on the book's first sleeve from portfolio.json's carry block.
+    double carry_weight{0.0};
+    std::vector<int> carry_spans{5, 20, 60, 120};
+    double carry_scalar{30.0};
 };
+
+/**
+ * @brief The FAST sleeve's configuration: TrendFollowingStrategy on the four fast EMA pairs, a 16-bar
+ * short vol span and a 0.25 risk target. The FAST sleeve is this configuration
+ * of the one trend class, not a class of its own.
+ */
+inline TrendFollowingConfig fast_trend_following_config() {
+    TrendFollowingConfig config;
+    config.risk_target = 0.25;
+    config.ema_windows = {{2, 8}, {4, 16}, {8, 32}, {16, 64}};
+    config.vol_lookback_short = 16;
+    return config;
+}
 
 /**
  * @brief Data structure for storing instrument data
@@ -59,8 +92,44 @@ struct InstrumentData {
 
     // Market data (deque for O(1) front removal)
     std::deque<double> price_history;
+    std::deque<Timestamp> bar_timestamps;  // each price_history bar's date (vol annualisation)
+    std::deque<std::string> bar_instrument_ids;  // each bar's vendor contract id (roll_series.hpp)
+    std::deque<std::optional<RollFrom>> bar_roll_from;  // each bar's roll field
+    std::deque<std::optional<CarryQuote>> bar_carry;     // each bar's carry quote
     std::deque<double> volatility_history;
     double current_volatility = 0.01;
+
+    // The history seeded before the first fed bar (seed_history): a bulk feed, which replaces the
+    // fed history, keeps these bars in front of it.
+    std::deque<double> seeded_prices;
+    std::deque<Timestamp> seeded_timestamps;
+    std::deque<std::string> seeded_instrument_ids;
+    std::deque<std::optional<RollFrom>> seeded_roll_from;
+    std::deque<std::optional<CarryQuote>> seeded_carry;
+
+    // The estimators at the last signal bar (trend_estimator.hpp), and the position they size
+    // before any limit: (forecast / 10) x capital x IDM x weight x tau / (multiplier x price x
+    // FX x sigma).
+    trend_estimator::Estimate estimate;
+    // The symbol's last bars that have a return, for the risk overlay's gate window:
+    // each bar's date as a whole day number and its adjusted percentage return, oldest first. The
+    // window is 252 dates on which any participant has a return, so 300 own bars cover it.
+    std::vector<double> overlay_days;
+    std::vector<double> overlay_returns;
+    // The symbol's last 756 consumed bars for the optimiser's covariance: the date,
+    // the raw close and the adjusted level of each.
+    std::vector<double> opt_days;
+    std::vector<double> opt_closes;
+    std::vector<double> opt_levels;
+    double optimal_position = 0.0;
+    // the equity slow rule set the last forecast to 0 (with carry on: the trend part of the blend)
+    bool slow_rule_zeroed = false;
+    // Carry, with carry on: the carry rules and the blend at the last signal bar,
+    // and whether the blend was used (false: no carry quote yet in the window, the trend alone).
+    carry_estimator::Estimate carry;
+    carry_estimator::Blend blend;
+    bool carry_used = false;
+    double trend_part_ruled = 0.0;  // the trend speeds' average after the equity slow rule
 
     // Timestamp of last update
     Timestamp last_update;
@@ -89,6 +158,13 @@ public:
      * @return Result indicating success or failure
      */
     Result<void> on_data(const std::vector<Bar>& data) override;
+
+    /**
+     * @brief Seed the estimators' history with the consumed bars that precede the first fed bar
+     *        (the window's W bars reach back before a run's own window). Publishes and sizes nothing.
+     * @param bars consumed bars of any number of symbols, each symbol's dated before its first fed bar
+     */
+    Result<void> seed_history(const std::vector<Bar>& bars) override;
 
     /**
      * @brief Initialize strategy
@@ -165,6 +241,16 @@ public:
         return instrument_data_;
     }
 
+    /// Per symbol, how many bars of this run the sleeve's estimators read a window shorter than
+    /// trend_estimator::kWindowBars (a symbol with less history starts at its first bar).
+    const std::map<std::string, std::size_t>& short_window_rows() const { return short_window_rows_; }
+
+    /// Carry: whether this sleeve trades the blend (carry weight above 0).
+    bool carry_on() const { return trend_config_.carry_weight > 0.0; }
+
+    /// Carry: the carry-driven equity shorts of this run, per symbol.
+    const std::map<std::string, std::size_t>& carry_driven_shorts() const { return carry_driven_shorts_; }
+
     /**
      * @brief Get target positions from instrument data
      * @note Overrides base class to return positions calculated from instrument_data_
@@ -172,6 +258,14 @@ public:
      * @return Map of positions by symbol with correct quantities and PnL
      */
     std::unordered_map<std::string, Position> get_target_positions() const override;
+
+    /**
+     * @brief false while `symbol`'s price history is shorter than the longest EMA window (on_data
+     *        skips it: no forecast and no target of its own); true from then on
+     */
+    bool is_signalling(const std::string& symbol) const override;
+
+    bool overlay_series(const std::string& symbol, OverlaySeries* out) const override;
 
     /**
      * @brief Get the correct point value multiplier for a futures symbol
@@ -193,6 +287,32 @@ public:
      */
     int get_max_required_lookback() const;
 
+    /**
+     * @brief Get sector-budgeted symbol weights for position sizing
+     * @return Map of symbol to weight (sums to 1.0; per-symbol capped at 50% of
+     *         its sector allocation). Public so tests can pin the cap invariant.
+     */
+    std::unordered_map<std::string, double> get_weights() const;
+
+    /**
+     * @brief Give a run without a database the contract sectors and the symbols that
+     *        have bars, which get_weights() otherwise reads from the database
+     */
+    void set_data_source(std::shared_ptr<MarketDataSource> source) {
+        weight_source_ = std::move(source);
+        weight_cache_.clear();
+    }
+
+    /**
+     * @brief The trend sleeve's own checks of its config (risk target, IDM, EMA pairs, the
+     *        equity slow rule, the trading-rule removals), the part of validate_config a sleeve's
+     *        settings decide; a contract name is checked against `registry` when one is given.
+     *        Static so a settings change can be checked before it is saved, with no
+     *        strategy built.
+     */
+    static Result<void> validate_trend_config(const TrendFollowingConfig& trend_config,
+                                              const InstrumentRegistry* registry = nullptr);
+
 protected:
     /**
      * @brief Validate strategy configuration
@@ -207,11 +327,20 @@ private:
 
     std::unordered_map<std::string, double> contract_size_cache_;
     mutable std::unordered_map<std::string, double> weight_cache_;
+    /// Where the instrument weights come from on a run without a database.
+    std::shared_ptr<MarketDataSource> weight_source_;
 
     std::unordered_map<std::string, InstrumentData> instrument_data_;
+    /// Per symbol, the bars of this run sized on an estimator window shorter than
+    /// trend_estimator::kWindowBars (flagged and counted).
+    std::map<std::string, std::size_t> short_window_rows_;
+    /// Carry: per symbol, the TRADEABLE signal bars of this run on which an equity
+    /// symbol the slow rule names went short on the blend while its trend part alone was not short
+    /// (carry-driven equity shorts are allowed, counted and reported). A bar outside the
+    /// symbol's tradeable window (listing dates) is not counted.
+    std::map<std::string, std::size_t> carry_driven_shorts_;
 
     // Previous day positions for PnL calculation
-    std::unordered_map<std::string, Position> previous_positions_;
 
     /**
      * @brief Calculate EWMA for a price series
@@ -222,114 +351,17 @@ private:
     std::vector<double> calculate_ewma(const std::vector<double>& prices, int window) const;
 
     /**
-     * @brief Computes the blended EWMA standard deviation using short-term and long-term
-     * components.
-     * @param prices Vector of price data.
-     * @param N Lookback period for short-term EWMA std dev.
-     * @param weight_short Weight for short-term EWMA (default: 70%).
-     * @param weight_long Weight for long-term EWMA (default: 30%).
-     * @param max_history Maximum historical records (default: 10 years).
-     * @return Vector of blended EWMA standard deviation.
-     */
-    std::vector<double> blended_ewma_stddev(const std::vector<double>& prices, int N,
-                                            double weight_short = 0.7, double weight_long = 0.3,
-                                            size_t max_history = 2520) const;
-
-    /**
-     * @brief Computes the EWMA standard deviation using a lambda-based approach.
-     * @param prices Vector of price data.
-     * @param N Lookback period for EWMA.
-     * @return Vector of EWMA standard deviation values.
-     */
-    std::vector<double> ewma_standard_deviation(const std::vector<double>& prices, int N) const;
-
-    /**
-     * @brief Computes the long-term average of EWMA standard deviations.
-     * @param history Vector storing past EWMA standard deviations.
-     * @param max_history Maximum number of historical periods (default: 10 years).
-     * @return Long-term average EWMA standard deviation.
-     */
-    double compute_long_term_avg(const std::vector<double>& history,
-                                 size_t max_history = 2520) const;
-
-    /**
-     * @brief Calculate EMA crossover signals and scale by volatility
-     * @param prices Price history for a symbol
-     * @param short_window Shorter EMA window
-     * @param long_window Longer EMA window
-     * @return Vector of crossover signals
-     */
-    std::vector<double> get_raw_forecast(const std::vector<double>& prices, int short_window,
-                                         int long_window) const;
-
-    /**
-     * @brief Scale raw forecasts by volatility
-     * @param raw_forecasts Raw forecast values
-     * @param blended_stddev Blended EWMA standard deviation
-     * @return Scaled forecast values
-     */
-    std::vector<double> get_scaled_forecast(const std::vector<double>& raw_forecasts,
-                                            const std::vector<double>& blended_stddev) const;
-
-    /**
-     * @brief Generate raw forecast from EMA crossovers
-     * @param prices Price history
-     * @return Vector of raw forecasts
-     */
-    std::vector<double> get_raw_combined_forecast(const std::vector<double>& prices) const;
-
-    /**
-     * @brief Calculate absolute value of a vector
-     * @param values Input vector
-     * @return Absolute sum of vector elements
-     */
-    double get_abs_value(const std::vector<double>& values) const;
-
-    /**
-     * @brief Generate scaled forecast from EMA crossovers
-     * @param raw_combined_forecast Raw forecast values
-     * @return Scaled forecast values
-     */
-    std::vector<double> get_scaled_combined_forecast(
-        const std::vector<double>& raw_combined_forecast) const;
-
-    /**
-     * @brief Get weights for position sizing
-     * @return Map of symbol to weight
-     */
-    std::unordered_map<std::string, double> get_weights() const;
-
-    /**
      * @brief Calculate position for a symbol
      * @param symbol Instrument symbol
      * @param forecast Trading forecast
      * @param weight Weight
      * @param price Current price
      * @param volatility Current volatility
+     * @param optimal_position when given, receives the position before any limit
      * @return Target position
      */
     double calculate_position(const std::string& symbol, double forecast, double price,
-                              double volatility) const;
-
-    /**
-     * @brief Apply position buffering
-     * @param symbol Instrument symbol
-     * @param raw_position Calculated position before buffering
-     * @param price Current price
-     * @param volatility Current volatility
-     * @return Buffered position
-     */
-    double apply_position_buffer(const std::string& symbol, double raw_position, double price,
-                                 double volatility) const;
-
-    /**
-     * @brief Calculate volatility regime multiplier
-     * @param prices Price history
-     * @param volatility Pre-calculated volatility series
-     * @return Volatility regime multiplier
-     */
-    double calculate_vol_regime_multiplier(const std::vector<double>& prices,
-                                           const std::vector<double>& volatility) const;
+                              double volatility, double* optimal_position = nullptr) const;
 };
 
 }  // namespace trade_ngin

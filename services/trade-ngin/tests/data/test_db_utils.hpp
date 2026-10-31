@@ -4,6 +4,7 @@
 #include <arrow/api.h>
 #include <arrow/status.h>
 #include <arrow/util/logging.h>
+#include <map>
 #include <memory>
 #include <nlohmann/json.hpp>
 #include <pqxx/pqxx>
@@ -70,6 +71,29 @@ public:
           connected_(false),
           simulate_error_(false) {}
 
+    // The three columns every live row is keyed by. Captured so tests can pin the
+    // key a component actually writes with, not merely that it wrote something.
+    struct StorageKey {
+        std::string strategy_id;
+        std::string strategy_name;
+        std::string portfolio_id;
+    };
+
+    // The book (portfolio_type) the most recent call to `op` named; empty if never called.
+    std::string last_book(const std::string& op) const {
+        auto it = last_books_.find(op);
+        return it == last_books_.end() ? std::string() : it->second;
+    }
+
+    // Key of the most recent call to `op` ("store_positions", "store_executions",
+    // "store_signals"). Empty strings if `op` was never called. The five backtest writers
+    // record the portfolio id they were handed under their own names (the other two fields
+    // empty).
+    StorageKey last_key(const std::string& op) const {
+        auto it = last_keys_.find(op);
+        return it == last_keys_.end() ? StorageKey{} : it->second;
+    }
+
     // Connection management
     Result<void> connect() override {
         connected_ = true;
@@ -109,8 +133,11 @@ public:
     Result<void> store_executions(const std::vector<ExecutionReport>& executions,
                                   const std::string& strategy_id, const std::string& strategy_name,
                                   const std::string& portfolio_id,
-                                  const std::string& table_name) override {
-        (void)executions; (void)strategy_id; (void)strategy_name; (void)portfolio_id;
+                                  const std::string& table_name,
+                                  const std::string& book = kDefaultBook) override {
+        (void)executions;
+        record_key("store_executions", strategy_id, strategy_name, portfolio_id);
+        last_books_["store_executions"] = book;
         if (!connected_)
             return make_error<void>(ErrorCode::DATABASE_ERROR, "Not connected");
         if (table_name != "trading.executions") {
@@ -123,8 +150,10 @@ public:
     Result<void> store_positions(const std::vector<Position>& positions,
                                  const std::string& strategy_id, const std::string& strategy_name,
                                  const std::string& portfolio_id,
-                                 const std::string& table_name) override {
-        (void)strategy_id; (void)strategy_name; (void)portfolio_id;
+                                 const std::string& table_name,
+                                 const std::string& book = kDefaultBook) override {
+        record_key("store_positions", strategy_id, strategy_name, portfolio_id);
+        last_books_["store_positions"] = book;
         if (!connected_)
             return make_error<void>(ErrorCode::DATABASE_ERROR, "Not connected");
         if (table_name != "trading.positions") {
@@ -147,11 +176,9 @@ public:
                                const std::string& portfolio_id, const Timestamp& timestamp,
                                const std::string& table_name) override {
         (void)signals;
-        (void)strategy_id;
-        (void)strategy_name;
-        (void)portfolio_id;
         (void)timestamp;
         (void)table_name;
+        record_key("store_signals", strategy_id, strategy_name, portfolio_id);
         if (!connected_)
             return make_error<void>(ErrorCode::DATABASE_ERROR, "Not connected");
 
@@ -198,36 +225,6 @@ public:
         return Result<void>();
     }
 
-    // Backtest data storage methods
-    Result<void> store_backtest_executions(const std::vector<ExecutionReport>& executions,
-                                           const std::string& run_id,
-                                           const std::string& portfolio_id,
-                                           const std::string& table_name) override {
-        (void)executions; (void)run_id; (void)portfolio_id; (void)table_name;
-        return record_call("store_backtest_executions");
-    }
-
-    Result<void> store_backtest_signals(const std::unordered_map<std::string, double>& signals,
-                                        const std::string& strategy_id, const std::string& run_id,
-                                        const Timestamp& timestamp, const std::string& portfolio_id,
-                                        const std::string& table_name) override {
-        (void)signals; (void)strategy_id; (void)run_id;
-        (void)timestamp; (void)portfolio_id; (void)table_name;
-        return record_call("store_backtest_signals");
-    }
-
-    Result<void> store_backtest_metadata(const std::string& run_id, const std::string& name,
-                                         const std::string& description,
-                                         const Timestamp& start_date, const Timestamp& end_date,
-                                         const nlohmann::json& hyperparameters,
-                                         const std::string& portfolio_id,
-                                         const std::string& table_name) override {
-        (void)run_id; (void)name; (void)description;
-        (void)start_date; (void)end_date; (void)hyperparameters;
-        (void)portfolio_id; (void)table_name;
-        return record_call("store_backtest_metadata");
-    }
-
     // Live trading data storage methods
     Result<void> store_trading_results(
         const std::string& strategy_id, const Timestamp& date, double total_return,
@@ -268,19 +265,26 @@ public:
     Result<void> store_trading_equity_curve(const std::string& strategy_id,
                                             const Timestamp& timestamp, double equity,
                                             const std::string& portfolio_id,
-                                            const std::string& table_name) override {
+                                            const std::string& table_name,
+                                            const std::string& portfolio_type) override {
         (void)strategy_id; (void)timestamp; (void)equity;
         (void)portfolio_id; (void)table_name;
+        last_equity_curve_stream_ = portfolio_type;
         return record_call("store_trading_equity_curve");
     }
 
     Result<void> store_trading_equity_curve_batch(
         const std::string& strategy_id,
         const std::vector<std::pair<Timestamp, double>>& equity_points,
-        const std::string& portfolio_id, const std::string& table_name) override {
+        const std::string& portfolio_id, const std::string& table_name,
+        const std::string& portfolio_type) override {
         (void)strategy_id; (void)equity_points; (void)portfolio_id; (void)table_name;
+        last_equity_curve_stream_ = portfolio_type;
         return record_call("store_trading_equity_curve_batch");
     }
+
+    /// The portfolio_type the last equity-curve write asked for (DB-equity-curve-onconflict).
+    std::string last_equity_curve_stream() const { return last_equity_curve_stream_; }
 
     // ===== Overrides for newly-virtual methods (storage layer mocking) =====
     //
@@ -292,9 +296,13 @@ public:
         const std::string& run_id, const Timestamp& start_date, const Timestamp& end_date,
         const std::unordered_map<std::string, double>& metrics,
         const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "backtest.results") override {
-        (void)run_id; (void)start_date; (void)end_date; (void)metrics;
-        (void)portfolio_id; (void)table_name;
+        const std::string& table_name = "backtest.results",
+        const std::vector<LiveResultsCell>& cells = {}) override {
+        (void)run_id; (void)start_date; (void)end_date;
+        (void)table_name;
+        record_key("store_backtest_summary", "", "", portfolio_id);
+        last_backtest_summary_metrics = metrics;
+        last_backtest_summary_cells = cells;
         return record_call("store_backtest_summary");
     }
 
@@ -302,26 +310,28 @@ public:
         const std::string& run_id,
         const std::vector<std::pair<Timestamp, double>>& equity_points,
         const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "backtest.equity_curve") override {
-        (void)run_id; (void)equity_points; (void)portfolio_id; (void)table_name;
+        const std::string& table_name = "backtest.equity_curve",
+        const std::vector<std::string>& risk_detail = {},
+        const BacktestCurveCells& cells = {}) override {
+        (void)run_id; (void)equity_points; (void)table_name;
+        record_key("store_backtest_equity_curve_batch", "", "", portfolio_id);
+        last_equity_risk_detail = risk_detail;
+        last_equity_curve_cells = cells;
         return record_call("store_backtest_equity_curve_batch");
     }
 
     Result<void> store_backtest_positions(
         const std::vector<Position>& positions, const std::string& run_id,
         const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "backtest.final_positions") override {
-        (void)positions; (void)run_id; (void)portfolio_id; (void)table_name;
+        const std::string& table_name = "backtest.final_positions",
+        bool keep_closed_rows = false,
+        const std::unordered_set<std::string>& no_bar_symbols = {}) override {
+        (void)run_id; (void)table_name;
+        (void)keep_closed_rows;
+        record_key("store_backtest_positions", "", "", portfolio_id);
+        last_backtest_positions = positions;
+        last_backtest_no_bar_symbols = no_bar_symbols;
         return record_call("store_backtest_positions");
-    }
-
-    Result<void> store_backtest_positions_with_strategy(
-        const std::vector<Position>& positions, const std::string& run_id,
-        const std::string& strategy_id, const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "backtest.final_positions") override {
-        (void)positions; (void)run_id; (void)strategy_id;
-        (void)portfolio_id; (void)table_name;
-        return record_call("store_backtest_positions_with_strategy");
     }
 
     Result<void> store_backtest_executions_with_strategy(
@@ -329,7 +339,8 @@ public:
         const std::string& strategy_id, const std::string& portfolio_id = "BASE_PORTFOLIO",
         const std::string& table_name = "backtest.executions") override {
         (void)executions; (void)run_id; (void)strategy_id;
-        (void)portfolio_id; (void)table_name;
+        (void)table_name;
+        record_key("store_backtest_executions_with_strategy", "", "", portfolio_id);
         return record_call("store_backtest_executions_with_strategy");
     }
 
@@ -345,33 +356,59 @@ public:
         (void)run_id; (void)portfolio_run_id; (void)strategy_id; (void)strategy_allocation;
         (void)portfolio_config; (void)name; (void)description;
         (void)start_date; (void)end_date; (void)hyperparameters;
-        (void)portfolio_id; (void)table_name;
+        (void)table_name;
+        record_key("store_backtest_metadata_with_portfolio", "", "", portfolio_id);
         return record_call("store_backtest_metadata_with_portfolio");
     }
 
     Result<void> delete_live_results(
         const std::string& strategy_id, const Timestamp& date,
         const std::string& portfolio_id,
-        const std::string& table_name = "trading.live_results") override {
+        const std::string& table_name = "trading.live_results",
+        const std::string& book = kDefaultBook) override {
         (void)strategy_id; (void)date; (void)portfolio_id; (void)table_name;
+        last_books_["delete_live_results"] = book;
         return record_call("delete_live_results");
     }
 
     Result<void> delete_live_equity_curve(
         const std::string& strategy_id, const Timestamp& date,
         const std::string& portfolio_id,
-        const std::string& table_name = "trading.equity_curve") override {
+        const std::string& table_name = "trading.equity_curve",
+        const std::string& book = kDefaultBook) override {
         (void)strategy_id; (void)date; (void)portfolio_id; (void)table_name;
+        last_books_["delete_live_equity_curve"] = book;
         return record_call("delete_live_equity_curve");
     }
 
     Result<void> delete_stale_executions(
         const std::vector<std::string>& order_ids, const Timestamp& date,
-        const std::string& strategy_name,
-        const std::string& table_name = "trading.executions") override {
-        (void)order_ids; (void)date; (void)strategy_name; (void)table_name;
+        const std::string& strategy_name, const std::string& portfolio_id,
+        const std::string& table_name = "trading.executions",
+        const std::string& book = kDefaultBook) override {
+        (void)order_ids; (void)date; (void)strategy_name; (void)portfolio_id; (void)table_name;
+        last_books_["delete_stale_executions"] = book;
         return record_call("delete_stale_executions");
     }
+
+    // The risk_detail arguments of the last calls (migration 020).
+    nlohmann::json last_live_risk_detail;
+    std::vector<std::string> last_equity_risk_detail;
+    /// The typed cells of the last equity-curve batch (migration 037), one list a point.
+    BacktestCurveCells last_equity_curve_cells;
+    /// The last daily position write of a backtest: the rows handed in and the symbols named as
+    /// having printed no bar that date (migration 038).
+    std::vector<Position> last_backtest_positions;
+    std::unordered_set<std::string> last_backtest_no_bar_symbols;
+    /// What the last store_backtest_summary was handed (migration 037's typed cells among it).
+    std::unordered_map<std::string, double> last_backtest_summary_metrics;
+    std::vector<LiveResultsCell> last_backtest_summary_cells;
+    // The typed cells of the last INSERT and of the last UPDATE (migration 036).
+    std::vector<LiveResultsCell> last_live_cells;
+    std::vector<LiveResultsCell> last_update_cells;
+    // The double columns of the last INSERT and of the last UPDATE.
+    std::unordered_map<std::string, double> last_live_metrics;
+    std::unordered_map<std::string, double> last_update_values;
 
     Result<void> store_live_results_complete(
         const std::string& strategy_id, const Timestamp& date,
@@ -379,9 +416,16 @@ public:
         const std::unordered_map<std::string, int>& int_metrics,
         const nlohmann::json& config,
         const std::string& portfolio_id = "BASE_PORTFOLIO",
-        const std::string& table_name = "trading.live_results") override {
+        const std::string& table_name = "trading.live_results",
+        const nlohmann::json& risk_detail = nlohmann::json(),
+        const std::vector<LiveResultsCell>& cells = {},
+        const std::string& book = kDefaultBook) override {
         (void)strategy_id; (void)date; (void)metrics; (void)int_metrics; (void)config;
         (void)portfolio_id; (void)table_name;
+        last_live_risk_detail = risk_detail;
+        last_live_cells = cells;
+        last_live_metrics = metrics;
+        last_books_["store_live_results_complete"] = book;
         return record_call("store_live_results_complete");
     }
 
@@ -389,16 +433,27 @@ public:
         const std::string& strategy_id, const Timestamp& date,
         const std::unordered_map<std::string, double>& updates,
         const std::string& portfolio_id,
-        const std::string& table_name = "trading.live_results") override {
+        const std::string& table_name = "trading.live_results",
+        size_t* rows_affected = nullptr,
+        const std::vector<LiveResultsCell>& cells = {},
+        const std::string& book = kDefaultBook) override {
+        last_books_["update_live_results"] = book;
         (void)strategy_id; (void)date; (void)updates;
         (void)portfolio_id; (void)table_name;
+        last_update_cells = cells;
+        last_update_values = updates;
+        if (rows_affected) *rows_affected = update_live_results_rows;
         return record_call("update_live_results");
     }
+    /// The rows the next update_live_results reports as changed.
+    size_t update_live_results_rows = 1;
 
     Result<void> update_live_equity_curve(
         const std::string& strategy_id, const Timestamp& date, double equity,
         const std::string& portfolio_id,
-        const std::string& table_name = "trading.equity_curve") override {
+        const std::string& table_name = "trading.equity_curve",
+        const std::string& book = kDefaultBook) override {
+        last_books_["update_live_equity_curve"] = book;
         (void)strategy_id; (void)date; (void)equity;
         (void)portfolio_id; (void)table_name;
         return record_call("update_live_equity_curve");
@@ -447,7 +502,16 @@ private:
     std::vector<Position> mock_positions_;
     bool simulate_error_;
     mutable std::unordered_map<std::string, int> call_counts_;
+    std::unordered_map<std::string, StorageKey> last_keys_;
+
+    void record_key(const std::string& op, const std::string& strategy_id,
+                    const std::string& strategy_name, const std::string& portfolio_id) {
+        last_keys_[op] = StorageKey{strategy_id, strategy_name, portfolio_id};
+    }
     std::string fail_on_call_for_;
+    std::map<std::string, std::string> last_books_;
+    // DB-equity-curve-onconflict: what stream the last equity-curve write named.
+    std::string last_equity_curve_stream_;
 };
 
 }  // namespace testing
