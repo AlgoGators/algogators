@@ -108,8 +108,11 @@ TEST(PythonMailPure, AHeldBookKeepsItsCodeAndAnUnsentEmailIsFour) {
     const nlohmann::json held = {{"module", "carver"}, {"error", "x"}};
     EXPECT_EQ(futures_run_exit_code(std::nullopt, false), 0);
     EXPECT_EQ(futures_run_exit_code(std::nullopt, true), kBookEmailFailureExitCode);
-    EXPECT_EQ(futures_run_exit_code(held, true), trade_ngin::kRiskModuleFailureExitCode);
-    EXPECT_EQ(futures_run_exit_code(held, false), trade_ngin::kRiskModuleFailureExitCode);
+    // make_optional: with nlohmann-json 3.12, json converts to optional<json> two ways.
+    EXPECT_EQ(futures_run_exit_code(std::make_optional(held), true),
+              trade_ngin::kRiskModuleFailureExitCode);
+    EXPECT_EQ(futures_run_exit_code(std::make_optional(held), false),
+              trade_ngin::kRiskModuleFailureExitCode);
 }
 
 TEST(ReportRollsJson, TheSwitchOffSaysNothing) {
