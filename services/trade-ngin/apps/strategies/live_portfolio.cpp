@@ -1662,7 +1662,8 @@ int main(int argc, char* argv[]) {
         }
         auto yesterday_for_check = now - std::chrono::hours(24);
         auto yesterday_time_t_check = std::chrono::system_clock::to_time_t(yesterday_for_check);
-        std::tm yesterday_tm_check = *std::gmtime(&yesterday_time_t_check);
+        std::tm yesterday_tm_check{};
+        gmtime_r(&yesterday_time_t_check, &yesterday_tm_check);
         std::ostringstream yesterday_oss_check;
         yesterday_oss_check << std::put_time(&yesterday_tm_check, "%Y-%m-%d");
         std::string yesterday_date_str_check = yesterday_oss_check.str();

@@ -92,9 +92,10 @@ static void check(const std::string& name, bool condition, const std::string& de
 
 static std::string ts_to_date_str(const Timestamp& ts) {
     auto time_t = std::chrono::system_clock::to_time_t(ts);
-    std::tm* tm = std::gmtime(&time_t);
+    std::tm tm{};
+    gmtime_r(&time_t, &tm);
     std::ostringstream oss;
-    oss << std::put_time(tm, "%Y-%m-%d");
+    oss << std::put_time(&tm, "%Y-%m-%d");
     return oss.str();
 }
 

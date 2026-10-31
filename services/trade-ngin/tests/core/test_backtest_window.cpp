@@ -35,8 +35,8 @@ namespace {
 // check and not an echo.
 std::pair<Timestamp, Timestamp> legacy_window(int lookback_years, Timestamp now) {
     auto now_time_t = std::chrono::system_clock::to_time_t(now);
-    std::tm* now_tm = std::localtime(&now_time_t);
-    std::tm start_tm = *now_tm;
+    std::tm start_tm{};
+    localtime_r(&now_time_t, &start_tm);
     start_tm.tm_year -= lookback_years;
     auto start_time_t = std::mktime(&start_tm);
     return {std::chrono::system_clock::from_time_t(start_time_t), now};
