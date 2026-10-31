@@ -895,7 +895,7 @@ The project uses GitHub Actions for continuous integration. See [docs/CI_CD_READ
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
 | `ci-cd-pipeline.yml` | Push to `main`, `develop`, `main-hd`, `prod` or `staging`; every pull request | Lint, build (Debug and Release), test, coverage, security scan, image |
-| `live-trading-watchdog.yml` | Daily schedule, manual, pull requests that touch the watchdog | Checks that the live run wrote its rows |
+| `svc-trade-ngin.watchdog.yml` | Daily schedule, manual, pull requests that touch the watchdog | Checks that the live run wrote its rows |
 | `dependency-review.yml` | Pull requests onto `main` | Dependency review |
 | `sbom.yml`, `scorecard.yml`, `branch-protection.yml` | Push to `main`, schedules | Supply-chain and repository settings |
 

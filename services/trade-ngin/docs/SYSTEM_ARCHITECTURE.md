@@ -420,7 +420,7 @@ code (its own codes: 0 when the lock is held and the run is skipped, 127 when th
 missing, 1 when it cannot change directory). Only the futures conservative book is scheduled; the
 equity book has no scheduled job.
 
-The Live Trading Watchdog (`.github/workflows/live-trading-watchdog.yml`, daily at 15:00 UTC) runs
+The Live Trading Watchdog (the mono repo's `.github/workflows/svc-trade-ngin.watchdog.yml`, daily at 15:00 UTC) runs
 `scripts/check_live_trading.py`. It checks the outcome, not the process: the write clock and the
 latest date of `trading.live_results`, the latest date of `trading.positions`, and the marks on
 the latest `trading.live_run_metadata` row. It files or updates a GitHub issue when the book is

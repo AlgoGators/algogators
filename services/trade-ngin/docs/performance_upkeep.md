@@ -190,8 +190,8 @@ Logs:
 
 ## 7. The watchdog
 
-`.github/workflows/live-trading-watchdog.yml` runs `scripts/check_live_trading.py` every day at 15:00 UTC, after the
-09:30 New York run (`live-trading-watchdog.yml`), and on demand. It asks whether the engine's output reached the
+The mono repo's `.github/workflows/svc-trade-ngin.watchdog.yml` runs `scripts/check_live_trading.py` every day at 15:00 UTC, after the
+09:30 New York run (`svc-trade-ngin.watchdog.yml`), and on demand. It asks whether the engine's output reached the
 database, which covers a stopped container, a dead cron, a missing binary, missing credentials and a run that
 failed part way. It reads only; it connects with the repository's database secrets.
 
@@ -212,7 +212,7 @@ How it fails: any reported reason makes the script exit 1, so the workflow run f
 labelled `live-trading-down`, or adds a comment to the open one (`_file_issue`). A run that refused to
 start writes no row at all, so it shows as silence on the run clock on the following day. If the database cannot be
 reached the script stops on the connection error: the workflow run fails and no issue is filed. On a pull request
-that touches the script or the workflow only the self-test runs (`live-trading-watchdog.yml`), with no
+that touches the script or the workflow only the self-test runs (`svc-trade-ngin.watchdog.yml`), with no
 database.
 
 ## 8. The release path

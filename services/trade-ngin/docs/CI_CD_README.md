@@ -36,7 +36,7 @@ separate coverage workflow: coverage is a step of the `build` job.
 
 | File | Name | Trigger | Purpose |
 |---|---|---|---|
-| `live-trading-watchdog.yml` | Live Trading Watchdog | daily schedule, manual, and pull requests that touch the watchdog | checks that the live run wrote its rows (on a pull request only the script's self-test runs); see [performance_upkeep.md](performance_upkeep.md) |
+| `svc-trade-ngin.watchdog.yml` | Live Trading Watchdog | daily schedule, manual, and pull requests that touch the watchdog | checks that the live run wrote its rows (on a pull request only the script's self-test runs); see [performance_upkeep.md](performance_upkeep.md) |
 | `branch-protection.yml` | Branch Protection Setup | daily schedule and manual | applies the branch protection settings to `main`, `develop` and `main-hd`, in a job that runs only when the actor is the repository owner |
 | `dependency-review.yml` | Dependency Review | pull requests onto `main` | fails a pull request that adds a dependency with a known vulnerability of severity high or above; no licence list is configured |
 | `sbom.yml` | Generate SBOM | push to `main`, manual | produces the software bill of materials |
