@@ -40,3 +40,27 @@ It writes `out/commit_map.csv` (old commit, new commit, tree, kind, subject) and
 
 Pushing the rebuilt branches needs an agreed time and an admin to open a force-push window
 on trade-ngin's `main`. That step is in #90 and is not part of this script.
+
+## Importing into the mono repo
+
+trade-ngin itself is not rewritten (decision on #90): the rebuilt history goes only into
+this repository.
+
+```
+python tools/trade-ngin-history/prefix_history.py tn refs/rebuilt/main refs/prefixed/main out/prefixed_map.csv
+git -C tn fetch origin '+refs/pull/*/head:refs/pr/*'
+python tools/trade-ngin-history/replay_prs.py tn out/commit_map.csv out/prefixed_map.csv 283 258 regime/m13-live-state
+```
+
+- **`prefix_history.py`** moves every rebuilt commit's tree under `services/trade-ngin/`.
+  It changes nothing else: the message, author, committer and dates stay as they are. The
+  import merges this history.
+- **`replay_prs.py`** rewrites an open pull request (or a branch) the same way.
+  - It starts from the PR's merge base with trade-ngin `main`. That base maps to its
+    rebuilt, prefixed commit, so the replay applies to the imported history with no
+    conflicts of its own.
+  - Its tree under the prefix equals the PR head's tree.
+  - AI attribution lines are removed.
+  - It writes `refs/replay/<n>`, or `refs/replay/branch/<name>` for a branch.
+
+Both scripts are deterministic, so a rerun on the same refs gives the same commits.
