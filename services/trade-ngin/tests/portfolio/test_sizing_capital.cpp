@@ -1028,7 +1028,8 @@ TEST_F(LiveSizingReads, AHoldIsMarkedFlaggedAndExitsThreeLikeARiskModuleFailure)
     ASSERT_EQ(r.outcome, LiveSizingOutcome::kHoldBook) << outcome_of(r);
     const nlohmann::json hold = sizing_hold_refusal(r.failure);
 
-    EXPECT_EQ(live_run_exit_code(hold), kRiskModuleFailureExitCode);
+    // make_optional: with nlohmann-json 3.12, json converts to optional<json> two ways.
+    EXPECT_EQ(live_run_exit_code(std::make_optional(hold)), kRiskModuleFailureExitCode);
     EXPECT_EQ(live_run_exit_code(std::nullopt), 0);
 
     nlohmann::json config = {{"total_capital", 500'000.0}, {"use_optimization", true}};
