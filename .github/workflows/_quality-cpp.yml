@@ -20,7 +20,7 @@ on:
           cross-product: ci-msvc only makes sense on windows, ci-gcc13 only on
           ubuntu, and a cross-product would schedule six jobs to run three.
         type: string
-        default: '[{"preset":"ci-gcc13","os":"ubuntu-latest"}]'
+        default: '[{"preset":"ci-gcc13","os":"ubuntu-24.04"}]'
       sanitizers:
         description: JSON array of sanitizer preset names, e.g. ["ci-asan","ci-ubsan"]. Empty to skip.
         type: string
