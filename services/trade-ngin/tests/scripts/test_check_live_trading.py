@@ -56,7 +56,8 @@ class Schedule(unittest.TestCase):
                          "every run is dated with the host's date")
 
     def test_the_watchdog_workflow_runs_daily(self):
-        wf = read(".github/workflows/live-trading-watchdog.yml")
+        # The workflow lives in the mono repo's .github, two levels above this service.
+        wf = read("../../.github/workflows/svc-trade-ngin.watchdog.yml")
         self.assertIn('cron: "0 15 * * *"', wf)
         self.assertNotIn("1-5", wf)
 
