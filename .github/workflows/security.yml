@@ -79,7 +79,9 @@ jobs:
           find_src() { find libs apps services -type f -name "$1" -not -path '*/node_modules/*' 2>/dev/null | head -1; }
           touched() {
             [ "$scan_all" = true ] && return 0
-            printf '%s\n' "$changed" | grep -qE "$1"
+            # A here-string, not a pipe: grep -q exits at its first match, and under
+            # pipefail the writer's broken pipe would turn a large diff's match into a miss.
+            grep -qE "$1" <<< "$changed"
           }
 
           langs=()
