@@ -53,7 +53,7 @@ Environment:
   GITHUB_TOKEN / GITHUB_REPO                            optional; issue filing
   LIVE_PORTFOLIOS                                       optional; comma list of
                                                         portfolio_id, default
-                                                        CONSERVATIVE_PORTFOLIO
+                                                        QT_CONSERVATIVE_PORTFOLIO
   MAX_CALENDAR_DAYS_SILENT                              optional; default 1
 
 Run with --self-test to exercise the staleness logic without a database.
@@ -70,7 +70,8 @@ DEFAULT_REPO = "AlgoGators/trade-ngin"
 # arithmetic (which made a Friday stop alarm only on the following Thursday) is gone.
 MAX_CALENDAR_DAYS_SILENT = int(os.environ.get("MAX_CALENDAR_DAYS_SILENT", "1"))
 
-DEFAULT_PORTFOLIOS = "CONSERVATIVE_PORTFOLIO"
+# The QT book; CONSERVATIVE_PORTFOLIO, the book before it, stopped at the 2026-10-14 cutover.
+DEFAULT_PORTFOLIOS = "QT_CONSERVATIVE_PORTFOLIO"
 
 
 def calendar_days_between(start: date, end: date) -> int:
