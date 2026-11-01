@@ -117,6 +117,13 @@ jobs:
           # compile, which autobuild cannot provide; buildless extraction scans
           # the sources directly. Interpreted languages ignore this setting.
           build-mode: none
+          # Without a build, cpp/missing-return flags functions that plainly
+          # return (a one-line `return x;` getter among them). gcc's
+          # -Wreturn-type (in -Wall) checks the same thing on every real build.
+          config: |
+            query-filters:
+              - exclude:
+                  id: cpp/missing-return
       - uses: github/codeql-action/analyze@v3
         with:
           category: /language:${{ matrix.language }}
