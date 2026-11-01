@@ -1,0 +1,92 @@
+name: trade-ngin · deploy
+
+# A push to `prod` is a production deploy of engine-rpc on the algocloud box,
+# the whole live path (the QT desk, the catch-up scheduler and every model run):
+# quality gate (C++ build and tests) and the rpc checks, build and push the
+# engine image, then SSH in, fast-forward a sparse checkout of the deploy
+# directory and roll to the new digest with services/trade-ngin/deploy/deploy.sh,
+# which waits out engine runs and the 09:30 send / 10:00 cutoff and switches
+# back if the new container is not healthy.
+#
+# Replaces trade-ngin's ci-cd-pipeline.yml deploy (#90), which restarted a
+# `:latest` container that no longer runs. Rolling back is
+# `deploy.sh <previous ref>` on the box (deploy.sh prints it), or re-running an
+# earlier run of this workflow.
+
+on:
+  push:
+    branches: [prod]
+    # `prod` is shared with the AlgoLens and data-ngin deploys: only engine changes redeploy
+    # engine-rpc. The workflow files are left out on purpose, as in svc-data-ngin.deploy.yml.
+    paths:
+      - services/trade-ngin/**
+      - '!services/trade-ngin/docs/**'
+      - '!services/trade-ngin/**/*.md'
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: true
+      deploy:
+        description: Deploy after building (only honoured on the prod branch).
+        type: boolean
+        default: false
+
+# One prod deploy at a time, and never cancel one mid-roll.
+concurrency:
+  group: svc-trade-ngin-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-cpp.yml
+    with:
+      path: services/trade-ngin
+      builds: '[{"preset":"ci-gcc13","os":"ubuntu-24.04"}]'
+      sanitizers: '[]'
+      run-clang-tidy: false
+      run-clang-format: false
+    secrets: inherit
+
+  rpc:
+    uses: ./.github/workflows/svc-trade-ngin.rpc.yml
+
+  image:
+    needs: [quality, rpc]
+    uses: ./.github/workflows/_publish-container.yml
+    with:
+      path: services/trade-ngin
+      image: algogators/trade-ngin-engine
+      push: ${{ !(inputs.dry-run || false) }}
+      # The image compiles the engine and its tests from scratch.
+      timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    secrets: inherit
+
+  deploy:
+    if: >-
+      ${{ github.ref == 'refs/heads/prod'
+          && !(inputs.dry-run || false)
+          && (github.event_name == 'push' || inputs.deploy) }}
+    needs: image
+    uses: ./.github/workflows/_deploy-ssh.yml
+    with:
+      image: algogators/trade-ngin-engine
+      digest: ${{ needs.image.outputs.digest }}
+      # Its own checkout: data-ngin's at /home/ubuntu/algogators is sparse on its deploy directory.
+      remote-path: /home/ubuntu/algogators-trade-ngin
+      deploy-script: services/trade-ngin/deploy/deploy.sh
+      sparse-paths: services/trade-ngin/deploy
+      # deploy.sh waits up to 45 minutes for a quiet moment, then up to 10 for the roll.
+      timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    secrets: inherit

@@ -1,5 +1,8 @@
 name: trade-ngin · publish
 
+# A tagged release image. Production deploys come from the `prod` branch
+# (svc-trade-ngin.deploy.yml), not from tags.
+
 on:
   push:
     tags: ['trade-ngin/v*']
@@ -8,9 +11,6 @@ on:
       dry-run:
         type: boolean
         default: true
-      deploy:
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -33,8 +33,10 @@ jobs:
     uses: ./.github/workflows/_publish-container.yml
     with:
       path: services/trade-ngin
-      image: algogators/trade-ngin
+      image: algogators/trade-ngin-engine
       environment: ghcr
+      # The image compiles the engine and its tests from scratch.
+      timeout-minutes: 120
       push: ${{ !(inputs.dry-run || false) }}
     permissions:
       contents: read
@@ -43,18 +45,3 @@ jobs:
       attestations: write
     secrets: inherit
 
-  deploy:
-    if: ${{ !inputs.dry-run && (github.event_name == 'push' || inputs.deploy) }}
-    needs: image
-    uses: ./.github/workflows/_deploy-ssh.yml
-    with:
-      environment: trade-ngin-production
-      image: algogators/trade-ngin
-      digest: ${{ needs.image.outputs.digest }}
-      remote-path: /opt/algogators/trade-ngin
-      service-name: trade-ngin
-    # _deploy-ssh pulls the image on the host with this run's token.
-    permissions:
-      contents: read
-      packages: read
-    secrets: inherit

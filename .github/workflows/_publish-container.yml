@@ -42,6 +42,10 @@ on:
         description: Set false on pull requests to build without publishing.
         type: boolean
         default: true
+      timeout-minutes:
+        description: For an image that compiles a large codebase (trade-ngin's engine).
+        type: number
+        default: 45
     outputs:
       digest:
         description: Immutable image digest — pass this to the deploy workflow.
@@ -56,7 +60,7 @@ jobs:
   build:
     name: build and push
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: ${{ inputs.timeout-minutes }}
     environment: ${{ inputs.environment }}
     permissions:
       contents: read
