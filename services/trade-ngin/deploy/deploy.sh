@@ -27,6 +27,9 @@ SERVICE=engine-rpc
 log() { echo "[$(date -Is)] $*"; }
 die() { echo "::error::$*" >&2; exit 1; }
 
+# _deploy-ssh.yml exports COMPOSE_FILE (docker-compose.prod.yml, the other services' file name);
+# engine-rpc's project is $QT_DIR/docker-compose.yml, which compose finds by itself.
+unset COMPOSE_FILE
 cd "$QT_DIR"
 [ "$(grep -c '^QT_ENGINE_IMAGE=' .env)" -eq 1 ] || die "$QT_DIR/.env must have exactly one QT_ENGINE_IMAGE= line"
 previous=$(sed -n 's/^QT_ENGINE_IMAGE=//p' .env)
