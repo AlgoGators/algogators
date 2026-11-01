@@ -2,8 +2,9 @@ name: trade-ngin · deploy
 
 # A push to `prod` is a production deploy of engine-rpc on the algocloud box,
 # the whole live path (the QT desk, the catch-up scheduler and every model run):
-# quality gate (C++ build and tests) and the rpc checks, build and push the
-# engine image, then SSH in, fast-forward a sparse checkout of the deploy
+# take the image main already built and tested for this commit, or, when there is
+# none, run the quality gate (C++ build and tests) and the rpc checks and build and
+# push the engine image here; then SSH in, fast-forward a sparse checkout of the deploy
 # directory and roll to the new digest with services/trade-ngin/deploy/deploy.sh,
 # which waits out engine runs and the 09:30 send / 10:00 cutoff and switches
 # back if the new container is not healthy.
@@ -41,7 +42,49 @@ permissions:
   contents: read
 
 jobs:
+  # `prod` is a fast-forward of main, and main already built and tested this commit
+  # (svc-trade-ngin.quality.yml pushes sha-<commit> after its tests pass). Deploy that image
+  # when it exists and the commit's rpc checks did not fail; otherwise build and test here.
+  # A dry run always builds, since checking the build is what it is for.
+  resolve:
+    name: find main's image
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      packages: read
+      actions: read
+    outputs:
+      digest: ${{ steps.find.outputs.digest }}
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: find
+        if: ${{ !(inputs.dry-run || false) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ghcr.io/algogators/trade-ngin-engine:sha-${{ github.sha }}
+        run: |
+          if ! digest=$(docker buildx imagetools inspect "$REF" --format '{{json .Manifest}}' | jq -re .digest); then
+            echo "No image for ${GITHUB_SHA::8} on main yet: building it here."
+            exit 0
+          fi
+          rpc=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/svc-trade-ngin.rpc.yml/runs?head_sha=$GITHUB_SHA&event=push" \
+                  --jq '[.workflow_runs[] | select(.head_branch == "main")][0].conclusion // "none"')
+          case "$rpc" in
+            success|none) ;;
+            *) echo "::warning::main's rpc checks for ${GITHUB_SHA::8} ended '$rpc': building and testing here."
+               exit 0 ;;
+          esac
+          echo "Deploying main's image $REF ($digest)."
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
   quality:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.digest == '' }}
     uses: ./.github/workflows/_quality-cpp.yml
     with:
       path: services/trade-ngin
@@ -52,6 +95,8 @@ jobs:
     secrets: inherit
 
   rpc:
+    needs: resolve
+    if: ${{ needs.resolve.outputs.digest == '' }}
     uses: ./.github/workflows/svc-trade-ngin.rpc.yml
 
   image:
@@ -71,15 +116,18 @@ jobs:
     secrets: inherit
 
   deploy:
+    # !cancelled(): image is skipped when main's image is deployed.
     if: >-
-      ${{ github.ref == 'refs/heads/prod'
+      ${{ !cancelled()
+          && github.ref == 'refs/heads/prod'
           && !(inputs.dry-run || false)
-          && (github.event_name == 'push' || inputs.deploy) }}
-    needs: image
+          && (github.event_name == 'push' || inputs.deploy)
+          && (needs.resolve.outputs.digest != '' || needs.image.result == 'success') }}
+    needs: [resolve, image]
     uses: ./.github/workflows/_deploy-ssh.yml
     with:
       image: algogators/trade-ngin-engine
-      digest: ${{ needs.image.outputs.digest }}
+      digest: ${{ needs.resolve.outputs.digest || needs.image.outputs.digest }}
       # Its own checkout: data-ngin's at /home/ubuntu/algogators is sparse on its deploy directory.
       remote-path: /home/ubuntu/algogators-trade-ngin
       deploy-script: services/trade-ngin/deploy/deploy.sh

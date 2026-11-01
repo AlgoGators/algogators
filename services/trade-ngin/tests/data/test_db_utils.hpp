@@ -6,6 +6,7 @@
 #include <arrow/util/logging.h>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <pqxx/pqxx>
 #include <string>
@@ -136,6 +137,7 @@ public:
                                   const std::string& table_name,
                                   const std::string& book = kDefaultBook) override {
         (void)executions;
+        std::lock_guard<std::mutex> lock(writes_mutex_);
         record_key("store_executions", strategy_id, strategy_name, portfolio_id);
         last_books_["store_executions"] = book;
         if (!connected_)
@@ -152,6 +154,7 @@ public:
                                  const std::string& portfolio_id,
                                  const std::string& table_name,
                                  const std::string& book = kDefaultBook) override {
+        std::lock_guard<std::mutex> lock(writes_mutex_);
         record_key("store_positions", strategy_id, strategy_name, portfolio_id);
         last_books_["store_positions"] = book;
         if (!connected_)
@@ -178,6 +181,7 @@ public:
         (void)signals;
         (void)timestamp;
         (void)table_name;
+        std::lock_guard<std::mutex> lock(writes_mutex_);
         record_key("store_signals", strategy_id, strategy_name, portfolio_id);
         if (!connected_)
             return make_error<void>(ErrorCode::DATABASE_ERROR, "Not connected");
@@ -501,6 +505,9 @@ private:
     bool connected_;
     std::vector<Position> mock_positions_;
     bool simulate_error_;
+    // The three writers record into the maps below; ConcurrentAccess calls store_positions from
+    // ten threads at once, and an unguarded rehash there aborted the test run.
+    std::mutex writes_mutex_;
     mutable std::unordered_map<std::string, int> call_counts_;
     std::unordered_map<std::string, StorageKey> last_keys_;
 
