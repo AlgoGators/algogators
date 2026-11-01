@@ -45,10 +45,12 @@ class TestQualityReport:
         assert not report.ok
 
     def test_frame_without_close_column(self):
-        frame = pd.DataFrame({"foo": [1.0]}, index=pd.date_range("2024-01-01", periods=1))
-        report = DataProvider.quality_report("AAA", frame, min_rows=1)
+        # Keep enough rows so only the missing column can fail the report.
+        frame = make_ohlcv(n=30).drop(columns="close")
+        report = DataProvider.quality_report("AAA", frame)
+        assert report.issues == ["missing close column"]
         assert report.missing_values == 0
-        assert report.ok
+        assert not report.ok
 
 
 class TestFetchMany:
