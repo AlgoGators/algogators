@@ -1,0 +1,105 @@
+// include/trade_ngin/live/trading_days_anchor.hpp
+#pragma once
+
+#include <string>
+
+#include "trade_ngin/live/data_freshness.hpp"
+
+namespace trade_ngin {
+
+/**
+ * @brief Is the annualization anchor consistent with the book it annualizes?
+ *
+ * `trading.get_trading_days(strategy, target, portfolio)` takes its
+ * start date from `trading.strategy_trading_days_metadata.live_start_date` and
+ * falls back to `MIN(date)` over that portfolio's `live_results` only when no
+ * row exists. A row that is LATER than the book's own first day is therefore
+ * strictly worse than no row at all, and nothing anywhere notices:
+ *
+ *   A book replayed from 2026-04-01 with live_start_date 2026-07-24 (a row
+ *   seeded by hand for a 10-day window): every date before
+ *   07-24 gets `GREATEST(1, target - start + 1)` = 1 trading day, so
+ *   total_annualized_return collapses onto total_cumulative_return for 115 rows;
+ *   at 07-27 the count is 4 and a -3.5 % cumulative return annualizes to
+ *   -1674 %. The run exits 0 and the number is stored.
+ *
+ * The check is one comparison the DB function cannot make, because the function
+ * stops looking the moment it finds a metadata row. The metadata row is the
+ * authoritative anchor: `effective_anchor` is the row when there
+ * is one and the book's own first day only when there is none. A mismatch is
+ * reported through `anchor_is_late` so the runner can WARN, but it never moves
+ * the anchor by itself: a stray backdated row (rows dated months before the
+ * stream's real start) would otherwise annualise the book over a span it
+ * never traded. Bad data is fixed in the data, not by the runner.
+ *
+ * This is NOT equity-specific: a futures book can carry the same shape, so the
+ * check belongs beside the function, not inside one runner.
+ */
+struct TradingDaysAnchor {
+    /// True when strategy_trading_days_metadata has a row for this (strategy, portfolio).
+    bool has_metadata{false};
+    /// live_start_date from that row, YYYY-MM-DD. Empty when there is no row.
+    std::string metadata_anchor;
+    /// MIN(date) over this portfolio's live_results, YYYY-MM-DD. Empty when the book is new.
+    std::string earliest_result;
+    /// The anchor annualization uses: the metadata row when one exists, else the book's first day.
+    std::string effective_anchor;
+    /// True when the metadata row is LATER than the book's own first day. Reported, never acted on.
+    bool anchor_is_late{false};
+};
+
+/**
+ * @param metadata_anchor live_start_date, or "" when no metadata row exists.
+ * @param earliest_result MIN(date) over live_results for this (strategy, portfolio),
+ *        or "" when the book has no rows yet (a genuine first run).
+ *
+ * Both are ISO YYYY-MM-DD and compare lexicographically.
+ *
+ * A metadata row EARLIER than the first result is not flagged: that is the
+ * normal shape for a book seeded before its first run, and it annualizes
+ * conservatively (more days, smaller figure) rather than explosively.
+ */
+inline TradingDaysAnchor assess_trading_days_anchor(const std::string& metadata_anchor,
+                                                    const std::string& earliest_result) {
+    TradingDaysAnchor a;
+    a.has_metadata = !metadata_anchor.empty();
+    a.metadata_anchor = metadata_anchor;
+    a.earliest_result = earliest_result;
+
+    if (!a.has_metadata) {
+        // No row: the DB function already falls back to MIN(date), which is right.
+        a.effective_anchor = earliest_result;
+        return a;
+    }
+    if (earliest_result.empty()) {
+        // Nothing to contradict the row with. A first run has no history, and a
+        // seeded anchor is exactly what it is for.
+        a.effective_anchor = metadata_anchor;
+        return a;
+    }
+
+    a.anchor_is_late = metadata_anchor > earliest_result;
+    a.effective_anchor = metadata_anchor;
+    return a;
+}
+
+/**
+ * @brief Trading days from an anchor to a target date, matching the SQL exactly.
+ *
+ * `trading.get_trading_days` computes `GREATEST(1, (target - start) + 1)` in
+ * whole days. This reproduces it so an override computed here is the same
+ * quantity the function would have returned from the same anchor -- not a
+ * differently-defined number that happens to be near it.
+ *
+ * Returns 1 for an empty or malformed anchor, which is the function's own
+ * "I do not know" answer.
+ */
+inline int trading_days_from_anchor(const std::string& anchor_ymd,
+                                    const std::string& target_ymd) {
+    if (anchor_ymd.empty() || target_ymd.empty()) return 1;
+    const long days = calendar_days_between_utc(anchor_ymd, target_ymd);
+    const long count = days + 1;
+    return count < 1 ? 1 : static_cast<int>(count);
+}
+
+}  // namespace trade_ngin

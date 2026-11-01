@@ -1,9 +1,13 @@
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <numeric>
 #include <vector>
+#include <nlohmann/json.hpp>
+#include "trade_ngin/core/config_loader.hpp"
 #include "../core/test_base.hpp"
 #include "../data/test_db_utils.hpp"
 #include "trade_ngin/data/database_interface.hpp"
@@ -15,6 +19,7 @@
 #include "trade_ngin/instruments/instrument_registry.hpp"
 #undef private
 
+#include "trade_ngin/data/listing_dates.hpp"
 #include "trade_ngin/strategy/trend_following.hpp"
 
 using namespace trade_ngin;
@@ -51,10 +56,8 @@ protected:
         }
 
         // Create trend following configuration
-        trend_config_.weight = 1.0 / 30.0;  // Each of 30 contracts get 1/30th weight
         trend_config_.risk_target = 0.2;    // 20% annualized volatility target
         trend_config_.idm = 2.5;            // Instrument diversification multiplier
-        trend_config_.use_position_buffering = true;
         trend_config_.ema_windows = {{2, 8}, {4, 16}, {8, 32}, {16, 64}, {32, 128}};
         trend_config_.vol_lookback_short = 32;  // 1 month
         trend_config_.vol_lookback_long = 252;  // 1 year
@@ -76,7 +79,6 @@ protected:
             spec.commission_per_contract = 2.0;
             spec.initial_margin = 10000.0;
             spec.maintenance_margin = 8000.0;
-            spec.weight = 1.0;
             spec.trading_hours = "09:30-16:00";
             registry.instruments_[symbol] = std::make_shared<FuturesInstrument>(symbol, spec);
         }
@@ -252,12 +254,190 @@ protected:
     double last_position_{0.0};
 };
 
-// Pin Carver buffer constants. If anyone tunes these defaults silently, this test fires
-// and forces them to also update PositionBuffering test bounds + buffering docs.
-TEST(TrendFollowingConfigDefaults, CarverBufferConstantsArePinned) {
-    TrendFollowingConfig cfg;
-    EXPECT_DOUBLE_EQ(cfg.carver_buffer_position_factor, 0.2);
-    EXPECT_DOUBLE_EQ(cfg.carver_buffer_floor, 0.5);
+// The strategy has no buffer and no rounding, and the
+// tracked config_template names none of the retired buffer keys (the loader refuses each on a
+// futures book).
+TEST(TrendFollowingConfigDefaults, TheTemplateCarriesNoRetiredBufferKey) {
+    // Walk up from cwd so the test works from build/, build/tests/, or repo root.
+    namespace fs = std::filesystem;
+    fs::path dir = fs::current_path();
+    fs::path tmpl;
+    for (int i = 0; i < 8 && !dir.empty(); ++i) {
+        if (fs::exists(dir / "config_template" / "defaults.json")) {
+            tmpl = dir / "config_template" / "defaults.json";
+            break;
+        }
+        dir = dir.parent_path();
+    }
+    if (tmpl.empty()) {
+        GTEST_SKIP() << "config_template/defaults.json not reachable from cwd";
+    }
+    std::ifstream in(tmpl);
+    nlohmann::json j = nlohmann::json::parse(in);
+    const auto& sd = j.at("strategy_defaults");
+    EXPECT_FALSE(sd.contains("carver_buffer_position_factor"));
+    EXPECT_FALSE(sd.contains("carver_buffer_floor"));
+    for (const char* book : {"conservative", "base"}) {
+        std::ifstream pin(tmpl.parent_path() / "portfolios" / book / "portfolio.json");
+        const nlohmann::json portfolio = nlohmann::json::parse(pin);
+        for (const auto& sleeve : portfolio.at("strategies").items()) {
+            for (const char* key : {"weight", "max_symbol_concentration", "use_position_buffering",
+                                    "carver_buffer_floor", "carver_buffer_position_factor"}) {
+                EXPECT_FALSE(sleeve.value().at("config").contains(key))
+                    << book << " " << sleeve.key() << " still names " << key;
+            }
+        }
+    }
+}
+
+namespace {
+
+// Mock DB whose contract metadata contains a single-symbol sector, so the
+// 50%-of-sector cap in get_weights() actually fires. `rows` is the two tables get_weights() reads
+// (the metadata's sector and symbol, and the symbols that have bars); a test may change it.
+class SectorMetadataMockDb : public MockPostgresDatabase {
+public:
+    using MockPostgresDatabase::MockPostgresDatabase;
+
+    std::vector<std::pair<std::string, std::string>> rows = {
+        {"Metals", "GC"}, {"Metals", "SI"}, {"Metals", "HG"}, {"Crypto", "MBT"}};
+
+    Result<std::shared_ptr<arrow::Table>> get_contract_metadata() const override {
+        arrow::StringBuilder sector_b;
+        arrow::StringBuilder symbol_b;
+        for (const auto& [sec, sym] : rows) {
+            (void)sector_b.Append(sec);
+            (void)symbol_b.Append(sym);
+        }
+        std::shared_ptr<arrow::Array> sector_arr;
+        std::shared_ptr<arrow::Array> symbol_arr;
+        (void)sector_b.Finish(&sector_arr);
+        (void)symbol_b.Finish(&symbol_arr);
+        auto schema = arrow::schema({arrow::field("Sector", arrow::utf8()),
+                                     arrow::field("Databento Symbol", arrow::utf8())});
+        return Result<std::shared_ptr<arrow::Table>>(
+            arrow::Table::Make(schema, {sector_arr, symbol_arr}));
+    }
+
+    Result<std::vector<std::string>> get_symbols(AssetClass asset_class, DataFrequency freq,
+                                                 const std::string& data_type) override {
+        (void)asset_class;
+        (void)freq;
+        (void)data_type;
+        std::vector<std::string> with_bars;
+        for (const auto& row : rows)
+            with_bars.push_back(row.second + ".v.0");
+        return Result<std::vector<std::string>>(with_bars);
+    }
+};
+
+}  // namespace
+
+// The sector cap must survive normalization: a single-symbol sector is capped to
+// 50% of its sector budget and the freed weight goes to OTHER symbols only.
+// A closing renormalization that re-inflated the capped symbol would land MBT at 1/3
+// instead of 1/4.
+TEST(TrendFollowingWeights, SectorCapSurvivesNormalization) {
+    StateManager::reset_instance();
+    auto db = std::make_shared<SectorMetadataMockDb>("mock://sector");
+    ASSERT_TRUE(db->connect().is_ok());
+
+    StrategyConfig cfg;
+    cfg.capital_allocation = 1000000.0;
+    cfg.asset_classes = {AssetClass::FUTURES};
+    cfg.frequencies = {DataFrequency::DAILY};
+    TrendFollowingConfig tf;
+    TrendFollowingStrategy strat("TEST_WEIGHTS_CAP", cfg, tf, db);
+
+    auto weights = strat.get_weights();
+    ASSERT_EQ(weights.size(), 4u);
+
+    double sum = 0.0;
+    for (const auto& [sym, w] : weights) {
+        sum += w;
+    }
+    EXPECT_NEAR(sum, 1.0, 1e-9);
+
+    // 2 sectors -> sector budget 0.5 each. MBT alone in Crypto: capped at 0.25.
+    EXPECT_NEAR(weights.at("MBT"), 0.25, 1e-9)
+        << "capped symbol was re-inflated by normalization";
+    for (const auto* metal : {"GC", "SI", "HG"}) {
+        EXPECT_NEAR(weights.at(metal), 0.25, 1e-9);
+    }
+}
+
+// The weight table is read from the database once and kept for one initialised life of the
+// strategy; initialize() drops it. The table depends on nothing else: not on the strategy's
+// symbols, its configuration or the listing dates (beyond the rule below: a declared predecessor
+// whose listed contract is stored is not weighted). Within a life a changed table is NOT seen (that
+// is the cache); after initialize() it is.
+TEST(TrendFollowingWeights, InitializeDropsTheKeptWeightsSoAChangedTableIsReadAgain) {
+    StateManager::reset_instance();
+    auto db = std::make_shared<SectorMetadataMockDb>("mock://weights_hook");
+    ASSERT_TRUE(db->connect().is_ok());
+
+    StrategyConfig cfg;
+    cfg.capital_allocation = 1000000.0;
+    cfg.max_leverage = 4.0;
+    cfg.asset_classes = {AssetClass::FUTURES};
+    cfg.frequencies = {DataFrequency::DAILY};
+    TrendFollowingConfig tf;
+    TrendFollowingStrategy strat("TEST_WEIGHTS_HOOK", cfg, tf, db);
+    ASSERT_TRUE(strat.initialize().is_ok());
+
+    const auto first = strat.get_weights();
+    ASSERT_EQ(first.size(), 4u);
+    EXPECT_NEAR(first.at("GC"), 0.25, 1e-12);
+
+    // The input changes: a third sector with two contracts that have bars.
+    db->rows.emplace_back("Rates", "ZN");
+    db->rows.emplace_back("Rates", "ZF");
+    EXPECT_EQ(strat.get_weights(), first) << "within one initialised life the kept table is served";
+
+    ASSERT_TRUE(strat.initialize().is_ok());
+    const auto second = strat.get_weights();
+    ASSERT_EQ(second.size(), 6u) << "the weight table of before the change was returned";
+    // Three sectors at a third each. MBT, alone in its sector, is capped at half of it (1/6); the
+    // five others share the rest in proportion: 1/9 and 1/6 scaled by (1 - 1/6) / (2/3) = 1.25.
+    EXPECT_NEAR(second.at("MBT"), 1.0 / 6.0, 1e-12);
+    for (const auto* metal : {"GC", "SI", "HG"})
+        EXPECT_NEAR(second.at(metal), 5.0 / 36.0, 1e-12);
+    for (const auto* rate : {"ZN", "ZF"})
+        EXPECT_NEAR(second.at(rate), 5.0 / 24.0, 1e-12);
+}
+
+// With MGC and SIL stored next to GC and SI and the pairs declared, the pair is
+// one instrument, the listed contract: GC and SI take no weight and Metals is HG, MGC and SIL. With
+// nothing declared every stored symbol is weighted.
+TEST(TrendFollowingWeights, AStoredPredecessorCarriedByItsListedContractIsNotWeighted) {
+    StateManager::reset_instance();
+    auto db = std::make_shared<SectorMetadataMockDb>("mock://weights_micros");
+    ASSERT_TRUE(db->connect().is_ok());
+    db->rows = {{"Metals", "GC"}, {"Metals", "SI"}, {"Metals", "HG"}, {"Metals", "MGC"},
+                {"Metals", "SIL"}, {"Crypto", "MBT"}};
+    StrategyConfig cfg;
+    cfg.capital_allocation = 1000000.0;
+    cfg.asset_classes = {AssetClass::FUTURES};
+    cfg.frequencies = {DataFrequency::DAILY};
+    TrendFollowingConfig tf;
+    {
+        TrendFollowingStrategy strat("TEST_WEIGHTS_UNDECLARED", cfg, tf, db);
+        const auto w = strat.get_weights();
+        ASSERT_EQ(w.size(), 6u);
+        // MBT capped at a quarter; the five metals share three quarters
+        for (const auto* metal : {"GC", "SI", "HG", "MGC", "SIL"}) EXPECT_NEAR(w.at(metal), 0.15, 1e-12) << metal;
+    }
+    ListingDates::instance().set({{"MGC", "GC", "2010-10-04", 10.0}, {"SIL", "SI", "2013-06-17", 5.0}});
+    struct Clear {
+        ~Clear() { ListingDates::instance().clear(); }
+    } clear;
+    StateManager::reset_instance();
+    TrendFollowingStrategy strat("TEST_WEIGHTS_DECLARED", cfg, tf, db);
+    const auto w = strat.get_weights();
+    ASSERT_EQ(w.size(), 4u);
+    EXPECT_EQ(w.count("GC"), 0u);
+    EXPECT_EQ(w.count("SI"), 0u);
+    for (const auto* sym : {"HG", "MGC", "SIL", "MBT"}) EXPECT_NEAR(w.at(sym), 0.25, 1e-12) << sym;
 }
 
 // Test initialization and valid configuration
@@ -554,66 +734,35 @@ TEST_F(TrendFollowingTest, VolatilityCalculation) {
     EXPECT_GT(nq_size, 0.0) << "Expected non-zero NQ position";
 }
 
-// Test position buffering so that small price movements do not trigger significant changes.
-// Carver-faithful buffer width on main is max(carver_buffer_floor, raw_buffer_width,
-// carver_buffer_position_factor × |current_position|). With position_factor=0.2 and a held
-// position of ~|N| contracts, the buffer recalculates against the new |current| each tick,
-// allowing one settling step of up to ~2×factor×|initial| before converging. After settling,
-// per-tick changes must be small (within steady-state buffer width).
-TEST_F(TrendFollowingTest, PositionBuffering) {
+// The strategy publishes N* itself. The position it holds
+// for a symbol is the position before any limit: no buffer keeps an old quantity and nothing is
+// rounded or clamped.
+TEST_F(TrendFollowingTest, ThePublishedPositionIsTheUnbufferedOptimalPosition) {
     auto test_data = create_test_data("ES", 500, 4000.0);
 
     ASSERT_TRUE(strategy_->start().is_ok());
     process_data_safely(test_data);
 
-    // Get initial position
-    const auto& initial_positions = strategy_->get_positions();
-    ASSERT_TRUE(initial_positions.find("ES") != initial_positions.end());
-    double initial_position = initial_positions.at("ES").quantity.as_double();
-
-    // Carver buffer half-width = max(floor, raw_buffer_width, position_factor × |current|).
-    // Per-tick movement is bounded by buffer recalibration relative to |prev_position|,
-    // plus slack for raw_buffer_width and floor contributions. First step (raw forecast may
-    // be farther from |initial| while buffering still settling) gets a wider 3× envelope.
-    auto step_bound = [this](double prev, bool first_step) {
-        const double position_term =
-            trend_config_.carver_buffer_position_factor * std::abs(prev);
-        const double slack = 10.0;  // floor + small raw_buffer_width contributions
-        return (first_step ? 3.0 : 1.0) * position_term + slack;
-    };
-
-    // Create small update data with minimal price changes
-    std::vector<Bar> small_updates;
     Bar latest = test_data.back();
-    double prev_position = initial_position;
-
     for (int i = 0; i < 5; i++) {
         Bar bar = latest;
-        bar.timestamp = latest.timestamp + std::chrono::hours(i + 1);
-        bar.close *= (1.0 + 0.001);  // Very small 0.1% change
+        bar.timestamp = latest.timestamp + std::chrono::hours(24 * (i + 1));
+        bar.close *= (1.0 + 0.001 * (i + 1));
         bar.open = bar.close * 0.999;
         bar.high = bar.close * 1.002;
         bar.low = bar.close * 0.998;
-        small_updates.push_back(bar);
+        ASSERT_TRUE(strategy_->on_data({bar}).is_ok());
 
-        // Process each update individually
-        std::vector<Bar> single_update = {bar};
-        ASSERT_TRUE(strategy_->on_data(single_update).is_ok());
-
-        // Check position after each update
-        const auto& current_positions = strategy_->get_positions();
-        ASSERT_TRUE(current_positions.find("ES") != current_positions.end());
-        double cur_position = current_positions.at("ES").quantity.as_double();
-
-        // Bound per-tick movement against previous position using recomputed buffer width.
-        // Step 0 gets a wider envelope since raw forecast may be far from a not-yet-settled
-        // |initial|. Subsequent ticks must obey the tighter buffer recalibration bound.
-        const double tolerance = step_bound(prev_position, /*first_step=*/i == 0);
-        EXPECT_NEAR(cur_position, prev_position, tolerance)
-            << "Step " << i << ": position changed too much for small price movement: "
-            << cur_position << " vs prev " << prev_position << " (tolerance " << tolerance
-            << ")";
-        prev_position = cur_position;
+        const auto& positions = strategy_->get_positions();
+        ASSERT_TRUE(positions.find("ES") != positions.end());
+        const auto& data = strategy_->get_all_instrument_data().at("ES");
+        // the stored quantity is a Decimal of eight places
+        EXPECT_NEAR(positions.at("ES").quantity.as_double(), data.optimal_position, 1e-7)
+            << "step " << i << ": the published position is not N*";
+        EXPECT_NE(data.optimal_position, std::round(data.optimal_position))
+            << "step " << i << ": N* is published unrounded";
+        EXPECT_DOUBLE_EQ(data.final_position, data.optimal_position);
+        EXPECT_DOUBLE_EQ(data.raw_position, data.optimal_position);
     }
 }
 

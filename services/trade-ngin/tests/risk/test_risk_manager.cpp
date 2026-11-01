@@ -1,10 +1,30 @@
+// RiskManager unit tests, including folded-in internal-branch coverage
+// (calculate_99th_percentile, calculate_weights, update_config paths).
+//
+// Pre-load every std/project header that risk_manager.hpp transitively
+// includes, so the `private public` redefinition below only affects
+// risk_manager.hpp itself (and not stdlib internals that would explode).
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <chrono>
 #include <memory>
 #include <vector>
+#include <cmath>
+#include <iostream>
+#include <map>
+#include <mutex>
+#include <nlohmann/json.hpp>
+#include <unordered_map>
 #include "../core/test_base.hpp"
+
+#include "trade_ngin/core/config_base.hpp"
+#include "trade_ngin/core/error.hpp"
+#include "trade_ngin/core/logger.hpp"
+#include "trade_ngin/core/types.hpp"
+
+#define private public
 #include "trade_ngin/risk/risk_manager.hpp"
+#undef private
 
 using namespace trade_ngin;
 using namespace trade_ngin::testing;
@@ -175,3 +195,403 @@ TEST_F(RiskManagerTest, MultipleRiskFactors) {
     EXPECT_TRUE(risk_result.risk_exceeded);
     EXPECT_LT(risk_result.recommended_scale, 0.7 + 1e-9);  // Significant reduction needed
 }
+
+// ===== folded in from tests/risk/test_risk_manager_extended.cpp =====
+// Targets branches in risk_manager.cpp not exercised by the existing
+// test_risk_manager.cpp suite: process_positions early returns, update_config,
+// create_market_data edge cases, calculate_99th_percentile, and the
+// catch-all error path.
+namespace risk_manager_extended_detail {
+
+using namespace trade_ngin;
+using namespace trade_ngin::testing;
+
+namespace {
+
+RiskConfig default_config() {
+    RiskConfig c;
+    c.var_limit = 0.15;
+    c.jump_risk_limit = 0.10;
+    c.max_correlation = 0.7;
+    c.max_gross_leverage = 4.0;
+    c.max_net_leverage = 2.0;
+    c.capital = 1'000'000.0;
+    c.confidence_level = 0.99;
+    c.lookback_period = 252;
+    return c;
+}
+
+Bar make_bar(const std::string& symbol, double close,
+              std::chrono::system_clock::time_point ts) {
+    Bar b;
+    b.symbol = symbol;
+    b.timestamp = ts;
+    b.open = b.close = Decimal(close);
+    b.high = Decimal(close * 1.01);
+    b.low = Decimal(close * 0.99);
+    b.volume = 10000.0;
+    return b;
+}
+
+std::unordered_map<std::string, Position> single_position(const std::string& sym, double qty,
+                                                          double price) {
+    return {{sym, Position(sym, Quantity(qty), Price(price), Decimal(0.0), Decimal(0.0),
+                            Timestamp{})}};
+}
+
+}  // namespace
+
+class RiskManagerExtendedTest : public TestBase {};
+
+// ===== process_positions early-return branches =====
+
+TEST_F(RiskManagerExtendedTest, ProcessPositionsEmptyPositionsReturnsDefaultResult) {
+    RiskManager mgr(default_config());
+    MarketData md;
+    auto r = mgr.process_positions({}, md);
+    ASSERT_TRUE(r.is_ok());
+    EXPECT_FALSE(r.value().risk_exceeded);
+    EXPECT_DOUBLE_EQ(r.value().recommended_scale, 1.0);
+    EXPECT_DOUBLE_EQ(r.value().portfolio_multiplier, 1.0);
+}
+
+TEST_F(RiskManagerExtendedTest, ProcessPositionsEmptyMarketDataReturnsDefaultResult) {
+    RiskManager mgr(default_config());
+    MarketData md;  // all empty
+    auto positions = single_position("ES", 1.0, 4000.0);
+    auto r = mgr.process_positions(positions, md);
+    ASSERT_TRUE(r.is_ok());
+    EXPECT_FALSE(r.value().risk_exceeded);
+    EXPECT_DOUBLE_EQ(r.value().recommended_scale, 1.0);
+}
+
+TEST_F(RiskManagerExtendedTest, ProcessPositionsNoSymbolsMappedReturnsDefaultResult) {
+    RiskManager mgr(default_config());
+    // Build a market_data via create_market_data so it has the structure populated,
+    // but for symbols that don't match the positions.
+    auto t0 = std::chrono::system_clock::now();
+    std::vector<Bar> bars;
+    for (int i = 0; i < 10; ++i) {
+        bars.push_back(make_bar("AAPL", 100.0 + i, t0 + std::chrono::hours(24 * i)));
+    }
+    MarketData md = mgr.create_market_data(bars);
+    auto r = mgr.process_positions(single_position("UNKNOWN", 1.0, 100.0), md);
+    ASSERT_TRUE(r.is_ok());
+    EXPECT_FALSE(r.value().risk_exceeded);
+}
+
+// ===== update_config =====
+
+TEST_F(RiskManagerExtendedTest, UpdateConfigReplacesConfigInPlace) {
+    RiskManager mgr(default_config());
+    EXPECT_DOUBLE_EQ(mgr.get_config().var_limit, 0.15);
+
+    RiskConfig new_cfg = default_config();
+    new_cfg.var_limit = 0.20;
+    new_cfg.max_correlation = 0.8;
+    auto r = mgr.update_config(new_cfg);
+    ASSERT_TRUE(r.is_ok());
+    EXPECT_DOUBLE_EQ(mgr.get_config().var_limit, 0.20);
+    EXPECT_DOUBLE_EQ(mgr.get_config().max_correlation, 0.8);
+}
+
+// ===== create_market_data =====
+
+TEST_F(RiskManagerExtendedTest, CreateMarketDataEmptyBarsProducesEmptyStructures) {
+    RiskManager mgr(default_config());
+    auto md = mgr.create_market_data({});
+    EXPECT_TRUE(md.returns.empty());
+    EXPECT_TRUE(md.covariance.empty());
+    EXPECT_TRUE(md.symbol_indices.empty());
+    EXPECT_TRUE(md.ordered_symbols.empty());
+}
+
+TEST_F(RiskManagerExtendedTest, CreateMarketDataSingleSymbolAggregatesBars) {
+    RiskManager mgr(default_config());
+    auto t0 = std::chrono::system_clock::now();
+    std::vector<Bar> bars;
+    for (int i = 0; i < 30; ++i) {
+        bars.push_back(make_bar("AAPL", 100.0 + i, t0 + std::chrono::hours(24 * i)));
+    }
+    auto md = mgr.create_market_data(bars);
+    EXPECT_EQ(md.ordered_symbols.size(), 1u);
+    EXPECT_EQ(md.symbol_indices.count("AAPL"), 1u);
+    EXPECT_FALSE(md.returns.empty());
+}
+
+TEST_F(RiskManagerExtendedTest, CreateMarketDataMultipleSymbolsBuildsCovariance) {
+    RiskManager mgr(default_config());
+    auto t0 = std::chrono::system_clock::now();
+    std::vector<Bar> bars;
+    for (int i = 0; i < 30; ++i) {
+        auto ts = t0 + std::chrono::hours(24 * i);
+        bars.push_back(make_bar("AAPL", 100.0 + i * 0.5, ts));
+        bars.push_back(make_bar("MSFT", 200.0 + i * 0.3, ts));
+    }
+    auto md = mgr.create_market_data(bars);
+    EXPECT_EQ(md.ordered_symbols.size(), 2u);
+    ASSERT_FALSE(md.covariance.empty());
+    EXPECT_EQ(md.covariance.size(), 2u);
+    EXPECT_EQ(md.covariance[0].size(), 2u);
+}
+
+// ===== calculate_99th_percentile =====
+
+TEST_F(RiskManagerExtendedTest, Percentile99EmptyReturnsZero) {
+    RiskManager mgr(default_config());
+    EXPECT_DOUBLE_EQ(mgr.calculate_99th_percentile({}), 0.0);
+}
+
+TEST_F(RiskManagerExtendedTest, Percentile99SingleValueReturnsThatValue) {
+    RiskManager mgr(default_config());
+    EXPECT_DOUBLE_EQ(mgr.calculate_99th_percentile({0.05}), 0.05);
+}
+
+TEST_F(RiskManagerExtendedTest, Percentile99HundredValuesReturnsTopValue) {
+    RiskManager mgr(default_config());
+    std::vector<double> values;
+    for (int i = 0; i < 100; ++i) values.push_back(i / 100.0);
+    double p = mgr.calculate_99th_percentile(values);
+    // 99th percentile should be near the top (0.99)
+    EXPECT_GT(p, 0.95);
+    EXPECT_LE(p, 0.99);
+}
+
+// ===== calculate_var =====
+
+TEST_F(RiskManagerExtendedTest, CalculateVarReturnsFiniteForReasonableInputs) {
+    RiskManager mgr(default_config());
+    auto t0 = std::chrono::system_clock::now();
+    std::vector<Bar> bars;
+    for (int i = 0; i < 30; ++i) {
+        bars.push_back(make_bar("AAPL", 100.0 + std::sin(i * 0.5) * 5.0,
+                                  t0 + std::chrono::hours(24 * i)));
+    }
+    auto md = mgr.create_market_data(bars);
+    auto positions = single_position("AAPL", 100.0, 100.0);
+    auto r = mgr.process_positions(positions, md);
+    ASSERT_TRUE(r.is_ok());
+    EXPECT_TRUE(std::isfinite(r.value().portfolio_var));
+    EXPECT_GE(r.value().portfolio_var, 0.0);
+}
+
+// ===== calculate_weights (public-ish helper) =====
+
+TEST_F(RiskManagerExtendedTest, CalculateWeightsZeroPositionsReturnsEmpty) {
+    RiskManager mgr(default_config());
+    auto w = mgr.calculate_weights({});
+    EXPECT_TRUE(w.empty());
+}
+
+TEST_F(RiskManagerExtendedTest, CalculateWeightsSinglePositionReturnsUnitWeight) {
+    RiskManager mgr(default_config());
+    auto pos = single_position("ES", 5.0, 100.0);
+    auto w = mgr.calculate_weights(pos);
+    ASSERT_EQ(w.size(), 1u);
+    EXPECT_NEAR(std::abs(w[0]), 1.0, 1e-9);
+}
+
+TEST_F(RiskManagerExtendedTest, CalculateWeightsZeroValuePositionsReturnsZeroVector) {
+    RiskManager mgr(default_config());
+    auto pos = single_position("ES", 0.0, 100.0);
+    auto w = mgr.calculate_weights(pos);
+    ASSERT_EQ(w.size(), 1u);
+    EXPECT_DOUBLE_EQ(w[0], 0.0);
+}
+
+// ===== Current price override path =====
+
+TEST_F(RiskManagerExtendedTest, ProcessPositionsUsesCurrentPriceWhenProvided) {
+    RiskManager mgr(default_config());
+    auto t0 = std::chrono::system_clock::now();
+    std::vector<Bar> bars;
+    for (int i = 0; i < 30; ++i) {
+        bars.push_back(make_bar("AAPL", 100.0, t0 + std::chrono::hours(24 * i)));
+    }
+    auto md = mgr.create_market_data(bars);
+    auto positions = single_position("AAPL", 10.0, 100.0);
+
+    // Without current price → uses average_price
+    auto r1 = mgr.process_positions(positions, md);
+    ASSERT_TRUE(r1.is_ok());
+
+    // With current price (much higher) → leverage calculation differs
+    std::unordered_map<std::string, double> prices = {{"AAPL", 200.0}};
+    auto r2 = mgr.process_positions(positions, md, prices);
+    ASSERT_TRUE(r2.is_ok());
+    EXPECT_GE(r2.value().gross_leverage, r1.value().gross_leverage);
+}
+
+// ===== RiskResult fields populated =====
+
+TEST_F(RiskManagerExtendedTest, ResultFieldsPopulatedWhenPositionsProcessed) {
+    RiskManager mgr(default_config());
+    auto t0 = std::chrono::system_clock::now();
+    std::vector<Bar> bars;
+    for (int i = 0; i < 30; ++i) {
+        bars.push_back(make_bar("AAPL", 100.0 + i * 0.1, t0 + std::chrono::hours(24 * i)));
+    }
+    auto md = mgr.create_market_data(bars);
+    auto positions = single_position("AAPL", 100.0, 100.0);
+    auto r = mgr.process_positions(positions, md);
+    ASSERT_TRUE(r.is_ok());
+    auto& res = r.value();
+    EXPECT_TRUE(std::isfinite(res.portfolio_multiplier));
+    EXPECT_TRUE(std::isfinite(res.jump_multiplier));
+    EXPECT_TRUE(std::isfinite(res.correlation_multiplier));
+    EXPECT_TRUE(std::isfinite(res.leverage_multiplier));
+    EXPECT_TRUE(std::isfinite(res.recommended_scale));
+    EXPECT_TRUE(std::isfinite(res.gross_leverage));
+    EXPECT_TRUE(std::isfinite(res.net_leverage));
+}
+
+TEST_F(RiskManagerExtendedTest, RecommendedScaleIsMinimumOfMultipliers) {
+    RiskManager mgr(default_config());
+    auto t0 = std::chrono::system_clock::now();
+    std::vector<Bar> bars;
+    for (int i = 0; i < 30; ++i) {
+        bars.push_back(make_bar("AAPL", 100.0 + std::sin(i * 0.3) * 10.0,
+                                  t0 + std::chrono::hours(24 * i)));
+    }
+    auto md = mgr.create_market_data(bars);
+    auto positions = single_position("AAPL", 1000.0, 100.0);  // large position to stress limits
+    auto r = mgr.process_positions(positions, md);
+    ASSERT_TRUE(r.is_ok());
+    auto& res = r.value();
+    double min_mult = std::min({res.portfolio_multiplier, res.jump_multiplier,
+                                 res.correlation_multiplier, res.leverage_multiplier});
+    EXPECT_DOUBLE_EQ(res.recommended_scale, min_mult);
+    EXPECT_EQ(res.risk_exceeded, res.recommended_scale < 1.0);
+}
+
+
+// ===== Net-leverage sign (ledger RISK-net-short-ungated) =====
+//
+// calculate_leverage_multiplier used to compare the SIGNED result.net_leverage
+// with max_net_leverage, so a net-SHORT book was never cut by the net term
+// however large |net| grew; only the gross term could bind it. The fix (T-6b-fix
+// F3) takes std::abs for the comparison and the ratio and leaves
+// result.net_leverage SIGNED, so the stored net_leverage column and the email are
+// unchanged. The net-short book is now cut to max_net / |net|; the net-long
+// mirror does not move.
+//
+// Both books are 2.6x of capital: gross 2.6 < max_gross 4.0, so the gross term
+// never binds and the net term is the only one that can move
+// leverage_multiplier.
+
+namespace {
+
+MarketData two_symbol_market_data(RiskManager& mgr) {
+    auto t0 = std::chrono::system_clock::now();
+    std::vector<Bar> bars;
+    for (int i = 0; i < 30; ++i) {
+        const auto ts = t0 + std::chrono::hours(24 * i);
+        bars.push_back(make_bar("AAPL", 100.0 + std::sin(i * 0.3) * 4.0, ts));
+        bars.push_back(make_bar("MSFT", 200.0 + std::cos(i * 0.2) * 6.0, ts));
+    }
+    return mgr.create_market_data(bars);
+}
+
+std::unordered_map<std::string, Position> two_positions(double aapl_qty, double msft_qty) {
+    // Notional: 15,000 x 104 = 1,560,000 and 5,000 x 208 = 1,040,000, so the
+    // book is 2,600,000 = 2.6 x the 1,000,000 capital of default_config().
+    return {{"AAPL", Position("AAPL", Quantity(aapl_qty), Price(104.0), Decimal(0.0),
+                              Decimal(0.0), Timestamp{})},
+            {"MSFT", Position("MSFT", Quantity(msft_qty), Price(208.0), Decimal(0.0),
+                              Decimal(0.0), Timestamp{})}};
+}
+
+}  // namespace
+
+TEST_F(RiskManagerExtendedTest, NetShortBookOverNetLimitIsCutToMaxNetOverAbsNet) {
+    RiskManager mgr(default_config());  // max_gross 4.0, max_net 2.0, capital 1,000,000
+    const auto md = two_symbol_market_data(mgr);
+    auto r = mgr.process_positions(two_positions(-15000.0, -5000.0), md);
+    ASSERT_TRUE(r.is_ok());
+    const auto& res = r.value();
+
+    // Preconditions: both symbols priced at multiplier 1 (no registry entry), so
+    // gross is 2.6 -- under max_gross 4.0 -- and the gross term cannot bind.
+    ASSERT_DOUBLE_EQ(res.gross_leverage, 2.6);
+    ASSERT_LT(res.gross_leverage, mgr.get_config().max_gross_leverage);
+
+    // The stored net_leverage is SIGNED: negative for a net-short book, and it
+    // stays signed after the fix (the column and the email read it).
+    EXPECT_LT(res.net_leverage, 0.0);
+    EXPECT_DOUBLE_EQ(res.net_leverage, -2.6);
+    EXPECT_GT(std::abs(res.net_leverage), mgr.get_config().max_net_leverage)
+        << "|net| 2.6 is over max_net_leverage 2.0";
+
+    // |net| 2.6 > 2.0, so the net term cuts to 2.0 / 2.6 -- the value the long
+    // mirror below gets -- and the gate says the book is over its limits.
+    EXPECT_DOUBLE_EQ(res.leverage_multiplier, 2.0 / 2.6)
+        << "RISK-net-short-ungated: a net-short book over max_net_leverage must be cut by "
+           "max_net / |net|, as its long mirror is";
+    EXPECT_TRUE(res.risk_exceeded);
+}
+
+TEST_F(RiskManagerExtendedTest, NetLongBookOverNetLimitIsCutToMaxNetOverNet) {
+    RiskManager mgr(default_config());
+    const auto md = two_symbol_market_data(mgr);
+    auto r = mgr.process_positions(two_positions(15000.0, 5000.0), md);
+    ASSERT_TRUE(r.is_ok());
+    const auto& res = r.value();
+
+    ASSERT_DOUBLE_EQ(res.gross_leverage, 2.6);
+    ASSERT_LT(res.gross_leverage, mgr.get_config().max_gross_leverage);
+    EXPECT_DOUBLE_EQ(res.net_leverage, 2.6);
+
+    // The mirror book IS cut, by the net term alone: max_net / net, exactly the
+    // expression calculate_leverage_multiplier evaluates. The sign fix must
+    // leave this value bit-for-bit where it is.
+    EXPECT_EQ(res.leverage_multiplier, mgr.get_config().max_net_leverage / res.net_leverage);
+    EXPECT_DOUBLE_EQ(res.leverage_multiplier, 2.0 / 2.6);
+    EXPECT_LE(res.recommended_scale, res.leverage_multiplier);
+    EXPECT_TRUE(res.risk_exceeded);
+}
+
+
+// ===== T-6b-fix F6: the process_positions guard (POSGUARD) had no test =====
+//
+// A holding whose symbol has no bar in the gate's window is excluded from the measurement (the
+// gate stays fail-open by construction); commit 9's guard makes that visible: one POSGUARD_MISS
+// per dropped non-zero holding, and ONE POSGUARD summary per run, repeated only when a later call
+// drops more non-zero holdings than any call before it.
+TEST_F(RiskManagerExtendedTest, PosguardNamesADroppedHoldingAndSummarisesOncePerHighWater) {
+    LoggerConfig lc;
+    lc.destination = LogDestination::CONSOLE;
+    lc.min_level = LogLevel::INFO;
+    lc.include_timestamp = false;
+    Logger::instance().initialize(lc);
+    RiskManager mgr(default_config());
+    const auto md = two_symbol_market_data(mgr);
+    auto book = two_positions(10.0, 10.0);
+    book["ZZZ"] = Position("ZZZ", Quantity(7.0), Price(50.0), Decimal(0.0), Decimal(0.0),
+                           Timestamp{});
+    auto count = [](const std::string& out, const std::string& needle) {
+        size_t n = 0;
+        for (size_t at = out.find(needle); at != std::string::npos; at = out.find(needle, at + 1))
+            ++n;
+        return n;
+    };
+
+    ::testing::internal::CaptureStdout();
+    ASSERT_TRUE(mgr.process_positions(book, md).is_ok());
+    ASSERT_TRUE(mgr.process_positions(book, md).is_ok());  // same drop: no second summary
+    std::string out = ::testing::internal::GetCapturedStdout();
+    EXPECT_EQ(count(out, "POSGUARD_MISS symbol=ZZZ qty=7.000000 reason=absent_from_window "
+                         "window_symbols=2"),
+              2u)
+        << out;
+    EXPECT_EQ(count(out, "POSGUARD holdings=3 mapped=2 dropped=1 dropped_nonzero=1"), 1u) << out;
+
+    book["YYY"] = Position("YYY", Quantity(-3.0), Price(20.0), Decimal(0.0), Decimal(0.0),
+                           Timestamp{});
+    ::testing::internal::CaptureStdout();
+    ASSERT_TRUE(mgr.process_positions(book, md).is_ok());
+    out = ::testing::internal::GetCapturedStdout();
+    EXPECT_EQ(count(out, "POSGUARD holdings=4 mapped=2 dropped=2 dropped_nonzero=2"), 1u)
+        << "a new high-water mark prints again:\n" << out;
+}
+
+}  // namespace risk_manager_extended_detail

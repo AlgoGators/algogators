@@ -1,20 +1,110 @@
 #include "trade_ngin/transaction_cost/transaction_cost_manager.hpp"
 
+#include <algorithm>
 #include <cmath>
+
+#include "trade_ngin/core/logger.hpp"
+#include "trade_ngin/instruments/equity.hpp"
+#include "trade_ngin/instruments/futures.hpp"
+#include "trade_ngin/instruments/instrument_registry.hpp"
 
 namespace trade_ngin {
 namespace transaction_cost {
+
+std::optional<ContractCostSpec> registry_contract_cost_spec(const std::string& symbol) {
+    // The key the strategies and the P&L managers use: the symbol without its continuous-contract
+    // suffix ("ZT.v.0" -> "ZT"), so an exact metadata row wins before any micro remap and the
+    // cost model prices the contract the book was sized on.
+    std::string base = symbol;
+    auto pos = base.find(".v.");
+    if (pos != std::string::npos) {
+        base = base.substr(0, pos);
+    }
+    pos = base.find(".c.");
+    if (pos != std::string::npos) {
+        base = base.substr(0, pos);
+    }
+    const auto& registry = InstrumentRegistry::instance();
+    // has_instrument first: get_instrument logs an ERROR for a symbol it does not hold.
+    if (!registry.has_instrument(base)) {
+        return std::nullopt;
+    }
+    auto futures = std::dynamic_pointer_cast<FuturesInstrument>(registry.get_instrument(base));
+    if (!futures || futures->get_multiplier() <= 0.0) {
+        return std::nullopt;
+    }
+    ContractCostSpec spec;
+    spec.point_value = futures->get_multiplier();
+    spec.tick_size = futures->get_tick_size();
+    spec.fee_per_contract = futures->get_fee_per_contract();
+    return spec;
+}
 
 TransactionCostManager::TransactionCostManager(const Config& config)
     : config_(config),
       asset_configs_(),
       spread_model_(config.spread_config),
-      impact_model_(config.impact_config) {}
+      impact_model_(config.impact_config),
+      contract_spec_source_(registry_contract_cost_spec) {}
+
+void TransactionCostManager::set_contract_spec_source(ContractCostSpecSource source) {
+    contract_spec_source_ = std::move(source);
+}
+
+AssetCostConfig TransactionCostManager::resolve_asset_config(
+    const std::string& symbol, AssetType asset_type, std::optional<double>* fee_out) const {
+    AssetCostConfig asset_config = asset_configs_.get_config(symbol, asset_type);
+
+    // CM1: a futures cost config prices with the metadata's contract specs, the ones the
+    // strategy sizes with. An equity config (asset_type EQUITY, or a per-unit commission) never
+    // reads them: an equity ticker can collide with a futures root (CL, ES).
+    if (asset_config.asset_type != AssetType::FUTURE || asset_config.commission_per_unit >= 0.0) {
+        return asset_config;
+    }
+    const std::optional<ContractCostSpec> spec =
+        contract_spec_source_ ? contract_spec_source_(symbol) : std::nullopt;
+    const std::string base = symbol.substr(0, symbol.find('.'));
+    const bool named_future = asset_configs_.has_config(symbol) || asset_configs_.has_config(base);
+    if (!spec || spec->point_value <= 0.0 || spec->tick_size <= 0.0) {
+        // An unknown symbol (neither the cost table nor the metadata names it) keeps the table's
+        // generic default as before: it may be an equity passed without its asset type.
+        if (!named_future && !spec) {
+            return asset_config;
+        }
+        // A future without a usable metadata row (no row, or no positive "Contract Size" or
+        // "Tick Size") is an error, never priced on a guessed constant: its spread and impact are
+        // not priced (point value and tick 0), the fee still is, and the ERROR names it once per
+        // manager.
+        bool first = false;
+        {
+            std::lock_guard<std::mutex> lock(spec_warn_->mutex);
+            first = spec_warn_->warned.insert(symbol).second;
+        }
+        if (first) {
+            ERROR("Cost model: no usable metadata contract spec (\"Contract Size\" and \"Tick "
+                  "Size\") for " + symbol +
+                  "; its spread and impact are NOT priced until its metadata row exists");
+        }
+        asset_config.point_value = 0.0;
+        asset_config.tick_size = 0.0;
+        if (fee_out && spec) {
+            *fee_out = spec->fee_per_contract;
+        }
+        return asset_config;
+    }
+    asset_config.point_value = spec->point_value;
+    asset_config.tick_size = spec->tick_size;
+    if (fee_out) {
+        *fee_out = spec->fee_per_contract;
+    }
+    return asset_config;
+}
 
 TransactionCostResult TransactionCostManager::calculate_costs(
     const std::string& symbol,
     double quantity,
-    double reference_price) const {
+    double reference_price,
+    AssetType asset_type) const {
 
     // Get internally tracked ADV and volatility multiplier
     double adv = impact_model_.get_adv(symbol);
@@ -31,7 +121,7 @@ TransactionCostResult TransactionCostManager::calculate_costs(
         vol_mult = 1.0;  // Neutral volatility
     }
 
-    return calculate_costs(symbol, quantity, reference_price, adv, vol_mult);
+    return calculate_costs(symbol, quantity, reference_price, adv, vol_mult, asset_type);
 }
 
 TransactionCostResult TransactionCostManager::calculate_costs(
@@ -39,19 +129,88 @@ TransactionCostResult TransactionCostManager::calculate_costs(
     double quantity,
     double reference_price,
     double adv,
-    double volatility_multiplier) const {
+    double volatility_multiplier,
+    AssetType asset_type) const {
 
     TransactionCostResult result;
 
     // Ensure quantity is absolute
     double abs_qty = std::abs(quantity);
 
-    // Get asset configuration
-    AssetCostConfig asset_config = asset_configs_.get_config(symbol);
+    // Get asset configuration. asset_type is consulted only when the symbol
+    // has no registered config -- it routes the fallback to the equity
+    // default ($0.005/share, $1 min) instead of the futures default
+    // ($1.50/share, point_value=100). Closes audit §1.1 dispatch dead-end.
+    //
+    // CM1: a future's point value, tick and fee come from the metadata (resolve_asset_config).
+    std::optional<double> metadata_fee;
+    AssetCostConfig asset_config = resolve_asset_config(symbol, asset_type, &metadata_fee);
 
-    // 1. Calculate explicit costs
-    // commissions_fees = |qty| * fee_per_contract
-    result.commissions_fees = abs_qty * config_.explicit_fee_per_contract;
+    // 1. Calculate explicit costs (commissions)
+    if (asset_config.commission_per_unit >= 0.0) {
+        // Per-asset commission (e.g., equities: $0.005/share with min/max per order)
+        double raw_commission = abs_qty * asset_config.commission_per_unit;
+        double effective_max;
+        if (asset_config.max_commission_pct >= 0.0) {
+            // Percentage-based cap. The equity configs are IBKR Pro FIXED, so this is 1.0%
+            // of trade value (0.5% is the Tiered cap -- see the field's comment in
+            // asset_cost_config.hpp before changing it).
+            effective_max = asset_config.max_commission_pct * abs_qty * reference_price;
+        } else {
+            effective_max = asset_config.max_commission_per_order;
+        }
+        // The cap is a CEILING and must be applied last.
+        //
+        // `max(floor, min(cap, raw))` would let the floor override the cap. IBKR
+        // publishes the schedule as "Minimum per order: USD 1.00 / Maximum per order: 1
+        // percent of trade value" -- a maximum that a minimum can exceed is not a maximum.
+        //
+        // That order would also make max_commission_pct DEAD for any normal stock: the inner
+        // min(cap, raw) picks the cap only when `pct * price < commission_per_unit`, i.e.
+        // below $0.50 a share, so above that the expression collapses to max(floor, raw) and
+        // the configured cap cannot change a single output value.
+        //
+        // The two only collide on very small orders, which is exactly what a fractional-share
+        // book trades: an $18.70 AMZN trade pays $0.187 under the 1% cap, not the $1.00 floor.
+        //
+        // The floor protects the broker on small-but-normal orders; the cap protects the
+        // client on tiny ones. Both belong here, in this order.
+        result.commissions_fees = std::min(
+            effective_max, std::max(asset_config.min_commission_per_order, raw_commission));
+    } else {
+        // Fee per contract: the metadata's "Fee Per Contract" when it carries one (migration
+        // 014), else the configured default
+        const double fee = metadata_fee ? *metadata_fee : config_.explicit_fee_per_contract;
+        result.commissions_fees = abs_qty * fee;
+    }
+
+    // 1b. Regulatory fees (equity sell-side only)
+    //
+    // This is the ONLY place the SIGN of `quantity` is read; everything else uses
+    // abs_qty. The callers pass the signed trade (generate_execution() splits it into a
+    // positive filled_quantity plus a Side); do not "normalise" the argument at a call
+    // site, or the gate is unreachable.
+    //
+    // Every production config sets apply_regulatory_fees = false (IBKR Pro FIXED is
+    // all-inclusive). It arms the day anyone switches an equity config to Tiered, where
+    // fees are passed through.
+    if (asset_config.apply_regulatory_fees && quantity < 0) {
+        double trade_value = abs_qty * reference_price;
+        // SEC Transaction Fee (sell-side only)
+        double sec_fee = (trade_value / 1000000.0) * asset_config.sec_fee_per_million;
+        // FINRA TAF (sell-side only, capped per trade)
+        double taf = std::min(abs_qty * asset_config.finra_taf_per_share,
+                              asset_config.finra_taf_cap_per_trade);
+        result.commissions_fees += sec_fee + taf;
+    }
+
+    // A future without a usable metadata row (resolve_asset_config zeroes its point value and
+    // reported it): no spread or impact is priced, the fee above is.
+    if (asset_config.asset_type == AssetType::FUTURE && asset_config.commission_per_unit < 0.0 &&
+        asset_config.point_value <= 0.0) {
+        result.total_transaction_costs = result.commissions_fees;
+        return result;
+    }
 
     // 2. Calculate spread cost (in price units per contract)
     result.spread_price_impact = spread_model_.calculate_spread_price_impact(
@@ -65,6 +224,26 @@ TransactionCostResult TransactionCostManager::calculate_costs(
     // implicit_price_impact = spread + market impact (per contract, price units)
     result.implicit_price_impact =
         result.spread_price_impact + result.market_impact_price_impact;
+
+    // Enforce max_total_implicit_bps.
+    //
+    // This field is set on EVERY asset config (75-200 bps depending on tier) and caps spread
+    // + impact together; max_impact_bps bounds the market-impact term alone.
+    //
+    // It should not bind in normal conditions: the impact term is already capped below this
+    // value and futures spreads are a tick or two, so the sum stays well under. It is a tail
+    // guard, so when it DOES bind that is worth
+    // seeing rather than absorbing silently -- hence the warning.
+    if (asset_config.max_total_implicit_bps >= 0.0 && reference_price > 0.0) {
+        const double cap = (asset_config.max_total_implicit_bps / 10000.0) * reference_price;
+        if (result.implicit_price_impact > cap) {
+            WARN("Implicit cost cap binding for " + symbol + ": " +
+                 std::to_string((result.implicit_price_impact / reference_price) * 10000.0) +
+                 " bps clamped to " + std::to_string(asset_config.max_total_implicit_bps) +
+                 " bps (spread + market impact)");
+            result.implicit_price_impact = cap;
+        }
+    }
 
     // 5. Convert implicit to dollars
     // slippage_market_impact = implicit_price_impact * |qty| * point_value
@@ -83,16 +262,31 @@ void TransactionCostManager::update_market_data(
     const std::string& symbol,
     double volume,
     double close_price,
-    double prev_close_price) {
+    double prev_close_price,
+    bool change_bar) {
 
     // Update volume for ADV calculation
-    impact_model_.update_volume(symbol, volume);
+    record_volume(symbol, volume);
 
     // Calculate log return and update for volatility
+    record_log_return(symbol, close_price, prev_close_price, change_bar);
+}
+
+void TransactionCostManager::record_volume(const std::string& symbol, double volume) {
+    impact_model_.update_volume(symbol, volume);
+}
+
+void TransactionCostManager::set_own_day_volume(const std::string& symbol, double volume) {
+    impact_model_.clear_symbol_data(symbol);
+    impact_model_.update_volume(symbol, volume);
+}
+
+void TransactionCostManager::record_log_return(const std::string& symbol, double close_price,
+                                               double prev_close_price, bool change_bar) {
     if (prev_close_price > 0.0 && close_price > 0.0) {
-        double log_return = std::log(close_price / prev_close_price);
-        // Note: spread_model_ is mutable for this operation
-        const_cast<SpreadModel&>(spread_model_).update_log_returns(symbol, log_return);
+        // A change bar's return is 0 (the splice step is not a return), the date kept.
+        double log_return = change_bar ? 0.0 : std::log(close_price / prev_close_price);
+        spread_model_.update_log_returns(symbol, log_return);
     }
 }
 
@@ -100,21 +294,213 @@ double TransactionCostManager::get_adv(const std::string& symbol) const {
     return impact_model_.get_adv(symbol);
 }
 
+bool TransactionCostManager::has_volume_history(const std::string& symbol) const {
+    return impact_model_.has_sufficient_data(symbol, 1);
+}
+
+bool TransactionCostManager::has_usable_volume(const std::string& symbol) const {
+    return has_volume_history(symbol) && impact_model_.get_adv(symbol) > 0.0;
+}
+
 double TransactionCostManager::get_volatility_multiplier(const std::string& symbol) const {
     return spread_model_.get_volatility_multiplier(symbol);
 }
 
+double TransactionCostManager::get_annual_volatility(const std::string& symbol) const {
+    return spread_model_.get_annual_volatility(symbol);
+}
+
 AssetCostConfig TransactionCostManager::get_asset_config(const std::string& symbol) const {
-    return asset_configs_.get_config(symbol);
+    return resolve_asset_config(symbol, AssetType::NONE);
 }
 
 void TransactionCostManager::register_asset_config(const AssetCostConfig& config) {
     asset_configs_.register_config(config);
 }
 
+int TransactionCostManager::register_equity_costs_from_bars(
+    const std::vector<std::string>& symbols,
+    const std::unordered_map<std::string, std::vector<Bar>>& bars_by_symbol,
+    int adv_lookback_days) {
+
+    if (adv_lookback_days < 1) {
+        adv_lookback_days = 1;
+    }
+
+    int registered = 0;
+    for (const auto& symbol : symbols) {
+        auto it = bars_by_symbol.find(symbol);
+        if (it == bars_by_symbol.end() || it->second.empty()) {
+            // Register the untiered equity default rather than skipping.
+            //
+            // Skipping would leave the symbol ABSENT from configs_, and an absent symbol does
+            // NOT fall back to the equity default -- AssetCostConfigRegistry::get_config() only
+            // reaches get_equity_default_config() when the caller passes
+            // AssetType::EQUITY, and NONE of the production call sites passes an
+            // AssetType at all. So an unregistered equity would resolve to the FUTURES default:
+            // $1.50 per SHARE instead of $0.005, and point_value 100 instead of 1, i.e. 100x
+            // the slippage.
+            //
+            // Worse, configs_ is one flat symbol->config map shared across asset classes, and
+            // real tickers collide with futures roots: CL is Colgate-Palmolive AND Crude Oil,
+            // ES is Eversource AND the E-mini S&P. An unregistered CL equity would
+            // resolve to the Crude Oil config -- point_value 1000.
+            //
+            // Registering the default keeps every configured equity inside the equity cost
+            // model, so the futures fallthrough is unreachable for them regardless of what
+            // any call site passes. Fail-safe by construction rather than by every caller
+            // remembering an argument.
+            WARN("register_equity_costs_from_bars: no bars for " + symbol +
+                 " -- registering the untiered equity default so it can never resolve to a "
+                 "futures cost config");
+            AssetCostConfig fallback = AssetCostConfigRegistry::get_equity_default_config();
+            fallback.symbol = symbol;
+            asset_configs_.register_config(fallback);
+            ++registered;
+            continue;
+        }
+
+        const auto& bars = it->second;
+        const size_t n = std::min(static_cast<size_t>(adv_lookback_days), bars.size());
+        const size_t start_idx = bars.size() - n;
+
+        double volume_sum = 0.0;
+        for (size_t i = start_idx; i < bars.size(); ++i) {
+            volume_sum += bars[i].volume;
+        }
+        const double adv = volume_sum / static_cast<double>(n);
+
+        if (adv <= 0.0) {
+            // Same reasoning as the no-bars branch above -- never leave a configured
+            // equity unregistered, or it inherits futures pricing.
+            WARN("register_equity_costs_from_bars: zero ADV for " + symbol +
+                 " over " + std::to_string(n) + " bars -- registering the untiered equity "
+                 "default rather than leaving it to resolve as a future");
+            AssetCostConfig fallback = AssetCostConfigRegistry::get_equity_default_config();
+            fallback.symbol = symbol;
+            asset_configs_.register_config(fallback);
+            ++registered;
+            continue;
+        }
+
+        const double price = bars.back().close.as_double();
+        AssetCostConfig config = AssetCostConfigRegistry::get_tiered_equity_config(price, adv);
+        config.symbol = symbol;
+        asset_configs_.register_config(config);
+        ++registered;
+    }
+
+    INFO("Registered " + std::to_string(registered) + " equity cost configs (tiered by ADV, " +
+         std::to_string(adv_lookback_days) + "-day lookback)");
+    return registered;
+}
+
 void TransactionCostManager::clear_all_data() {
-    const_cast<SpreadModel&>(spread_model_).clear_all();
-    const_cast<ImpactModel&>(impact_model_).clear_all();
+    spread_model_.clear_all();
+    impact_model_.clear_all();
+}
+
+namespace {
+
+// Audit §3.2 risk scoring: count high-risk flags and map to annual base
+// borrow rate. Dollar-volume substitutes for market cap (audit fallback).
+double base_rate_from_flags(int flag_count) {
+    if (flag_count <= 0) return 0.0025;   //  25 bps -- ETB / liquid stocks
+    if (flag_count == 1) return 0.0050;   //  50 bps -- one tilt away from clean
+    if (flag_count == 2) return 0.0150;   // 150 bps -- borderline HTB
+    return 0.0500;                        // 500 bps -- HTB+ proxy
+}
+
+}  // namespace
+
+std::unordered_map<std::string, double>
+TransactionCostManager::calculate_overnight_borrow_fees(
+    const std::unordered_map<std::string, Position>& positions,
+    const std::unordered_map<std::string, double>& current_prices,
+    const InstrumentRegistry& registry) const {
+
+    std::unordered_map<std::string, double> fees;
+
+    for (const auto& [symbol, position] : positions) {
+        const double qty = position.quantity.as_double();
+        if (qty >= 0.0) {
+            continue;  // Only shorts accrue borrow fees.
+        }
+
+        // Non-equity (e.g., short futures) doesn't pay equity borrow fees. The type is tested
+        // here, silently: get_equity_instrument WARNs "Invalid equity instrument" on every
+        // non-equity, which would print once per short future per backtest day for a skip that
+        // is the expected case.
+        auto instrument = registry.get_instrument(symbol);
+        if (!instrument || instrument->get_type() != AssetType::EQUITY) {
+            continue;
+        }
+        auto equity = std::dynamic_pointer_cast<EquityInstrument>(instrument);
+        if (!equity) {
+            continue;
+        }
+
+        // Resolve current price.
+        double price = 0.0;
+        auto price_it = current_prices.find(symbol);
+        if (price_it != current_prices.end()) {
+            price = price_it->second;
+        } else {
+            price = position.average_price.as_double();
+            WARN("calculate_overnight_borrow_fees: no current price for " +
+                 symbol + ", using avg_price " + std::to_string(price));
+        }
+        if (price <= 0.0) {
+            WARN("calculate_overnight_borrow_fees: non-positive price for " +
+                 symbol + ", skipping");
+            continue;
+        }
+
+        const double short_position_value = std::abs(qty) * price;
+        const auto& spec = equity->get_spec();
+        double annual_rate;
+
+        if (spec.borrow_rate_override >= 0.0) {
+            // Broker-provided rate or test override; formula bypassed.
+            annual_rate = spec.borrow_rate_override;
+        } else {
+            // Multi-factor scoring per audit §3.2.
+            int flag_count = 0;
+
+            // Dollar-volume signal: ADV × price. <$5M/day flags as high risk.
+            const double adv = impact_model_.get_adv(symbol);
+            const double dollar_volume = adv * price;
+            if (dollar_volume > 0.0 && dollar_volume < 5'000'000.0) {
+                ++flag_count;
+            }
+
+            // Price-level signal: penny / micro-cap risk.
+            if (price < 5.0) {
+                ++flag_count;
+            }
+
+            // HTB override: explicit is_easy_to_borrow=false forces high tier.
+            if (!spec.is_easy_to_borrow) {
+                ++flag_count;
+            }
+
+            const double base = base_rate_from_flags(flag_count);
+
+            // Volatility multiplier: clamp(annual_vol / 0.25, 1.0, 3.0).
+            const double annual_vol = spread_model_.get_annual_volatility(symbol);
+            double vol_mult = annual_vol / 0.25;
+            if (vol_mult < 1.0) vol_mult = 1.0;
+            if (vol_mult > 3.0) vol_mult = 3.0;
+
+            annual_rate = base * vol_mult;
+        }
+
+        // Daily fee charged per overnight position held.
+        const double daily_fee = annual_rate * short_position_value / 365.0;
+        fees[symbol] = daily_fee;
+    }
+
+    return fees;
 }
 
 }  // namespace transaction_cost
