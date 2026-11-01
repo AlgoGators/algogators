@@ -129,7 +129,6 @@ jobs:
         env:
           # Precompiled headers are rebuilt each run, so ccache must not reject them by mtime.
           CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
-          CCACHE_BASEDIR: ${{ github.workspace }}
         run: |
           extra=()
           if [ "$RUNNER_OS" = "Linux" ]; then
@@ -153,7 +152,6 @@ jobs:
         shell: bash
         env:
           CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
-          CCACHE_BASEDIR: ${{ github.workspace }}
           CCACHE_MAXSIZE: 1500M
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then ccache --zero-stats; fi
