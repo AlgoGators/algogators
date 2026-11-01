@@ -78,11 +78,33 @@ struct LoggerConfig : public ConfigBase {
     LogLevel min_level{LogLevel::INFO};  // Minimum level to log
     LogDestination destination{LogDestination::CONSOLE};
     std::string log_directory{"logs"};          // Directory for log files
+    /**
+     * Optional sub-directory of `log_directory` for this session's files.
+     *
+     * EMPTY by default: the files go in `log_directory` itself. A replay sets it to the
+     * date being replayed, so `logs/2026-04-17/` holds that date's run and the retention
+     * budget below is spent per date instead of globally, which keeps every run of a long
+     * replay chain on disk.
+     */
+    std::string log_subdirectory{};
     std::string filename_prefix{"trade_ngin"};  // Prefix for log files
     bool include_timestamp{true};               // Include timestamp in logs
     bool include_level{true};                   // Include log level in logs
     size_t max_file_size{50 * 1024 * 1024};     // Max log file size (50MB)
-    size_t max_files{10};                       // Maximum number of log files to keep
+    /**
+     * Maximum number of log files to keep -- counting only files this logger WROTE, i.e.
+     * those named exactly `<filename_prefix>_YYYYMMDD_HHMMSS_partN.log` in this session's own
+     * directory. Deleting the oldest file of ANY name in `log_directory` would, with nine
+     * prefixes sharing `logs/`, let a futures session evict the equity session's evidence
+     * and vice versa; the retention question is per runner.
+     *
+     * The match is the whole filename, not `starts_with(filename_prefix)`: the prefixes NEST.
+     * `live_trend` is a prefix of `live_trend_conservative` and `bt_portfolio` of
+     * `bt_portfolio_conservative`, so a "begins with" test left the two futures books sharing
+     * one budget and the base runner deleting the conservative runner's logs. It also means
+     * retention never removes a file this logger did not write.
+     */
+    size_t max_files{10};
 
     // Configuration metadata
     std::string version{"1.0.0"};  // Configuration version
@@ -93,6 +115,7 @@ struct LoggerConfig : public ConfigBase {
         j["min_level"] = level_to_string(min_level);
         j["destination"] = log_destination_to_string(destination);
         j["log_directory"] = log_directory;
+        j["log_subdirectory"] = log_subdirectory;
         j["filename_prefix"] = filename_prefix;
         j["include_timestamp"] = include_timestamp;
         j["include_level"] = include_level;
@@ -130,6 +153,8 @@ struct LoggerConfig : public ConfigBase {
         }
         if (j.contains("log_directory"))
             log_directory = j.at("log_directory").get<std::string>();
+        if (j.contains("log_subdirectory"))
+            log_subdirectory = j.at("log_subdirectory").get<std::string>();
         if (j.contains("filename_prefix"))
             filename_prefix = j.at("filename_prefix").get<std::string>();
         if (j.contains("include_timestamp"))
@@ -208,9 +233,9 @@ public:
         return initialized_.load(std::memory_order_acquire);
     }
 
-    static void register_component(const std::string& component) {
-        current_component_ = component;
-    }
+    // Defined in the library for the same reason as InstrumentRegistry::instance(): the Python
+    // module has hidden symbol visibility and must set the library's component, not its own.
+    static void register_component(const std::string& component);
 
 private:
     Logger() = default;
@@ -233,8 +258,27 @@ private:
     LoggerConfig config_;
     std::ofstream log_file_;
     std::atomic<bool> initialized_{false};
-    [[maybe_unused]] bool locked_initialization_{false};  // Prevent re-initialization after first call
-    static thread_local std::string current_component_;  // Thread-local component name
+    /**
+     * @brief The calling thread's component name, for the "[Component] " prefix.
+     *
+     * It is a pointer, not a `static thread_local std::string`. A thread_local with
+     * a non-trivial destructor is destroyed alongside the static objects at process
+     * exit, in an order nothing here controls -- and PostgresDatabase::disconnect() logs
+     * "Disconnected from PostgreSQL database" from a DatabasePool that is itself
+     * a static. If the string went first, format_message() would read a destroyed
+     * std::string and print its freed bytes in front of the message: undefined
+     * behaviour, visible as garbage on a runner's last log line.
+     *
+     * The pointer here is trivially destructible, so it has no destructor to
+     * run and the storage stays valid for the whole thread. What it points at is
+     * never freed -- one small string per thread, deliberately leaked, which is
+     * the price of being readable at any point during static destruction. The
+     * value and therefore every log line is unchanged.
+     */
+    static std::string& current_component() {
+        static thread_local std::string* component = new std::string();
+        return *component;
+    }
 
     // New members for improved file naming
     std::string current_session_timestamp_;  // Format: YYYYMMDD_HHMMSS
@@ -245,13 +289,13 @@ private:
  * @brief Convenience macro for logging
  * Usage: LOG(LogLevel::INFO, "Message: " << variable)
  */
-#define LOG(level, message)                                \
-    do {                                                   \
-        if (level >= Logger::instance().get_min_level()) { \
-            std::ostringstream os;                         \
-            os << message;                                 \
-            Logger::instance().log(level, os.str());       \
-        }                                                  \
+#define LOG(level, message)                                            \
+    do {                                                               \
+        if (level >= Logger::instance().get_min_level()) {             \
+            std::ostringstream trade_ngin_log_line_;                   \
+            trade_ngin_log_line_ << message;                           \
+            Logger::instance().log(level, trade_ngin_log_line_.str()); \
+        }                                                              \
     } while (0)
 
 // Convenience functions for different log levels

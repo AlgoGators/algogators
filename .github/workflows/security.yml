@@ -79,7 +79,9 @@ jobs:
           find_src() { find libs apps services -type f -name "$1" -not -path '*/node_modules/*' 2>/dev/null | head -1; }
           touched() {
             [ "$scan_all" = true ] && return 0
-            printf '%s\n' "$changed" | grep -qE "$1"
+            # A here-string, not a pipe: grep -q exits at its first match, and under
+            # pipefail the writer's broken pipe would turn a large diff's match into a miss.
+            grep -qE "$1" <<< "$changed"
           }
 
           langs=()
@@ -117,6 +119,13 @@ jobs:
           # compile, which autobuild cannot provide; buildless extraction scans
           # the sources directly. Interpreted languages ignore this setting.
           build-mode: none
+          # Without a build, cpp/missing-return flags functions that plainly
+          # return (a one-line `return x;` getter among them). gcc's
+          # -Wreturn-type (in -Wall) checks the same thing on every real build.
+          config: |
+            query-filters:
+              - exclude:
+                  id: cpp/missing-return
       - uses: github/codeql-action/analyze@v3
         with:
           category: /language:${{ matrix.language }}

@@ -5,6 +5,8 @@
 #include "trade_ngin/instruments/instrument_registry.hpp"
 #include <memory>
 #include <functional>
+#include <string>
+#include <unordered_set>
 
 namespace trade_ngin {
 
@@ -18,6 +20,7 @@ private:
     // PnL tracking
     std::unordered_map<std::string, double> position_daily_pnl_;
     std::unordered_map<std::string, double> position_realized_pnl_;
+    std::unordered_map<std::string, double> position_unrealized_pnl_;
 
     double cumulative_daily_pnl_ = 0.0;
     double cumulative_total_pnl_ = 0.0;
@@ -35,6 +38,112 @@ public:
         : PnLManagerBase(initial_capital), registry_(registry) {}
 
     /**
+     * @brief How Day T-1 finalization records unrealized P&L.
+     *
+     * SETTLED (the default) -- futures. Under the T-1 lag model the runner enters a
+     * position at close(T-1) and the next day's run settles it at close(T), booking the
+     * entire move as realized. The position is never carried at an unsettled price, so
+     * there is no unrealized component: 0 is an identity of the model, not a convention.
+     *
+     * This matters because `average_price` on a futures row IS the prior settlement
+     * close, i.e. exactly the `t2_close` the finalizer already uses for realized. So
+     * `quantity * (t1_close - average_price) * point_value` is algebraically the realized
+     * formula, and writing it into unrealized records the same settlement move in two
+     * columns, and a violation of the
+     * row-sums-to-aggregate invariant since live_results correctly reports 0.
+     *
+     * MARK_TO_MARKET -- equities. There `average_price` is a true weighted cost basis, so
+     * the same expression is the genuine unrealized P&L.
+     *
+     * The default is SETTLED so that a caller which says nothing keeps the futures
+     * behaviour; both futures runners pass no policy argument.
+     */
+    enum class UnrealizedPolicy { SETTLED, MARK_TO_MARKET };
+
+    /**
+     * @brief Unrealized P&L of one position against its own cost basis.
+     *
+     * The single rule for "what is this position worth versus what it cost", shared by
+     * the live_results aggregate this manager produces and the per-row
+     * trading.positions.unrealized_pnl the equity runner persists. It is a named
+     * function so those two cannot disagree: both measure from Position::average_price
+     * (MeanReversionInstrumentData::entry_price has no writer, so a row read from it
+     * would always say 0 while the aggregate said otherwise).
+     *
+     * Returns 0.0 when there is no basis to measure against: a zero quantity, or an
+     * average_price not yet set (on_execution is its sole writer, so a fill that has not
+     * been processed yet leaves it at 0).
+     *
+     * It deliberately does NOT screen mark_price. That is the caller's business and the
+     * two callers differ: this manager skips a position whose price is absent, while the
+     * equity runner defaults a missing close to 0.0 and must check it itself. Folding an
+     * `mark_price > 0` guard in here would have quietly changed what the futures path
+     * reports for a present-but-zero mark, which is outside this fix's scope.
+     */
+    static double unrealized_from_cost_basis(double quantity, double average_price,
+                                             double mark_price, double point_value = 1.0) {
+        if (quantity == 0.0 || average_price <= 0.0) return 0.0;
+        return quantity * (mark_price - average_price) * point_value;
+    }
+
+    /**
+     * @brief The cost basis to record against a position on day T.
+     *
+     * A basis is established when a position is opened and has to survive every
+     * day it is held: realized PnL on exit, unrealized PnL while held, and the
+     * mean-reversion stop-loss are all measured from it. Seeding a day-T position's
+     * average_price with the previous session's close would re-anchor a
+     * held-but-untraded position's basis to the latest close every session: it would
+     * always look flat, its unrealized PnL would always be ~0, and its stop-loss would
+     * measure from yesterday rather than from what it cost.
+     *
+     * @param strategy_basis The weighted average BaseStrategy::on_execution()
+     *        maintains. Authoritative when set: a symbol that traded today has a
+     *        basis that already accounts for today's fills. <= 0 when the strategy
+     *        has no record of the symbol.
+     * @param carried_basis The basis the same symbol carries in the previous day's
+     *        book, AFTER corporate actions have restated it. <= 0 when the symbol
+     *        is not a carried-over holding.
+     * @return the basis to record, or 0.0 when neither source knows one. A mark is
+     *         deliberately never a candidate: the day's close is what the position is
+     *         worth, not what it cost, and substituting one for the other is the bug
+     *         above.
+     *
+     * On the 0.0 return: it means "no basis is known", and it is the CALLER's job to
+     * decide what that means for a row it is about to persist. Do not read it as a
+     * price and do not skip the write and leave the day-T placeholder in place -- that
+     * placeholder is the previous close, so skipping reinstates the very mark-as-basis
+     * substitution this function exists to prevent. The equity runner treats it as an
+     * upstream invariant failure: it logs the symbol and records a zero basis with zero
+     * unrealized PnL, so the row reads as incomplete rather than as a plausible lie.
+     *
+     * In normal flow it should be unreachable for a held position. Every holding has a
+     * basis -- it either traded today, in which case on_execution() set one from a fill
+     * that ExecutionManager refused to price without a real close, or it was carried,
+     * in which case the seeded book supplied one.
+     */
+    static double resolve_day_t_cost_basis(double strategy_basis, double carried_basis) {
+        if (strategy_basis > 0.0) return strategy_basis;
+        if (carried_basis > 0.0) return carried_basis;
+        return 0.0;
+    }
+
+    /**
+     * @brief The log line that closes a Day T-1 finalization (T-8D R24). Its last figure is the
+     *        value finalize_previous_day was handed plus the day's net P&L. Every live runner
+     *        hands its CONFIGURED capital (the futures runners a sleeve's share of it), so the
+     *        figure is not the account value and the line says what it is. Nothing reads it.
+     */
+    static std::string finalization_complete_line(double gross_pnl, double net_pnl,
+                                                  double handed_value_plus_net_pnl) {
+        return "Day T-1 finalization complete: Total PnL (Gross)=" + std::to_string(gross_pnl) +
+               ", Net PnL=" + std::to_string(net_pnl) +
+               ", Portfolio Value (the value this call was handed plus Net PnL: the configured "
+               "capital on the live runners, not the account value)=" +
+               std::to_string(handed_value_plus_net_pnl);
+    }
+
+    /**
      * Finalization result structure for Day T-1
      */
     struct FinalizationResult {
@@ -42,20 +151,45 @@ public:
         double finalized_portfolio_value = 0.0;
         std::unordered_map<std::string, double> position_realized_pnl;
         std::vector<Position> finalized_positions;
+
+        /**
+         * @brief Sum of the finalized rows' unrealized P&L -- the Day T-1 book marked at
+         *        close(T-1).
+         *
+         * This is the aggregate counterpart of the per-row unrealized written below, so
+         * `live_results.total_unrealized_pnl[T-1] == SUM(positions.daily_unrealized_pnl[T-1])`
+         * holds by construction rather than by two code paths happening to agree. A DAY-T
+         * snapshot priced at close(T-2) that finalization never revisited would differ
+         * from the rows by exactly that day's P&L.
+         *
+         * Accumulated ONLY under MARK_TO_MARKET. Under SETTLED every finalized row's
+         * unrealized is 0 by the settlement identity, so this is exactly 0.0 for futures --
+         * by construction, not by measurement.
+         */
+        double finalized_unrealized_pnl = 0.0;
+
         bool success = false;
     };
 
     /**
      * Finalize previous day (T-1) positions
      * This is unique to live trading and handles the settlement process
-     * Replaces the finalization logic in live_trend.cpp (lines ~600-700)
+     *
+     * `zero_pnl_symbols` names the symbols whose T-1
+     * bar books NO settlement move: a change bar (its contract id differs from the previous consumed
+     * bar's: a roll's switch day or either bar of a flip pair; the move is the splice's price gap,
+     * not the held contract's) and a WITHHELD bar (a JUNK bar or a thin first print is never
+     * consumed). Their row is kept with realized 0; the caller passes as T-2 the close of the
+     * symbol's previous CONSUMED bar, so the next consumed bar books against the last consumed close.
      */
     Result<FinalizationResult> finalize_previous_day(
         const std::vector<Position>& previous_positions,
         const std::unordered_map<std::string, double>& t1_close_prices,
         const std::unordered_map<std::string, double>& t2_close_prices,
         double previous_portfolio_value,
-        double commissions = 0.0);
+        double commissions = 0.0,
+        UnrealizedPolicy unrealized_policy = UnrealizedPolicy::SETTLED,
+        const std::unordered_set<std::string>& zero_pnl_symbols = {});
 
     /**
      * Calculate PnL for current day positions
@@ -97,18 +231,12 @@ public:
     }
 
     /**
-     * Get total cumulative PnL
-     */
-    double get_total_pnl() const {
-        return cumulative_total_pnl_;
-    }
-
-    /**
      * Clear all PnL tracking for new day
      */
     void reset_daily_tracking() {
         position_daily_pnl_.clear();
         position_realized_pnl_.clear();
+        position_unrealized_pnl_.clear();
         cumulative_daily_pnl_ = 0.0;
     }
 
@@ -120,17 +248,32 @@ public:
     }
 
     /**
-     * Helper to get point value for a symbol
-     * Uses InstrumentRegistry with accurate fallback values
+     * Helper to get point value for a symbol: the InstrumentRegistry's multiplier (metadata
+     * "Contract Size"). A futures symbol the registry does not hold returns 0 (its P&L is not
+     * booked) with an ERROR naming it once; there is no guessed fallback multiplier.
      */
     double get_point_value(const std::string& symbol) const;
 
-private:
     /**
-     * Get fallback multiplier for known symbols
-     * These are calculated as: minimum_price_fluctuation / tick_size
+     * @brief Which asset class this manager's unregistered symbols belong to.
+     *
+     * Only consulted when a symbol is NOT in the InstrumentRegistry. An equity is
+     * one share per unit, point value 1.0 (a real equity ticker must
+     * never inherit a futures multiplier). A future has no answer without its
+     * metadata row: point value 0 and an ERROR (CM1).
+     *
+     * The default is FUTURE; the equity runner sets EQUITY once at startup.
      */
-    double get_fallback_multiplier(const std::string& symbol) const;
+    void set_asset_type(AssetType asset_type) {
+        asset_type_ = asset_type;
+    }
+
+    AssetType asset_type() const {
+        return asset_type_;
+    }
+
+private:
+    AssetType asset_type_ = AssetType::FUTURE;
 };
 
 } // namespace trade_ngin

@@ -1,0 +1,71 @@
+// include/trade_ngin/strategy/trend_estimator_record.hpp
+#pragma once
+
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "trade_ngin/core/record_file.hpp"
+#include "trade_ngin/strategy/trend_estimator.hpp"
+
+namespace trade_ngin {
+
+/**
+ * @brief A trend sleeve's own record of the estimators it computed, one row per symbol per signal
+ *        bar, for the acceptance comparison against the reference implementation.
+ *
+ * Written only when the environment names a directory (TRADE_NGIN_SERIES_DUMP_DIR, the consumed
+ * series record's variable); a production run never sets it, and without it nothing is opened,
+ * written or logged. The file is <dir>/estimator_<strategy id>.csv, written the way record_file.hpp
+ * states, one header line when it is created. Every value is printed with seventeen significant digits.
+ *
+ * Columns: the signal bar's date; the symbol; the bars the window held and the values behind the
+ * long-run mean; the annualisation factor; sigma_short, sigma_long, sigma (the sizing volatility)
+ * and the forecast's volatility; the attenuation; the combined forecast; the capital, weight,
+ * multiplier and raw close the position was sized on; the position before any limit; 1 when the
+ * equity slow rule set a negative combined forecast to 0 on this bar; then each pair's scaled
+ * forecast, in the configured order (nan for a pair removed from the contract by
+ * trading_rule_removals). The forecast column is the RULED forecast.
+ */
+inline void append_trend_estimator_record(const std::string& strategy_id, const std::string& date,
+                                          const std::string& symbol,
+                                          const trend_estimator::Estimate& estimate,
+                                          const std::vector<std::pair<int, int>>& pairs,
+                                          const std::vector<std::pair<int, int>>& symbol_pairs,
+                                          double forecast, double capital, double weight,
+                                          double multiplier, double price,
+                                          double optimal_position, bool slow_rule_zeroed) {
+    const char* dir = std::getenv("TRADE_NGIN_SERIES_DUMP_DIR");
+    if (dir == nullptr || *dir == '\0') return;
+    const std::string name = "estimator_" + strategy_id + ".csv";
+    std::string header =
+        "date,symbol,window_bars,long_values,factor,sigma_short,sigma_long,sigma,"
+        "forecast_sigma,attenuation,forecast,capital,weight,multiplier,price,"
+        "optimal_position,slow_rule_zeroed";
+    for (const auto& [fast, slow] : pairs) {
+        header += ",scaled_" + std::to_string(fast) + "_" + std::to_string(slow);
+    }
+    std::FILE* out = record_file::open_rows(dir, name, header);
+    if (out == nullptr) return;
+    std::fprintf(out, "%s,%s,%zu,%zu,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%d",
+                 date.c_str(), symbol.c_str(), estimate.window_bars, estimate.long_values,
+                 estimate.factor, estimate.sigma_short, estimate.sigma_long, estimate.sigma,
+                 estimate.forecast_sigma, estimate.attenuation, forecast, capital, weight,
+                 multiplier, price, optimal_position, slow_rule_zeroed ? 1 : 0);
+    // One column per pair of the sleeve. `estimate.scaled` follows `symbol_pairs`, the pairs this
+    // contract runs; a pair removed from the contract (trading_rule_removals) prints nan.
+    for (const auto& pair : pairs) {
+        double scaled = std::numeric_limits<double>::quiet_NaN();
+        for (std::size_t k = 0; k < symbol_pairs.size() && k < estimate.scaled.size(); ++k) {
+            if (symbol_pairs[k] == pair) scaled = estimate.scaled[k];
+        }
+        std::fprintf(out, ",%.17g", scaled);
+    }
+    std::fprintf(out, "\n");
+    record_file::close_rows(out, dir, name);
+}
+
+}  // namespace trade_ngin

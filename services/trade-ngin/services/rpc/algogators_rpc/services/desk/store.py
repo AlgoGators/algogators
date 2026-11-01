@@ -1,0 +1,213 @@
+"""Read side of GetRunStatus: the facts Postgres holds about one book's run on one date.
+
+The servicer depends only on the RunStatusStore protocol, so tests pass a fake. The Postgres
+implementation reads:
+
+* trading.live_run_metadata rows for (portfolio_id, date). Columns on main
+  (PostgresDatabase::store_live_run_metadata): date, strategy_id, portfolio_id,
+  strategy_allocations, portfolio_config, strategy_configs, plus created_at. A run's refusal is
+  a key in portfolio_config (`risk_refusal`, `strict_assertion`; run_metadata_marks.hpp).
+  published_by / published_at arrive with the publish migration (022), publish_source / sent_at
+  with 027 (contract C7); until then they are absent and reported as such.
+* trading.live_results for the same key: a completed run writes that row last
+  (scripts/check_live_trading.py), so its presence is the "finished" signal.
+
+Optional columns are discovered from information_schema on every call, so a migration that
+adds them takes effect without restarting the agent.
+
+GetDeskRisk (contract C9) reads the day's qt row of trading.live_results: book_source,
+risk_detail (the engine's record of the last run of the book, risk.py) and the leverage and
+margin readings of the stored book.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+from dataclasses import dataclass, field
+from typing import Optional, Protocol, Sequence
+
+from .config import CONNECT_TIMEOUT_S, DbConfig
+from .risk import DeskRiskRow, MarginInputs
+
+METADATA_TABLE = ("trading", "live_run_metadata")
+RESULTS_TABLE = ("trading", "live_results")
+_OPTIONAL_METADATA_COLUMNS = ("created_at", "published_by", "published_at", "publish_source",
+                              "sent_at")
+
+
+class StoreError(RuntimeError):
+    """The database could not answer. The message is safe to return to the caller."""
+
+
+@dataclass(frozen=True)
+class MetadataRow:
+    portfolio_config: Optional[dict]
+    created_at: Optional[dt.datetime] = None
+    published_by: Optional[str] = None
+    published_at: Optional[dt.datetime] = None
+    publish_source: Optional[str] = None
+    sent_at: Optional[dt.datetime] = None
+
+
+@dataclass(frozen=True)
+class RunFacts:
+    metadata: Sequence[MetadataRow] = field(default_factory=tuple)
+    # True when the publish columns exist on live_run_metadata.
+    has_publish_columns: bool = False
+    has_results: bool = False
+    results_written_at: Optional[dt.datetime] = None
+
+
+class RunStatusStore(Protocol):
+    def run_facts(self, portfolio_id: str, date: dt.date) -> RunFacts: ...
+
+    def desk_risk_row(self, portfolio_id: str, date: dt.date) -> Optional[DeskRiskRow]:
+        """The day's qt row of trading.live_results (the newest, should a portfolio hold several
+        strategies), None when there is none."""
+
+    def margin_inputs(self, portfolio_id: str, date: dt.date) -> MarginInputs:
+        """Each contract's initial margin and the day's equity, for the margin cap on a requested
+        book (risk.book_margin)."""
+
+
+class PostgresRunStatusStore:
+    def __init__(self, db: DbConfig, connect_timeout: int = CONNECT_TIMEOUT_S):
+        self._db = db
+        self._connect_timeout = connect_timeout
+
+    def _connect(self):
+        import psycopg  # imported here so the pure parts of the package need no driver
+
+        return psycopg.connect(**self._db.conninfo_kwargs(self._connect_timeout),
+                               autocommit=True)
+
+    @staticmethod
+    def _columns(cur, schema: str, table: str) -> set:
+        cur.execute("SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = %s AND table_name = %s", (schema, table))
+        return {r[0] for r in cur.fetchall()}
+
+    def run_facts(self, portfolio_id: str, date: dt.date) -> RunFacts:
+        from psycopg import sql
+
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                meta_cols = self._columns(cur, *METADATA_TABLE)
+                if not meta_cols:
+                    raise StoreError("table trading.live_run_metadata not found")
+                present = [c for c in _OPTIONAL_METADATA_COLUMNS if c in meta_cols]
+                # Timestamps are read as timestamptz (a no-op on a timestamptz column; on a plain
+                # timestamp, through the session zone, as the watchdog does: R12).
+                select = [sql.Identifier("portfolio_config")] + [
+                    sql.SQL("{}::timestamptz").format(sql.Identifier(c)) if c.endswith("_at")
+                    else sql.Identifier(c) for c in present]
+                order = sql.SQL(" ORDER BY created_at") if "created_at" in present else sql.SQL("")
+                cur.execute(
+                    sql.SQL("SELECT {} FROM trading.live_run_metadata "
+                            "WHERE portfolio_id = %s AND date = %s{}")
+                    .format(sql.SQL(", ").join(select), order),
+                    (portfolio_id, date))
+                rows = []
+                for rec in cur.fetchall():
+                    values = dict(zip(["portfolio_config"] + present, rec))
+                    rows.append(MetadataRow(
+                        portfolio_config=values["portfolio_config"],
+                        created_at=values.get("created_at"),
+                        published_by=values.get("published_by"),
+                        published_at=values.get("published_at"),
+                        publish_source=values.get("publish_source"),
+                        sent_at=values.get("sent_at")))
+
+                res_cols = self._columns(cur, *RESULTS_TABLE)
+                has_results, written_at = False, None
+                if res_cols:
+                    if "created_at" in res_cols:
+                        # created_at is timestamp without time zone, written in the writer's
+                        # session zone; read through this session's zone to UTC (R12, as the
+                        # watchdog does).
+                        cur.execute("SELECT count(*), max(created_at)::timestamptz "
+                                    "FROM trading.live_results "
+                                    "WHERE portfolio_id = %s AND date = %s", (portfolio_id, date))
+                        n, written_at = cur.fetchone()
+                    else:
+                        cur.execute("SELECT count(*) FROM trading.live_results "
+                                    "WHERE portfolio_id = %s AND date = %s", (portfolio_id, date))
+                        n = cur.fetchone()[0]
+                    has_results = n > 0
+                return RunFacts(metadata=tuple(rows),
+                                has_publish_columns={"published_by", "published_at"} <= set(present),
+                                has_results=has_results, results_written_at=written_at)
+        except StoreError:
+            raise
+        except Exception as exc:  # psycopg errors carry no credentials, but keep only the class
+            raise StoreError(f"database error ({type(exc).__name__})") from exc
+
+    def desk_risk_row(self, portfolio_id: str, date: dt.date) -> Optional[DeskRiskRow]:
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cols = self._columns(cur, *RESULTS_TABLE)
+                if not cols:
+                    raise StoreError("table trading.live_results not found")
+                if not {"portfolio_type", "book_source", "risk_detail"} <= cols:
+                    return None  # before migrations 020/021: no desk books to report on
+                order = " ORDER BY created_at DESC" if "created_at" in cols else ""
+                def opt(name):
+                    return name if name in cols else "NULL"
+                cur.execute("SELECT book_source, risk_detail, portfolio_leverage, net_leverage, "
+                            "margin_cushion, equity_to_margin_ratio, " + opt("risk_scale") + ", "
+                            + opt("margin_posted") + ", " + opt("current_portfolio_value") +
+                            " FROM trading.live_results "
+                            "WHERE portfolio_id = %s AND date = %s AND portfolio_type = 'qt'"
+                            + order + " LIMIT 1", (portfolio_id, date))
+                rec = cur.fetchone()
+                if rec is None:
+                    return None
+                source, detail, gross, net, cushion, e2m, scale, margin, equity = rec
+
+                def num(x):
+                    return None if x is None else float(x)
+                return DeskRiskRow(book_source=source,
+                                   risk_detail=detail if isinstance(detail, dict) else None,
+                                   gross_leverage=num(gross), net_leverage=num(net),
+                                   margin_cushion=num(cushion), equity_to_margin=num(e2m),
+                                   risk_scale=num(scale), initial_margin=num(margin),
+                                   equity=num(equity))
+        except StoreError:
+            raise
+        except Exception as exc:
+            raise StoreError(f"database error ({type(exc).__name__})") from exc
+
+    def registry_desk_editable(self, portfolio_id: str) -> Optional[bool]:
+        """D-52: trading.strategy_registry.desk_editable of the portfolio's active row (what
+        AlgoLens reads), or None when the column or the row is absent."""
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                if "desk_editable" not in self._columns(cur, "trading", "strategy_registry"):
+                    return None
+                cur.execute("SELECT desk_editable FROM trading.strategy_registry "
+                            "WHERE portfolio_id = %s AND is_active "
+                            "ORDER BY sort_order, id LIMIT 1", (portfolio_id,))
+                row = cur.fetchone()
+                return None if row is None or row[0] is None else bool(row[0])
+        except Exception as exc:
+            raise StoreError(f"database error ({type(exc).__name__})") from exc
+
+    def margin_inputs(self, portfolio_id: str, date: dt.date) -> MarginInputs:
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute('SELECT "Databento Symbol", "Overnight Initial Margin" '
+                            "FROM metadata.contract_metadata")
+                margins = {str(sym): float(m) for sym, m in cur.fetchall()
+                           if sym is not None and m is not None}
+                # The fund's equity after today's costs: the day's qt row, else the model's book
+                # (the qt row is written by the morning run and every save).
+                cur.execute("SELECT current_portfolio_value FROM trading.live_results "
+                            "WHERE portfolio_id = %s AND date = %s "
+                            "AND portfolio_type IN ('qt', 'system') "
+                            "AND current_portfolio_value IS NOT NULL "
+                            "ORDER BY portfolio_type = 'qt' DESC LIMIT 1", (portfolio_id, date))
+                rec = cur.fetchone()
+                return MarginInputs(margins=margins,
+                                    equity=None if rec is None else float(rec[0]))
+        except Exception as exc:
+            raise StoreError(f"database error ({type(exc).__name__})") from exc

@@ -1,0 +1,28 @@
+{
+  "_description": "Risk configuration for EQUITY_MR_PORTFOLIO",
+  "_var_limit_rationale": "0.25 is kept. No portfolio-risk module runs on this book (modules below: type none), so this limit scales nothing. It acts only on the reporter (risk_reporting below), whose readings of the stored book are measurements: portfolio_var, max_correlation and jump_risk in live_results, and the risk lines of the email. On the 2026-06-15 to 2026-07-09 chain the reporter's annualised sigma of the stored book read 0.1924 to 0.3093. The earlier text argued from a VaR gate that scaled this book (risk_scale 0.39 at a limit of 0.10); that gate no longer runs here and its figures describe a retired path.",
+  "schema": 2,
+  "modules": [
+    {
+      "id": "no_portfolio_risk",
+      "type": "none",
+      "_reason": "Carver's risk system is a futures construction and on this book three quarters of it is furniture: over the measured chain the leverage and jump terms are the sole binding minimum on 0 of 14,632 evaluations and the leverage multiplier never falls below 1.000000 at all, and the correlation term can only fire when the book holds two or more non-zero names, which is 2 of 19 dated rows. What was left was a VaR limit whose 0.25 is a documented equity-specific calibration rather than a Carver parameter. The book is still MEASURED: risk_reporting below is unchanged, so every risk column of live_results and the email still reports.",
+      "_ruled_by": "HD",
+      "_ruled_on": "2026-09-18"
+    }
+  ],
+  "risk_reporting": {
+    "type": "carver",
+    "window": "all_bars",
+    "var_limit": 0.25,
+    "jump_risk_limit": 0.08,
+    "max_correlation": 0.7,
+    "max_gross_leverage": 1,
+    "max_net_leverage": 1,
+    "confidence_level": 0.99,
+    "lookback_period": 252,
+    "_note": "The live runners' snapshot RiskManager reads this block through AppConfig::risk_config; on day one it mirrors the gate."
+  },
+  "max_drawdown": 0.3,
+  "max_leverage": 1
+}

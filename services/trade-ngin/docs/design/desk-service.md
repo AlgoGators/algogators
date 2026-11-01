@@ -1,0 +1,349 @@
+# desk service
+
+The QT desk's command channel from AlgoLens to the engine. Decided 2026-10-08 (QT plan, section
+3b, "gRPC command channel"). `docs/design/qt-contract.md` sections 4 and 6 are binding.
+
+It is one service on the engine's shared gRPC server (`rpc.md`), which provides the port, the
+version header check, health, call logs and shutdown. Before 2026-10-09 it ran as its own
+`desk-agent` process; the code moved unchanged into `services/rpc/algogators_rpc/services/desk/`.
+
+## Contract
+
+`proto/algogators/desk.proto`, package `algogators.desk`, API `desk`, version in the file's
+header block (`Version: 1.2.0`; 1.1.0 added RunStatus `publish_source` and `sent_at` for the
+daily cutoff, contract C7; 1.2.0 added Rescind, contract C8; 1.3.0 added GetDeskRisk, contract
+C9; 1.4.0 added its per-limit checks; 1.5.0 its multipliers and the C10 approval flows; 1.6.0 the publish gate of decision 5). Every call sends `x-algogators-api-version: desk=1.6.0` (any `1.x.y`
+is accepted, so a 1.0.0 client still works; see `rpc.md`). The engine owns the file. AlgoLens vendors it byte for byte
+at a pinned trade-ngin commit and commits the stubs it generates.
+
+Until AlgoLens moves over, the server also answers the old name `algogators.qt.v1.DeskService`
+(same messages and field numbers, no header needed). That legacy name is removed in the next
+release.
+
+| RPC | Row kind (`audit_id`) | What the desk does |
+|---|---|---|
+| `GetRunStatus` | n/a | Reads model-run state for one book and day |
+| `RunDesk` | `save` | Engine `--desk` |
+| `RequestOverride` | `override_request` | In Python: token, expiring at 10:00 New York on the book date (D-13), e-mail to `QT_APPROVERS` |
+| `RecordDecision` | `override_decision` (its `parent_id` is the request) | Checks; rejection -> `done {"approved":false}`; approval -> engine `--override` |
+| `Publish` | `publish` (`audit_id = 0`: newest pending publish row for the day) | The desk's approval (C7): engine `--publish` before 09:30 New York, `--publish --send-now` from 09:30; refused from 10:00 or on a published day |
+| `grpc.health.v1.Health/Check` | n/a | Liveness, for `""` and `algogators.desk.DeskService` (no version header) |
+
+How replies work:
+
+- Malformed input, such as a bad date, an `audit_id <= 0` or an empty reason, gets gRPC status
+  `INVALID_ARGUMENT` on every RPC. That is a caller bug.
+- A command the engine declines returns `status = COMMAND_STATUS_REFUSED` with a reason in
+  `message`. A command that broke returns `COMMAND_STATUS_FAILED`. Both are final: the row never
+  runs again, and to try again AlgoLens inserts a new row (contract C4). Repeating a call with
+  the same `audit_id` (after a timeout or `UNAVAILABLE`) is always safe.
+- No RPC reports success for work it did not do. A command whose row is pending is claimed
+  (`UPDATE ... SET status='running' WHERE id=%s AND status='pending'`) and queued, and the reply
+  is `ACCEPTED` at once (`RunDesk` also says `source = BOOK_SOURCE_DESK`). The outcome lands on
+  the row; AlgoLens polls it. A row that is done, refused or failed is never run again: the
+  reply is `ACCEPTED` with its current status in `message`. A row that is running is left alone
+  while a job of this process owns it or it may belong to an engine started by hand; a
+  `running` row nobody is working on is put back to `pending` and run (see "Idempotency and
+  recovery").
+- A call that does not match its row (unknown id, another kind, another portfolio or date) is
+  `REFUSED` and the row is left alone. A rejected decision answers `DONE`.
+- `GetRunStatus` returns `UNAVAILABLE` when the database cannot answer; so do the commands.
+
+### Commands
+
+- **Engine jobs.** The desk maps `portfolio_id` to the directory under
+  `$TRADING_CONFIG_DIR/portfolios/` (default `/app/config`) whose `portfolio.json` names it (none
+  or several: the row is refused), then runs, in `QT_ENGINE_CWD` (default `/app`):
+
+  ```
+  flock $QT_LOCK_DIR/<portfolio_id>.lock $QT_ENGINE_BINARY --desk|--override|--publish|--fallback \
+        --portfolio-config <dir> --date YYYY-MM-DD --audit-id <row id> [--send-now]
+  ```
+
+  (`--fallback` only for a scheduler fallback row re-driven here, see "The daily cutoff".)
+
+  `QT_ENGINE_BINARY` defaults to `/app/build/bin/Release/live_portfolio_conservative` and
+  `QT_LOCK_DIR` to `/tmp/qt-locks`. The catch-up scheduler's model runs take the same lock. The binary
+  writes the row's status, result, message and finished_at itself (exit 0 = done, 2 = refused,
+  else failed). If the row is still `running` when it exits, the desk marks it `failed` with
+  `engine exited <rc> without recording an outcome: <last stderr line>`. After
+  `QT_JOB_TIMEOUT_S` (default 1800) the process group is killed and the row failed. The
+  process's stdout and stderr go to temporary files, never to memory; the last 40 lines of each
+  (read from the last 64 KiB) go to the server log.
+- **One job at a time per portfolio.** Each portfolio has a FIFO queue and a worker thread;
+  different portfolios run concurrently.
+- **Override e-mail** (contract C1). `token = secrets.token_urlsafe(32)`. The e-mail goes to
+  `QT_APPROVERS="vp=<email>,president=<email>"` (both required, else the row fails) with the link
+  `$QT_APPROVE_URL_BASE?token=<token>` (default `https://algolens.algogators.com/qt/approve`) and
+  a per-symbol table: model book (system), desk request (qt_proposal), engine desk result (qt)
+  and `moved_by`. It is sent through the portfolio's `email.json`. Then one UPDATE stores
+  `token_hash = sha256(token)`, `token_expires_at = now() + 48 h` and the result
+  `{"emailed":["vp","president"], "emailed_at":"<UTC ISO>"}`, and only then is the row marked
+  done. A request re-driven with `token_hash` already set is marked done
+  `already e-mailed; not sent again`: no new token, no second mail. A crash between the send and
+  that UPDATE leaves no token (the mailed link cannot work) and the re-drive mails a fresh one.
+- **E-mail disabled.** Only `QT_EMAIL_DISABLED=1` disables the mail. Then the row's result
+  carries it, link and token included
+  (`{"emailed":[], "email_disabled":true, "email":{"to","subject","body"}}`), so an operator can
+  still approve. Any other problem (no `email.json`, `"enabled": false`, empty or `YOUR_...`
+  credentials, no `smtp_host`) fails the row with `override e-mail not sent: <why>. ...` and
+  stores no token.
+- **Rescind** (contract C8, desk.proto 1.2.0). A `rescind` row runs in Python on the portfolio's
+  job queue, under `$QT_LOCK_DIR/<portfolio_id>.lock` (waits up to 120 s, else the row fails with
+  nothing changed). From 09:30 New York on its date (the clock when it runs), on a day not
+  approved by the desk, or on a sent day it is refused. Otherwise one transaction clears
+  `published_by`, `published_at` and `publish_source` on the day's `live_run_metadata` rows and
+  finishes the row done (`command_store.rescind`). No engine process runs.
+- **Published days** (contract C3). A `save`, `override_request` or `override_decision` row for
+  a day whose `live_run_metadata.published_at` is set is refused before anything runs
+  (`... was published at ...; a published day is frozen`). A `publish` row on a published day
+  is refused too (`... was already published at ...`), unless its own result carries
+  `published_at` (a re-run of the row that approved the day goes on to its send); the engine
+  refuses a second publish as well.
+- **The approval** (contract C7, `services/desk/cutoff.py`). A desk `publish` row is the desk's
+  approval of its day D. A row created at or after 10:00 America/New_York on D is refused
+  (`the approval deadline for D passed at 10:00 New York; ...`), whenever it is dispatched.
+  Otherwise the engine runs `--publish` (freeze, `publish_source='desk'`, no e-mail) when the
+  dispatch is before 09:30 on D, and `--publish --send-now` (freeze and send at once) from
+  09:30. A row whose `requested_by` starts `system:fallback` is the scheduler's (it runs it
+  itself); re-driven here it runs `--fallback`, with `--send-now` only for
+  `system:fallback-10am` on today's date.
+- **Decision checks** (contract C2; the engine re-checks): the parent is an `override_request`
+  for the same portfolio and date; the decider is not the requester (case-insensitive) ->
+  `the requester may not approve their own request`; `approver_role` is vp or president;
+  `payload.approved` is a boolean; the request has its token and is `done`; its link had not
+  expired when the decision row was created; no other decision of the request is `done`
+  (`override request N was already decided (decision M)`) or `running`
+  (`... is being decided by decision M`); the day is not published. Decisions are claimed and
+  checked one at a time, so of two concurrent decisions on one request only one can run.
+  Migration 025 also allows only one pending, running or done decision per request.
+
+### GetDeskRisk (contract C9)
+
+Read-only, like GetRunStatus: `store.desk_risk_row` reads the day's qt row of
+`trading.live_results` (newest first), `risk.load_limits` the carver module of the portfolio's
+`risk.json` (resolved like the commands: the config directory whose `portfolio.json` names the
+portfolio; none found means no limits listed), and `risk.derive_desk_risk` names the breaches.
+A database that cannot answer is UNAVAILABLE.
+
+### GetRunStatus
+
+It reads `trading.live_run_metadata` (and `trading.live_results`) for `portfolio_id` and `date`.
+
+| State | Condition |
+|---|---|
+| `NOT_STARTED` | No metadata row |
+| `FAILED` | A row's `portfolio_config` has `strict_assertion` |
+| `REFUSED` | A row's `portfolio_config` has `risk_refusal` (portfolio, sleeve or sizing hold; the reason goes in `message`) |
+| `SUCCEEDED` | No mark, and the day's `live_results` row exists. A completed run writes that row last. |
+| `RUNNING` | No mark and no `live_results` row yet. A run that died midway also reads as RUNNING; the watchdog is what alerts on that. |
+
+These marks are the same ones `scripts/check_live_trading.py` reads (`run_metadata_marks.hpp`).
+
+- `started_at` is the earliest `created_at` of the day's metadata rows.
+- `finished_at` is the `created_at` of the day's `live_results` row.
+- `published_by` and `published_at` come from columns that only arrive with the publish
+  migration (022). The desk checks `information_schema` on every call. Until those columns
+  exist, `published` is false and the other two fields are unset.
+- `publish_source` (`desk`, `fallback`, `model-only`) and `sent_at` (1.1.0) come from migration
+  027's columns, read the same way: empty and unset before 027, and for days published before
+  it. Approved = `publish_source` desk; fallback = `publish_source` fallback; sent = `sent_at`
+  set.
+
+## Idempotency and recovery
+
+- Every mutating command carries `audit_id`, the `trading.position_overrides.id` row that
+  AlgoLens writes before it calls. That table is both the log and the queue; there is no job
+  table (ruling 26).
+- A repeated call with the same `audit_id` must not repeat the work. It returns the outcome
+  already recorded.
+- **Status moves** (contract C4, migration 025): pending -> running (the claim); running ->
+  done, refused or failed (the outcome); running -> pending only by this service's recovery,
+  inside a transaction that set `algogators.recovery = 'on'`. Terminal rows are final.
+- **Recovery** (`services/desk/recovery.py`, the background task `desk.redrive`, at startup and
+  every `QT_REDRIVE_INTERVAL_S`, default 60 s):
+  1. Startup: every `running` row no job of this process owns is an orphan of the previous
+     process and goes back to `pending` (`re-driven after agent restart`). If the database is
+     down at startup, every later pass retries this first, and nothing else runs until it has
+     succeeded.
+  2. Stale rows: a `running` row no job here owns goes back to `pending`
+     (`re-driven: stale running row with no live job`) when this process abandoned it (a
+     database error after the claim, or when the outcome could not be written) or when it is
+     older than `QT_JOB_TIMEOUT_S` + `QT_STALE_GRACE_S` (1800 + 300 s, by the database clock).
+     The age limit spares an engine run started by hand with `--audit-id`.
+  3. Every pending row is dispatched by kind, oldest first, so a call dropped by a restart or a
+     gRPC outage loses nothing.
+- An RPC on a `running` row that step 1 or 2 would requeue requeues it and runs it at once, so
+  a retry after a database error is not answered "already running" forever.
+- The claim makes double dispatch impossible. The engine must therefore tolerate re-running a
+  command whose earlier attempt died midway.
+
+## Scheduler: model runs, the 09:30 send, the 10:00 fallback (contracts C6, C7)
+
+The QT model runs, the 09:30 send and the 10:00 fallback are scheduled by the desk service
+itself: the background task `desk.catchup` (`services/desk/catchup.py`), not a host cron. It
+already has the database, the SMTP settings and the locks.
+
+### The daily cutoff (C7, from 2026-10-09)
+
+Every calendar day D, weekends and holidays included, New York time. For each portfolio in
+`QT_CATCHUP_PORTFOLIOS`, under its flock, a pass takes one step at a time, each decided from the
+database and the clock (a pass that runs late, 10:07, still does what 10:00 would have):
+
+| Step | When | What |
+|---|---|---|
+| fallback of a past day | the newest qt day < today is unpublished | publish row `system:fallback-catchup` (inserted pending, moved to running in one transaction, held in the dispatcher while it runs), engine `--fallback` without `--send-now`: qt reset to the model's book, published `publish_source='fallback'`, never e-mailed (`send_skipped='past day'`); alert `caught_up` once |
+| model run | the next day has no book; today's not before `QT_CATCHUP_TODAY_NOT_BEFORE` (06:45) | `scripts/qt_model_run.sh`'s command; a failure alerts and is retried after `QT_MODEL_RETRY_MIN` (15). On the model twin each day written is published `system:model-only` at once |
+| model book check | from `QT_MODEL_ALERT_AT` (08:30) | no book for today: alert `model_not_done` |
+| send | today is published, `sent_at` is NULL, from 09:30 | engine `--send --date D` (from the stored rows, once); skipped with `QT_EMAIL_DISABLED=1`, without SMTP settings, or when `email.json` has no `to_emails`; a failure alerts `send_failed` and is retried after 15 min |
+| fallback of today | today is unpublished at 10:00 | publish row `system:fallback-10am`, engine `--fallback --send-now`; alert `fallback` ("QT did not approve <portfolio> <D>; the model's book was sent at HH:MM"). An open publish row of the day (the desk's approval being run) makes it wait for the next pass; a refusal "already published" is not an alert |
+
+The 24 h unpublished reminder and the trading calendar (`holidays.json`) are gone from the
+scheduler: every day is published by 10:00, and every day runs from 06:45 (the engine still
+refuses a feed hole, C5).
+
+### The data-driven run (QT_EVENING_RUN=1, the default; issues #191 and #192)
+
+The variable keeps its first name. data-ngin pulls at 04:30 ET once the vendor's ~8 h delayed
+historical data has bar D (on day T, bar T-1) and upserts `ops.data_ready` (migration 028) per
+(dataset, bar date), around 04:35-05:00. So normally T is today and today's model run is the
+primary run, gated on the data. Recommended host settings: `QT_CATCHUP_TODAY_NOT_BEFORE=04:30`,
+`QT_CATCHUP_WINDOW=04:00-22:00`, `QT_CATCHUP_BUSY_WINDOW=04:30-10:30` (the code defaults are the
+`QT_EVENING_RUN=0` schedule's). Each pass reads the newest `futures_ohlcv_1d` row, bar
+date D, and builds the books of T, the next trading day after D on the engine's calendar
+(`holidays.json`; Friday, Saturday and Sunday bars all build Monday, holidays skipped):
+
+| Step | When | What |
+|---|---|---|
+| gate | every build | `complete`, or `partial` with every missing symbol's last bar within `live.data_staleness_tolerance_days` of T-1; else alert `data_failed` / `data_stale` and build nothing. The engine's FEED_HOLE guard now refuses a future run date as well (`run_date_is_live`); a refusal alerts `refused` |
+| build ahead | T is after today (e.g. Saturday's run, after its 10:00 fallback, with weekend bars in), today is done (desk: published) and T has no book | model runs of each calendar day up to T. On the desk portfolio (D-63) the chain stops at the first day after today that is not published: that day waits, once it is today, for the desk or its 10:00 fallback with the alert, like a weekday, and the build goes on after it. Since 2026-10-18 (Dom) each day built gets the review e-mail at once and the desk may approve it at once, which builds the next: Monday's books can be built on Saturday once Saturday and Sunday are approved. Only the desk publishes a day ahead; the fallback acts on today (`system:fallback-nontrading` is no longer written). The twin's days ahead of today stay unpublished until they are today |
+| rebuild | T unpublished, its system book older than the row's `finished_at` | model run of T again (a re-pull). The desk's saved edits are kept by the engine (`QT_SEED kept`: system rebuilt, qt_proposal and qt not). A published T is never rebuilt |
+| review e-mail | desk portfolio, T or a day built on the way to it, unpublished, before its 10:00, not yet mailed for this build | `QT_REVIEW_RECIPIENTS` via the portfolio's `email.json` SMTP: T, D, each symbol's new target against the last published day's book with the change, moved_by, missing symbols, desk edits kept, supersedes, the AlgoLens link and "Approve before 09:30 ET or the model book is sent at 10:00." Recorded in `$QT_LOG_DIR/qt-review-mail.json`; with `QT_EMAIL_DISABLED=1` the body goes to `qt-review-mail.log` |
+| today's run | today has no book, from `QT_CATCHUP_TODAY_NOT_BEFORE` | runs once a usable row exists for the previous trading day; before `QT_DATA_READY_ALERT_AT` (06:00) it waits quietly, from then on it alerts `data_not_ready` and waits; a failed or stale row alerts at once |
+| data-ready check | every day, from `QT_DATA_READY_ALERT_AT` (06:00) | no non-failed row for the previous trading day: alert `data_not_ready` once a day |
+
+The 09:30 send, the 10:00 fallback and the approval rules are unchanged. `QT_EVENING_RUN=0`
+restores the schedule above exactly.
+
+### Passes, logs and the watchdog
+
+- **When.** The task ticks every minute; a pass is due once per slot inside
+  `QT_CATCHUP_WINDOW` (`06:30-22:00`), America/New_York, every day: every
+  `QT_CATCHUP_BUSY_EVERY_MIN` (5) minutes inside `QT_CATCHUP_BUSY_WINDOW` (`06:30-10:30`), every
+  `QT_CATCHUP_EVERY_MIN` (30) after. A pass holds `$QT_LOCK_DIR/qt-catchup.lock`; a second pass
+  (the watchdog) skips while one runs.
+- **What.** For each config directory in `QT_CATCHUP_PORTFOLIOS`
+  (`qt_conservative`; the model twin is retired, D-1) the steps of "The daily cutoff" above. `last` is the
+  newest date with a book in `trading.live_results` (`qt` on a desk-editable portfolio, `system`
+  otherwise; a desk-editable portfolio with no qt book yet starts after its newest system day,
+  ruling 27).
+- **How.** The model run is exactly `scripts/qt_model_run.sh`'s command,
+  `$QT_ENGINE_BINARY --portfolio-config <dir> --date <day>` in `QT_ENGINE_CWD`; the fallback and
+  the send run the same binary with `--fallback ... --audit-id <row> [--send-now]` and `--send`.
+  Each is bounded by `QT_JOB_TIMEOUT_S`. The scheduler takes `$QT_LOCK_DIR/<portfolio_id>.lock`
+  itself (flock(2), the lock flock(1) takes for desk jobs; it waits up to
+  `QT_CATCHUP_LOCK_WAIT_S`, 600 s, then skips the portfolio until the next pass) and re-reads the
+  database under it, so nothing another run has just done is done twice. A fallback row the
+  engine left `running` is failed by the scheduler.
+- **Alerts.** A refusal, failure, timeout, missing book, the fallback, a caught-up day, a model
+  book missing at 08:30 or a configuration problem writes
+  `ALERT <portfolio> <date> <reason>: <message>` to `$QT_LOG_DIR/qt-catchup.log` and e-mails the
+  president of `QT_APPROVERS` through the portfolio's `email.json` (not when
+  `QT_EMAIL_DISABLED=1` or the SMTP settings are unusable; the log line says why). At most one
+  alert per (portfolio, date, reason) per New York day (`$QT_LOG_DIR/qt-alerts.json`); a failed
+  step is retried after 15 minutes. The `unpublished_reminder` is gone (C7).
+- **Missed sends (D-40).** A day published but never e-mailed before it passed is not sent
+  late; the president is alerted (`missed_send`), once a day for three days.
+- **From outside the container (D-39).** engine-rpc does not start unless `QT_APPROVERS` names
+  both the vp and the president. `deploy/qt_host_watchdog.py`, run by the host's cron every 5
+  minutes (`deploy/qt-engine.cron`), e-mails the president when the container is not running
+  or unhealthy, or when the scheduler's heartbeat is older than 15 minutes (06:30-10:30) or 75
+  minutes (to 22:00), at most once an hour per problem, and once when it recovers.
+- **Logs.** `$QT_LOG_DIR` (default `/var/log/qt-engine`, the host's
+  `/home/ubuntu/qt-engine/logs`): `qt-catchup.log` (passes, decisions, alerts),
+  `qt-engine-runs.log` (the full output of every model run), `qt-catchup.heartbeat` (the last
+  pass) and `qt-alerts.json`. `deploy/qt-engine.logrotate` rotates them daily into dated files.
+- **Watchdog.** `deploy/qt-engine.cron` runs
+  `docker exec engine-rpc /app/scripts/qt_catchup.sh watchdog` every 5 minutes. Inside the
+  window, if the heartbeat is older than 15 minutes (06:30-10:30) or 75 minutes (after), it runs
+  one pass through the same code and locks, so the 09:30 send and the 10:00 fallback are at most
+  about 15 minutes late if the in-process scheduler is down. `qt_catchup.sh run-once` runs a
+  pass by hand at any hour.
+- `QT_CATCHUP_ENABLED=0` turns the scheduler off (then nothing runs the model, sends at 09:30
+  or falls back at 10:00).
+- Postgres stays the record. A reply is a convenience, never the record of anything.
+
+## Deployment
+
+- **One image, two entrypoints.** The default command (none) runs cron and the live runner,
+  exactly as before. `command: rpc` runs the gRPC server with the desk on it
+  (`scripts/docker-entrypoint.sh`; `desk-agent` is an alias for one release).
+- **Container and port.** Container `engine-rpc`, listening on `0.0.0.0:50051` (`RPC_LISTEN`),
+  plaintext, on the private Docker network `qt` shared with `algolens-backend`, with the network
+  alias `desk-agent` for one release. No host port is published.
+- **Compose.** See `deploy/engine-rpc.compose.yml`: `init: true` (tini reaps the engine and
+  flock children), `mem_limit 512m` (the engine runs inside the container),
+  `./config:/app/config:ro`, `QT_APPROVERS` passed through, a `qt-locks` volume for the flock
+  files, `./logs:/var/log/qt-engine` for the catch-up logs, json-file log limits (10 MB x 3;
+  never the Docker daemon's config), `restart: unless-stopped`, and a gRPC healthcheck in place
+  of the image's cron healthcheck.
+- **Host files.** `deploy/qt-engine.cron` -> `/etc/cron.d/algogators-qt` (the watchdog; it
+  replaces the 10:15 model run) and `deploy/qt-engine.logrotate` ->
+  `/etc/logrotate.d/algogators-qt`.
+- **Health.** The container healthcheck dials a health-only port (`RPC_HEALTH_LISTEN`, default
+  `127.0.0.1:50052`) served by its own two threads, so slow calls on the main pool
+  (`RPC_MAX_WORKERS`, default 8) never fail it. Every database connection of the desk has a 5 s
+  connect timeout and a 30 s statement timeout.
+- **Database credentials.** The desk reads `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD` and
+  `DB_NAME`, the variables the watchdog reads and the entrypoint passes to cron. Without them it
+  reads the `database` block of `$TRADING_CONFIG_DIR/defaults.json` (default `/app/config`), the
+  same file the C++ runners load. If neither is complete, the server refuses to start. The
+  password is never logged.
+- **Logs.** One JSON object per line on stdout (`docker logs engine-rpc`). The approval token
+  and the SMTP password are never logged.
+- **Image.** The server is built in its own Docker stage (`rpc-build`): a venv installed from
+  wheels only, with stubs generated by `services/rpc/gen.sh`. The runtime stage adds `python3`
+  and copies `/opt/rpc`. The C++ build stage is unchanged.
+
+## Calling it from AlgoLens
+
+AlgoLens uses its shared client layer (`algolens/infrastructure/rpc/`), which caches one
+channel per address and adds the version header. The equivalent by hand:
+
+```python
+from algogators import desk_pb2 as pb, desk_pb2_grpc
+from algogators_rpc.client import versioned_channel     # adds x-algogators-api-version
+
+channel = versioned_channel("engine-rpc:50051")          # the `qt` network only
+desk = desk_pb2_grpc.DeskServiceStub(channel)
+
+status = desk.GetRunStatus(pb.RunStatusRequest(portfolio_id="CONSERVATIVE_PORTFOLIO",
+                                               date="2026-10-07"), timeout=5)
+if status.state != pb.RUN_STATE_SUCCEEDED:
+    ...  # D18: no desk window
+
+# Commands: write the position_overrides row first, then call with its id.
+reply = desk.RunDesk(pb.RunDeskRequest(portfolio_id="CONSERVATIVE_PORTFOLIO",
+                                       date="2026-10-07", audit_id=row_id,
+                                       requested_by=user_email), timeout=60)
+```
+
+Always set a deadline. If a call times out or comes back `UNAVAILABLE`, retry with the same
+`audit_id`. Treat `REFUSED` and `FAILED` as final; insert a new row to try again. `FAILED_PRECONDITION` is a version mismatch: fix the
+client.
+
+From the host, `scripts/qt_grpc_call.py` makes one call the same way (`scripts/qt_e2e.sh` uses
+it).
+
+## Regenerating stubs
+
+See `rpc.md`, "Local development". The stubs are build output: gitignored here, generated by
+the Docker build and by CI. Never edit generated files.
+
+## References
+
+- Plan section 3b: `qt-platform-analysis-and-plan.md`.
+- Decisions D1 to D22: `qt-platform-design.md`.
+- Numbered rulings: the QT platform master document of 2026-10-08.
+
+The proto's comments cite these. The first two files are not yet committed to this repo.
