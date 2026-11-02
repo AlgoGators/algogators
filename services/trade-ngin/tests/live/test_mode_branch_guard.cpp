@@ -421,6 +421,9 @@ const std::map<std::string, std::pair<const char*, std::vector<std::string>>> kL
     {"src/strategy/regime_detector.cpp",
      {"not on a live runner's path",
       {"std::chrono::system_clock::now(),"}}},
+    {"src/strategy/spread.cpp",
+     {"the initial last_update of a leg's position; spread is not on a live runner's path",
+      {"pos.last_update = std::chrono::system_clock::now();"}}},
     {"src/strategy/trend_following.cpp",
      {"the initial last_update of a position, overwritten with the run date before a "
       "store",
