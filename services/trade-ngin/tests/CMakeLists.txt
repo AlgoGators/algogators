@@ -107,6 +107,7 @@ set(TEST_SOURCES
     risk/test_risk_scale_report.cpp
     optimization/test_dynamic_optimizer.cpp
     backtest/test_transaction_cost_analysis.cpp
+    backtest/test_transaction_cost_attribution.cpp
     transaction_cost/test_transaction_cost_manager.cpp
     transaction_cost/test_cost_metadata_specs.cpp
     transaction_cost/test_spread_model.cpp
@@ -123,6 +124,7 @@ set(TEST_SOURCES
     live/corp_actions/test_denominator_range_db.cpp
     live/corp_actions/test_corp_action_query_bounds_db.cpp
     live/corp_actions/test_audit_log.cpp
+    live/corp_actions/test_audit_log_paths.cpp
     live/corp_actions/test_income.cpp
     live/corp_actions/test_broker_frame.cpp
     live/corp_actions/test_broker_frame_db.cpp
@@ -216,6 +218,7 @@ set(TEST_SOURCES
     portfolio/test_pm_netting.cpp
     storage/test_backtest_results_manager.cpp
     storage/test_live_results_manager.cpp
+    storage/test_results_manager_fanout.cpp
     storage/test_equity_fallback_stream_db.cpp
     storage/test_live_results_key_roundtrip_db.cpp
     live/test_live_historical_metrics.cpp
