@@ -50,7 +50,11 @@ endif()
 # resolve @rpath next to the loading binary. Without this, the build picks up
 # whatever rpath leaks from the environment (e.g. an active conda env's lib
 # dir) and binaries fail to find libtrade_ngin.dylib at launch.
-set(CMAKE_BUILD_RPATH "@loader_path")
+# macOS only: on Linux "@loader_path" means nothing, and mold reads an argument starting with
+# "@" as a response file and fails the link.
+if(APPLE)
+    set(CMAKE_BUILD_RPATH "@loader_path")
+endif()
 set(CMAKE_BUILD_WITH_INSTALL_RPATH OFF)
 
 # Find packages
