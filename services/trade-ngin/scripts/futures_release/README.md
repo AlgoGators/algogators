@@ -12,7 +12,7 @@ now writes as stored. Do not run them again: part A refuses a second run.
 
 Run `zsh scripts/futures_release/00_prerequisites.sh` first. It checks everything in this list that a machine can check.
 
-- AlgoGators/trade-ngin#282 is merged. `REF` below is its merge commit on `main`.
+- AlgoGators/trade-ngin#282 is merged, and it reached this repository in #98. `REF` below is the commit on `main` of AlgoGators/algogators that the daily image is built from at the release. Use one `REF` for the image and the seed, so the seed's engine is the daily engine. It must hold this folder as audited. A commit id from AlgoGators/trade-ngin does not exist here.
 - `config/defaults.json` has the production login. It is read at run time and never printed.
 - `config/databento.env` has the Databento key (the pull).
 - macOS (the scripts use `sed -i ''` and `md5`), with zsh, `zstd`, `curl`, `git`, cmake and the engine's build tools.
@@ -154,11 +154,11 @@ python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('per_co
 It must print `True ['MGC', 'SIL']`. Steps 13 to 15 do not read these files: they write their own config from
 `config_reference/`.
 
-**Step 11, the build.** It is `REF`, the merge of #282 into `main`, not the head of `main-rolls`. The new image is built from it
-and the daily jobs move to `new_algo_data` as AlgoGators/trade-ngin#275 says (its dry run first):
+**Step 11, the build.** It is `REF`. Build it from a linked worktree, not by checking out `REF` here: that would swap this folder for the one at `REF` while you are running it. The daily jobs then move to `new_algo_data` as AlgoGators/trade-ngin#275 says (its dry run first):
 
 ```
-git checkout <REF> && docker build -t trade-ngin -f Dockerfile .
+git worktree add --detach <worktree> <REF>
+docker build -t trade-ngin -f <worktree>/services/trade-ngin/Dockerfile <worktree>/services/trade-ngin
 ```
 
 The QT runs restart on that build, with step 10's configs. Until #275 is done the CONSERVATIVE book has no daily run on

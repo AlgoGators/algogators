@@ -86,7 +86,7 @@ Per step (each script checks its own change and prints PASS or FAIL):
 
 | Check | Must read |
 |---|---|
-| the cron's time zone | UTC |
+| the cron's time zone | America/New_York (the image's `TZ`) |
 | the production image's library versions (`ldd --version`, `ldd` of the runner) | recorded |
 | the server's free disk | room for the archive of the trading schema and four backtests |
 | the first CONSERVATIVE cron day on production, after AlgoGators/trade-ngin#275 moves the daily jobs to new_algo_data | its stored run_metadata settings equal `config_reference/` |
