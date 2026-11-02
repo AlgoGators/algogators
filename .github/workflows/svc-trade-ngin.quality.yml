@@ -38,12 +38,13 @@ jobs:
       run-clang-format: false
     secrets: inherit
 
-  # The engine image of every main commit that passes, tagged sha-<commit>. `prod` is a
-  # fast-forward of main, so svc-trade-ngin.deploy.yml finds this image and deploys it as is
-  # instead of building and testing the same commit again.
+  # The engine image of every main commit, tagged sha-<commit>. `prod` is a fast-forward of
+  # main, so svc-trade-ngin.deploy.yml finds this image and deploys it as is instead of building
+  # and testing the same commit again. Built alongside the tests rather than after them, which
+  # saves its 8 minutes: the deploy takes the image only when this whole run succeeded, so an
+  # image whose tests failed is pushed but never deployed.
   image:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    needs: [quality]
     uses: ./.github/workflows/_publish-container.yml
     with:
       path: services/trade-ngin

@@ -43,13 +43,15 @@ permissions:
 
 jobs:
   # `prod` is a fast-forward of main, and main already built and tested this commit
-  # (svc-trade-ngin.quality.yml pushes sha-<commit> after its tests pass). Deploy that image
-  # when it exists and the commit's rpc checks did not fail; otherwise build and test here.
+  # (svc-trade-ngin.quality.yml pushes sha-<commit> while its tests run). Deploy that image
+  # when main's quality run for the commit succeeded, waiting for it if it is still running,
+  # and the commit's rpc checks did not fail; otherwise build and test here.
   # A dry run always builds, since checking the build is what it is for.
   resolve:
     name: find main's image
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # Main's quality run can still be testing; waiting for it beats building the commit again.
+    timeout-minutes: 50
     permissions:
       contents: read
       packages: read
@@ -70,6 +72,18 @@ jobs:
         run: |
           if ! digest=$(docker buildx imagetools inspect "$REF" --format '{{json .Manifest}}' | jq -re .digest); then
             echo "No image for ${GITHUB_SHA::8} on main yet: building it here."
+            exit 0
+          fi
+          # The image is pushed alongside the tests, so it counts only once the run that pushed
+          # it has passed.
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/svc-trade-ngin.quality.yml/runs?head_sha=$GITHUB_SHA&event=push" \
+                  --jq '[.workflow_runs[] | select(.head_branch == "main")][0].id // empty')
+          if [ -z "$run" ]; then
+            echo "::warning::No main quality run for ${GITHUB_SHA::8}: building and testing here."
+            exit 0
+          fi
+          if ! gh run watch "$run" -R "$GITHUB_REPOSITORY" --interval 30 --exit-status >/dev/null; then
+            echo "::warning::main's quality run for ${GITHUB_SHA::8} did not pass: building and testing here."
             exit 0
           fi
           rpc=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/svc-trade-ngin.rpc.yml/runs?head_sha=$GITHUB_SHA&event=push" \
