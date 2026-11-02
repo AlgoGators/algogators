@@ -317,6 +317,27 @@ target_include_directories(trade_ngin_tests
 
 target_compile_definitions(trade_ngin_tests PRIVATE TESTING USE_DIRECT_DB_CONNECTION)
 
+# Every test file parses gtest, and most parse the same standard headers: compile them once.
+# Third-party and standard headers only, never trade_ngin's own: several tests include those
+# under `#define private public`, which a precompiled copy would not see.
+target_precompile_headers(trade_ngin_tests
+    PRIVATE
+        <gtest/gtest.h>
+        <algorithm>
+        <chrono>
+        <cmath>
+        <filesystem>
+        <fstream>
+        <map>
+        <memory>
+        <sstream>
+        <string>
+        <thread>
+        <unordered_map>
+        <vector>
+        <nlohmann/json.hpp>
+)
+
 target_link_libraries(trade_ngin_tests
     PRIVATE
     trade_ngin

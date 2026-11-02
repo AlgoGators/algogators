@@ -14,12 +14,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Google Test / Google Mock from source
-RUN git clone --depth 1 https://github.com/google/googletest.git /tmp/googletest && \
-    cmake -S /tmp/googletest -B /tmp/googletest/build && \
-    cmake --build /tmp/googletest/build -j"$(nproc)" --target install && \
-    rm -rf /tmp/googletest
-
 # Apache Arrow apt repository + dev headers
 RUN wget -qO /tmp/apache-arrow-apt-source.deb \
         "https://apache.jfrog.io/artifactory/arrow/ubuntu/apache-arrow-apt-source-latest-$(lsb_release -cs).deb" && \
@@ -69,8 +63,11 @@ RUN sed -i '1i\#include <algorithm>' src/core/logger.cpp && \
     sed -i '1i\#include <cmath>' tests/portfolio/mock_strategy.hpp && \
     sed -i '1i\#include <thread>' tests/portfolio/test_portfolio_manager.cpp
 
+# The test suite is not built here: CI runs it (svc-trade-ngin.quality.yml) before this image is
+# built, and nothing in the container runs it.
 RUN cmake -S /app -B /app/build \
         -DCMAKE_BUILD_TYPE=Release \
+        -DTRADE_NGIN_BUILD_TESTS=OFF \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DNLopt_DIR=/usr/lib/x86_64-linux-gnu/cmake/nlopt && \
     cmake --build /app/build --config Release -j"$(nproc)"
