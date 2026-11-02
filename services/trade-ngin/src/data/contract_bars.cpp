@@ -18,7 +18,7 @@ constexpr const char* kMonthCodes = "FGHJKMNQUVXZ";
 template <typename Field>
 std::optional<Day> optional_day(const Field& f) {
     if (f.is_null()) return std::nullopt;
-    return parse_ymd(f.as<std::string>());
+    return parse_ymd(f.template as<std::string>());
 }
 
 }  // namespace
