@@ -6,11 +6,14 @@ Usage: python3 sync.py [output.html] [--standalone]
 Read-only: it only reads GitHub (gh api graphql) and writes one HTML file."""
 import json,subprocess,re,sys,datetime,os
 HERE=os.path.dirname(os.path.abspath(__file__)); ORG="AlgoGators"
-REPOS=['trade-ngin','algogators','AlgoLens','algosystem','algogauge']
+# trade-ngin was archived after its open issues moved here on 2026-11-02 (GitHub transfers, so the old
+# links redirect and the order list's references were rewritten to the new numbers); its regime pull
+# requests are mirrored here as the trade-ngin-pr/* branches.
+REPOS=['algogators','AlgoLens','algosystem','algogauge']
 # data-ngin was archived on 2026-10-08; its open issues were migrated to the algogators mono repo,
 # each body starting '> Migrated from .../data-ngin/issues/N'. Old numbers are mapped to the new ones.
 OLD='data-ngin'; NEW='algogators'
-NAMES={'Faybioo':'Fabio','ChronoInferna':'Oliver','SivanRP':'Sivan','gabbypolito':'Gaby','pranavb05':'Pranav','jrile018':'John Riley','dominickdupuy':'Dom','Gannon-Stoner':'Gannon','pranavrevuri':'Pranav R.','raohemdutt':'HD','hdgit8':'HD','dependabot':'Dependabot'}
+NAMES={'Faybioo':'Fabio','ChronoInferna':'Oliver','SivanRP':'Sivan','gabbypolito':'Gaby','pranavb05':'Pranav','jrile018':'John Riley','dominickdupuy':'Dom','Gannon-Stoner':'Gannon','pranavrevuri':'Pranav R.','raohemdutt':'HD','hdgit8':'HD','XanderRobbins':'Xander','dependabot':'Dependabot'}
 PL={'equities':'equities','regime':'regime detection','data':'data','qt':'QT platform','monitoring':'run monitoring','ml':'ML models','spreads':'spreads','stats':'statistics and validation','audiences':'audiences and investor books','reporting':'reporting','testing':'unit testing','refactor':'refactor and benchmarking','hygiene':'CI and hygiene','futures':'futures strategy','website':'website'}
 LP={v:k for k,v in PL.items()}
 STATUSES=['In progress','PR open','Draft PR open','Fix written, no PR','Ready to start','Under review','Blocked','Parked','Reference','Done']
@@ -18,6 +21,15 @@ def gql(q):
     r=subprocess.run(['gh','api','graphql','-f','query='+q],capture_output=True,text=True,encoding='utf-8')
     if r.returncode: sys.exit('GitHub query failed: '+r.stderr[:400])
     return json.loads(r.stdout)['data']
+def paged(repo,conn,args,fields):
+    """Every node of one connection of a repository, 100 a page (a query returns at most 100)."""
+    nodes=[]; after=None
+    while True:
+        cur=',after:"%s"'%after if after else ''
+        c=gql('{repository(owner:"%s",name:"%s"){%s(%s,first:100%s){pageInfo{hasNextPage endCursor} nodes{%s}}}}'%(ORG,repo,conn,args,cur,fields))['repository'][conn]
+        nodes+=c['nodes']
+        if not c['pageInfo']['hasNextPage']: return nodes
+        after=c['pageInfo']['endCursor']
 def unref(t): return re.sub(r'AlgoGators/([\w-]+)#(\d+)',r'\1 #\2',t or '')
 def parse_status(comments):
     for c in reversed(comments):
@@ -40,8 +52,8 @@ def parse_status(comments):
 base=json.load(open(os.path.join(HERE,'base.json'),encoding='utf-8'))
 B={(i['repo'],i['n']):i for i in base['issues']}
 BP={(p['repo'],p['n']):p for p in base['prs']}
-# order of work: the pinned issue trade-ngin #153 lists every issue, top first
-ORDER_ISSUE=('trade-ngin',153)
+# order of work: the pinned issue algogators #156 (trade-ngin #153 until the move) lists every issue, top first
+ORDER_ISSUE=('algogators',156)
 def first_line(body):
     """The first line of an issue body that is not empty, without markdown markers, for the one-line summary."""
     for ln in (body or '').split('\n'):
@@ -60,14 +72,13 @@ for m in re.finditer(r'(?m)^\s*[-*]\s*(?:AlgoGators/([\w-]+))?#(\d+)',ob):
     RANK.setdefault((m.group(1) or ORDER_ISSUE[0],int(m.group(2))),len(RANK)+1)
 issues=[]; prs=[]; seen=set(); DATA={}
 for repo in REPOS:
-    DATA[repo]=gql('''{repository(owner:"%s",name:"%s"){
-      issues(states:OPEN,first:100){nodes{number title url createdAt updatedAt body assignees(first:10){nodes{login}} labels(first:30){nodes{name}}
-        blockedBy(first:20){nodes{number state repository{name}}} comments(last:25){nodes{body createdAt author{login}}}}}
-      pullRequests(states:OPEN,first:100){nodes{number title url createdAt updatedAt isDraft baseRefName headRefName mergeable additions deletions changedFiles author{login}
-        reviews(states:APPROVED,first:10){nodes{author{login}}} commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}'''%(ORG,repo))['repository']
+    DATA[repo]={'issues':{'nodes':paged(repo,'issues','states:OPEN','''number title url createdAt updatedAt body assignees(first:10){nodes{login}} labels(first:30){nodes{name}}
+        blockedBy(first:20){nodes{number state repository{name}}} comments(last:25){nodes{body createdAt author{login}}}''')},
+      'pullRequests':{'nodes':paged(repo,'pullRequests','states:OPEN','''number title url createdAt updatedAt isDraft baseRefName headRefName mergeable additions deletions changedFiles author{login}
+        reviews(states:APPROVED,first:10){nodes{author{login}}} commits(last:1){nodes{commit{statusCheckRollup{state}}}}''')}}
 MIG={}
 # open and closed: a migrated issue that is now closed still renames its old references
-allnew=gql('{repository(owner:"%s",name:"%s"){issues(first:100,states:[OPEN,CLOSED]){nodes{number body state}}}}'%(ORG,NEW))['repository']['issues']['nodes']
+allnew=paged(NEW,'issues','states:[OPEN,CLOSED]','number body state')
 for it in allnew:
     m=re.search(r'Migrated from https://github\.com/AlgoGators/%s/issues/(\d+)'%OLD,it['body'] or '')
     if m: MIG[int(m.group(1))]=it['number']
@@ -161,7 +172,7 @@ show('No priority label (shown as Needs triage)',[ref(i) for i in issues if i['s
 show("No 'project:' label",[ref(i) for i in issues if i['project']=='unsorted'])
 show('No assignee',[ref(i) for i in issues if not i['assignees']])
 show("No 'Status:' comment yet",[ref(i) for i in issues if not i['noteat']])
-show('Not on the order list (trade-ngin #153)',[ref(i) for i in issues if i['rank']>=9000])
+show('Not on the order list (algogators #156)',[ref(i) for i in issues if i['rank']>=9000])
 show('Marked Blocked but every linked blocker is closed',[ref(i) for i in issues if 'All linked blockers on GitHub are now closed.' in i['notes']])
 show('Closed since the last full read',[ref(i) for i in closed if (i['repo'],i['n']) not in {(c['repo'],c['n']) for c in base['issues'] if c['status']=='Closed'}])
 show('New pull requests with no disposition',[f"{p['repo']} #{p['n']} {p['title'][:70]} ({p['author']})" for p in prs if p['disp'].startswith('New:')])
