@@ -107,17 +107,19 @@ Topology, host bootstrap, cutover and rollback: [deployment/DEPLOYMENT.md](deplo
 
 ## SSH Access
 
-AlgoLens runs on the trade-ngin box. The key is `prod-deploy.pem`; it is **not in the repo**, so get it from a team member.
+AlgoLens runs on the production box, next to the engine. The host, the user and the SSH key are in
+the private ops runbook (AlgoGators/ops-private, production-box.md); the key is **not in any repository**, so get access from Dom.
 
 ```bash
-ssh -i "/path/to/prod-deploy.pem" ubuntu@ec2-18-118-225-224.us-east-2.compute.amazonaws.com
+ssh -i "/path/to/<key>" <user>@<production box>
 ```
 
-TLS for `algolens.algogators.com` stays on the old host (`ec2-user@ec2-18-226-98-126`, `dominick-pem.pem`), in `/etc/nginx/conf.d/algolens.conf`.
+The old host keeps a fallback nginx for `algolens.algogators.com` in `/etc/nginx/conf.d/algolens.conf`;
+its address and key are in the same runbook.
 
 On Windows, restrict the key file permissions first:
 ```powershell
-icacls "C:\path	o\prod-deploy.pem" /inheritance:r /grant:r "$($env:USERNAME):R"
+icacls "C:\path	o\<key>" /inheritance:r /grant:r "$($env:USERNAME):R"
 ```
 
 ### Useful server commands (trade-ngin box)

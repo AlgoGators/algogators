@@ -1,5 +1,5 @@
-# Production AlgoLens stack on the trade-ngin box (ubuntu@ec2-18-118-225-224,
-# private IP 172.31.23.190), next to trade-ngin and the data-ngin Airflow stack.
+# Production AlgoLens stack on the trade-ngin box (host and private IP: the private ops
+# runbook), next to trade-ngin and the data-ngin Airflow stack.
 #
 # Nothing is built here. deploy.sh exports BACKEND_IMAGE and FRONTEND_IMAGE
 # (ghcr.io/...@sha256:...), the digests CI built and pushed, and this file only

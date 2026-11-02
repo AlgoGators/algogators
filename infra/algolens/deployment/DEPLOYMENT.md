@@ -1,7 +1,7 @@
 # AlgoLens Deployment
 
-AlgoLens runs as Docker containers on the **trade-ngin box**
-(`ubuntu@ec2-18-118-225-224`, private IP `172.31.23.190`, Ubuntu), next to
+AlgoLens runs as Docker containers on the **trade-ngin box** (Ubuntu; its host and private IP
+are in the private ops runbook (AlgoGators/ops-private, production-box.md)), next to
 trade-ngin and the data-ngin Airflow stack. DNS for `algolens.algogators.com`
 (Wix) points at this box, and `algolens-edge` terminates TLS itself (see
 "TLS" below). The old host's nginx proxy to `:8088` is no longer on the path
@@ -137,7 +137,7 @@ by the old AlgoLens repository, so grant AlgoGators/algogators **Write** under e
 ## First-time bootstrap (trade-ngin box)
 
 ```bash
-ssh ubuntu@ec2-18-118-225-224
+ssh <user>@<production box>   # host and key: the private ops runbook
 
 # 1. Docker and the compose plugin (trade-ngin and airflow already use them)
 docker --version && docker compose version
@@ -197,8 +197,8 @@ and watch the workflow.
 
 1. From the old host, check the stack over the private network:
    ```bash
-   curl -fsS http://172.31.23.190:8088/health
-   curl -fsS -o /dev/null -w '%{http_code}\n' http://172.31.23.190:8088/
+   curl -fsS http://<box private IP>:8088/health
+   curl -fsS -o /dev/null -w '%{http_code}\n' http://<box private IP>:8088/
    ```
 2. Back up the current config:
    ```bash

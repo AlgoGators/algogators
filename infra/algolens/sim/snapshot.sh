@@ -28,8 +28,9 @@
 # server over the ssh connection's stdin (never on a command line).
 set -euo pipefail
 
-SSH_HOST="${SNAPSHOT_SSH_HOST:-ubuntu@ec2-18-118-225-224.us-east-2.compute.amazonaws.com}"
-SSH_KEY="${SNAPSHOT_SSH_KEY:-C:/Users/domdd/Documents/GitHub/prod-deploy.pem}"
+# The production box and its SSH key (user@host and a key file path): the private ops runbook.
+SSH_HOST="${SNAPSHOT_SSH_HOST:?set SNAPSHOT_SSH_HOST to user@host of the production box}"
+SSH_KEY="${SNAPSHOT_SSH_KEY:?set SNAPSHOT_SSH_KEY to the production SSH key file}"
 DB_NAME="new_algo_data"
 ROLES_FILE='~/.config/algogators/db-app-roles.env'
 QT_PORTFOLIOS="'QT_CONSERVATIVE_PORTFOLIO','QT_CONSERVATIVE_MODEL_PORTFOLIO'"
