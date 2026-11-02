@@ -1,6 +1,6 @@
 # AlgoLens
 
-**LAST UPDATED:** 2026-11-02 · **Commit:** `8c534c1b` (main, the code this page was checked against)
+**LAST UPDATED:** 2026-11-02 · **Commit:** `b9443151` (main, the code this page was checked against)
 
 AlgoLens is the club's web app over the trading books. Members read the portfolios, strategies
 and incubation trials; the QT desk edits and approves the day's desk book; investors see the
@@ -123,9 +123,11 @@ pair it recorded, or re-run an earlier deploy run.
 - **The front-end Dockerfile needs the repository root as context** (it copies the pnpm lockfile
   and workspace manifest), but `infra/algolens/docker-compose.dev.yml` and the simulator's compose
   pass `apps/algolens-web`.
-- **Protos are vendored from `AlgoGators/trade-ngin`** at the commit in `proto/algogators/SOURCE`
-  (`scripts/sync_protos.sh`). No workflow here runs `sync_protos.sh --check`; the script's "CI runs
-  --check" meant the old repository's CI. After a desk.proto change, re-vendor and regenerate.
+- **The protos are a copy of `services/trade-ngin/proto/algogators`** (`scripts/sync_protos.sh`
+  copies them and `gen_versions.py`; `proto/algogators/SOURCE` records the commit). The `protos`
+  job of `svc-research-api.quality.yml` runs `sync_protos.sh --check` on every change to either
+  side and fails on any difference. After a desk.proto change, run `scripts/sync_protos.sh` and
+  commit the regenerated stubs in the same PR.
 - **`app-algolens-web.publish.yml` and `svc-research-api.publish.yml` are not the production
   deploy.** They fire on `algolens-web/v*` and `research-api/v*` tags (none exist) and target Pages
   and another image name.
