@@ -11,7 +11,7 @@ The build prints:
 - issues with no `project:` label;
 - issues with no assignee;
 - issues with no `Status:` comment;
-- issues not on the order list in AlgoGators/trade-ngin#153;
+- issues not on the order list in AlgoGators/algogators#156;
 - issues marked Blocked whose blockers are all closed;
 - issues closed since the last full read;
 - new pull requests with no disposition.
