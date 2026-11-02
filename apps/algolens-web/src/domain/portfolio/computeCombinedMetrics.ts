@@ -1,0 +1,440 @@
+import type { Strategy, StrategyMetrics } from './portfolioData';
+import { computePortfolioTotals } from './portfolioAggregation';
+
+// Shapes of the derived data the StrategyBuilder view renders. Extracted verbatim
+// from the old inline useMemo so the computation can live (and be tested) apart
+// from the ~760 lines of JSX it used to be buried in.
+
+export interface AllocationSlice {
+  symbol: string;
+  value: number;
+  percentage: number;
+}
+
+export interface StrategySlice {
+  name: string;
+  value: number;
+  percentage: number;
+}
+
+export interface SymbolPnL {
+  symbol: string;
+  pnl: number;
+}
+
+export interface AdvancedMetrics {
+  /** null when it cannot be computed honestly -- see sortinoRatioFromCurve. */
+  sortinoRatio: number | null;
+  /** null when it cannot be computed honestly -- see informationRatioVsBenchmark. */
+  informationRatio: number | null;
+  hhi: number;
+  correlationMatrix: number[][];
+  topHoldings: AllocationSlice[];
+  var95: number;
+}
+
+export interface CombinedMetrics {
+  totalInvested: number;
+  totalValue: number;
+  totalReturn: number;
+  returnPercent: number;
+  metrics: StrategyMetrics;
+  symbolPnL: SymbolPnL[];
+  dailyPnL: { date: string; pnl: number }[];
+  strategies: Strategy[];
+  assetAllocation: AllocationSlice[];
+  strategyAllocation: StrategySlice[];
+  historicalPerformance: { date: string; return: number }[];
+  advancedMetrics: AdvancedMetrics;
+}
+
+function zeroMetrics(): StrategyMetrics {
+  return {
+    volatility: 0, sharpeRatio: 0, maxDrawdown: 0, winRate: 0, totalTrades: 0,
+    avgWin: 0, avgLoss: 0, profitFactor: 0, dailyReturn: 0, cumulativeReturn: 0, annualizedReturn: 0,
+    grossLeverage: 0, netLeverage: 0, portfolioLeverage: 0, marginPosted: 0,
+    equityToMarginRatio: 0, marginCushion: 0, totalNotional: 0, unrealizedPnL: 0,
+    realizedPnL: 0, totalCommissions: 0, netPnL: 0, cashAvailable: 0, currentPortfolioValue: 0
+  };
+}
+
+function emptyCombined(): CombinedMetrics {
+  const today = new Date();
+  const zeroHistorical = Array.from({ length: 91 }, (_, i) => {
+    const date = new Date(today);
+    date.setDate(date.getDate() - (90 - i));
+    return { date: date.toISOString().split('T')[0], return: 0 };
+  });
+
+  const zeroDaily = Array.from({ length: 31 }, (_, i) => {
+    const date = new Date(today);
+    date.setDate(date.getDate() - (30 - i));
+    return { date: date.toISOString().split('T')[0], pnl: 0 };
+  });
+
+  return {
+    totalInvested: 0,
+    totalValue: 0,
+    totalReturn: 0,
+    returnPercent: 0,
+    metrics: zeroMetrics(),
+    symbolPnL: [],
+    dailyPnL: zeroDaily,
+    strategies: [],
+    assetAllocation: [],
+    strategyAllocation: [],
+    historicalPerformance: zeroHistorical,
+    advancedMetrics: {
+      sortinoRatio: null, informationRatio: null, hhi: 0, correlationMatrix: [],
+      topHoldings: [], var95: 0
+    }
+  };
+}
+
+/**
+ * Period-over-period returns of an equity curve, as percentages.
+ *
+ * Returns null if any point is non-positive, because a return off a zero or negative
+ * base is undefined and everything downstream of it would be noise.
+ */
+/**
+ * D-36: several books' equity curves summed by day. Books stamp a day at different times
+ * (futures at 05:00 UTC, equities at 00:00 UTC), so points are keyed by their date
+ * (YYYY-MM-DD), the last point of a day standing for it. Between its first and last day a
+ * book with no point on a day counts with its previous value, so the total does not drop
+ * by a whole book on a day only the other books wrote. Each day is stamped 12:00 UTC, which
+ * the charts' local-time axis shows as that same day from the Americas to Europe.
+ */
+export function sumCurvesByDay(
+  curves: { date: string; value: number }[][]
+): { date: string; value: number }[] {
+  const perBook = curves.map(curve => {
+    const byDay = new Map<string, number>();
+    [...curve]
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime())
+      .forEach(pt => byDay.set(pt.date.slice(0, 10), pt.value));
+    return byDay;
+  });
+  const days = Array.from(new Set(perBook.flatMap(byDay => Array.from(byDay.keys())))).sort();
+  return days.map(day => {
+    let value = 0;
+    perBook.forEach(byDay => {
+      const bookDays = Array.from(byDay.keys());
+      if (bookDays.length === 0 || day < bookDays[0] || day > bookDays[bookDays.length - 1]) return;
+      let last: number | undefined;
+      for (const d of bookDays) {
+        if (d > day) break;
+        last = byDay.get(d);
+      }
+      value += last ?? 0;
+    });
+    return { date: `${day}T12:00:00Z`, value };
+  });
+}
+
+function periodReturns(curve: { value: number }[]): number[] | null {
+  if (curve.length < 2) return null;
+  const returns: number[] = [];
+  for (let i = 1; i < curve.length; i++) {
+    const prev = curve[i - 1].value;
+    if (prev <= 0) return null;
+    returns.push(((curve[i].value - prev) / prev) * 100);
+  }
+  return returns;
+}
+
+/**
+ * Sortino ratio: annualised return over downside deviation.
+ *
+ * Downside deviation is the target semi-deviation with a minimum acceptable return of
+ * zero -- the root-mean-square of the negative returns taken over EVERY period, not
+ * only the losing ones, annualised by sqrt(252). Dividing by the count of losing days
+ * instead (as this did) inflates the denominator as the portfolio wins more often,
+ * which understates the ratio exactly where it should reward.
+ *
+ * Returns are percentages so they share units with annualizedReturn, leaving the
+ * ratio dimensionless.
+ *
+ * Returns null rather than a number when there is no downside to divide by. That case
+ * used to substitute a hardcoded 0.1, which turned a 10% annualised return into a
+ * Sortino of 100.00 on screen for any book that simply had not had a losing day yet.
+ * An undefined ratio is undefined; it is not an outstanding one.
+ */
+export function sortinoRatioFromCurve(
+  bookCurve: { date: string; value: number }[],
+  annualizedReturn: number
+): number | null {
+  const returns = periodReturns(bookCurve);
+  if (returns === null) return null;
+
+  const downside = returns.reduce(
+    (sum, r) => sum + (r < 0 ? r * r : 0),
+    0
+  );
+  if (downside === 0) return null;
+
+  const downsideDeviation = Math.sqrt(downside / returns.length) * Math.sqrt(252);
+  return annualizedReturn / downsideDeviation;
+}
+
+/**
+ * Information ratio: mean active return over its own standard deviation, annualised.
+ *
+ * The yardstick is the `system` stream -- the model's book of the same portfolio, the
+ * comparison AlphaAttribution draws as the desk's value (D-3, HD 2026-10-16). It replaces
+ * the `benchmark` stream of the retired model twin, which the platform never wrote (D-1).
+ *
+ * Returns null rather than a number whenever it cannot be computed honestly. There are
+ * four such cases, and each of them used to produce a plausible-looking figure:
+ *
+ *   - a selected strategy carries no model book (`system`) stream (the reason this must
+ *     not silently sum a partial yardstick against a full book)
+ *   - fewer than three dates overlap, so there is no dispersion to divide by
+ *   - tracking error is zero. This is production today: nothing writes edits into
+ *     `qt`, so the two curves are identical. Reporting 0.00 would read as "the desk
+ *     added nothing" when the truth is "the desk has not acted yet"
+ *   - a curve touches zero, which would make a return undefined
+ *
+ * Same convention as the downside deviation above: population standard deviation, and
+ * sqrt(252) to annualise.
+ */
+export function informationRatioVsBenchmark(
+  bookCurve: { date: string; value: number }[],
+  selected: Strategy[]
+): number | null {
+  const streams = selected.map(s => s.equityByStream?.system);
+  if (streams.some(stream => !stream || stream.length === 0)) return null;
+
+  // Keyed by day like the book curve (D-36).
+  const day = (iso: string) => iso.slice(0, 10);
+  const benchmarkByDate = new Map<string, number>(
+    sumCurvesByDay(streams.map(stream => stream!)).map(pt => [day(pt.date), pt.value])
+  );
+
+  // Only dates present in both curves. A book date the benchmark does not cover is
+  // not a day on which the benchmark returned zero.
+  const paired = bookCurve.filter(pt => benchmarkByDate.has(day(pt.date)));
+
+  // n points give n-1 returns, and dispersion needs at least two of those.
+  if (paired.length < 3) return null;
+
+  const bookReturns = periodReturns(paired);
+  const benchReturns = periodReturns(
+    paired.map(pt => ({ value: benchmarkByDate.get(day(pt.date))! }))
+  );
+  if (bookReturns === null || benchReturns === null) return null;
+
+  const active = bookReturns.map((r, i) => r - benchReturns[i]);
+
+  const mean = active.reduce((sum, r) => sum + r, 0) / active.length;
+  const variance =
+    active.reduce((sum, r) => sum + (r - mean) * (r - mean), 0) / active.length;
+  const trackingError = Math.sqrt(variance);
+  if (trackingError === 0) return null;
+
+  return (mean * Math.sqrt(252)) / trackingError;
+}
+
+/**
+ * Combine the selected strategies into the aggregate view model: totals, asset and
+ * strategy allocations, weighted metrics, and advanced risk stats.
+ *
+ * historicalPerformance and dailyPnL are derived from the selected strategies' REAL
+ * equity curves (Strategy.historicalData) -- summed by date, then expressed as a
+ * cumulative % return and day-over-day dollar change respectively. The correlation
+ * matrix is left empty: a real one needs per-symbol price history the API does not
+ * expose yet (see issue #56). This function is deterministic given its inputs.
+ */
+export function computeCombinedMetrics(
+  strategies: Strategy[],
+  selectedStrategyIds: string[]
+): CombinedMetrics {
+  const selected = strategies.filter(s => selectedStrategyIds.includes(s.id));
+
+  if (selected.length === 0) {
+    return emptyCombined();
+  }
+
+  const {
+    totalInvested,
+    totalValue,
+    totalReturn,
+    totalReturnPercent: returnPercent,
+  } = computePortfolioTotals(selected);
+
+  // Combine all positions for asset allocation
+  const assetValues: { [key: string]: number } = {};
+  selected.forEach(strategy => {
+    strategy.positions.forEach(pos => {
+      assetValues[pos.symbol] = (assetValues[pos.symbol] || 0) + pos.currentValue;
+    });
+  });
+
+  // Convert to array and sort by value
+  const assetAllocation = Object.entries(assetValues)
+    .map(([symbol, value]) => ({
+      symbol,
+      value,
+      percentage: (value / totalValue) * 100
+    }))
+    .sort((a, b) => b.value - a.value);
+
+  // Group smaller positions (less than 3%) into "Others"
+  const threshold = 3;
+  const mainAssets = assetAllocation.filter(a => a.percentage >= threshold);
+  const otherAssets = assetAllocation.filter(a => a.percentage < threshold);
+  const othersTotal = otherAssets.reduce((sum, a) => sum + a.value, 0);
+
+  const pieData = [...mainAssets];
+  if (othersTotal > 0) {
+    pieData.push({
+      symbol: 'Others',
+      value: othersTotal,
+      percentage: (othersTotal / totalValue) * 100
+    });
+  }
+
+  // Strategy allocation for pie chart
+  const strategyAllocation = selected.map(s => ({
+    name: s.name,
+    value: s.currentValue,
+    percentage: (s.currentValue / totalValue) * 100
+  }));
+
+  // Combined equity curve: sum each selected strategy's REAL historical equity by
+  // date, then express it as cumulative % return from the first (earliest) point.
+  // Reads the actual per-strategy equity curves instead of simulating a series.
+  const combinedCurve = sumCurvesByDay(selected.map(s => s.historicalData));
+
+  const baseEquity = combinedCurve.length > 0 ? combinedCurve[0].value : 0;
+  const historicalPerformance = combinedCurve.map(pt => ({
+    date: pt.date,
+    return: baseEquity > 0 ? ((pt.value - baseEquity) / baseEquity) * 100 : 0
+  }));
+
+  // Combine all finalized positions for PnL by symbol
+  const symbolPnL: { [key: string]: number } = {};
+  selected.forEach(strategy => {
+    strategy.finalizedPositions.forEach(pos => {
+      symbolPnL[pos.symbol] = (symbolPnL[pos.symbol] || 0) + pos.realizedPnL;
+    });
+  });
+
+  // Sort by PnL
+  const sortedSymbols = Object.entries(symbolPnL)
+    .sort((a, b) => a[1] - b[1])
+    .map(([symbol, pnl]) => ({ symbol, pnl }));
+
+  // Daily PnL: day-over-day change in the combined equity curve (real dollars),
+  // most recent 31 days. Derived from the same real curve, not simulated.
+  const dailyPnL = combinedCurve
+    .map((pt, i) => ({
+      date: pt.date,
+      pnl: i === 0 ? 0 : pt.value - combinedCurve[i - 1].value
+    }))
+    .slice(-31);
+
+  // Weighted average metrics - MUST BE CALCULATED FIRST
+  const weightedMetrics: StrategyMetrics = {
+    volatility: 0,
+    sharpeRatio: 0,
+    maxDrawdown: 0,
+    winRate: 0,
+    totalTrades: 0,
+    avgWin: 0,
+    avgLoss: 0,
+    profitFactor: 0,
+    dailyReturn: 0,
+    cumulativeReturn: returnPercent,
+    annualizedReturn: 0,
+    grossLeverage: 0,
+    netLeverage: 0,
+    portfolioLeverage: 0,
+    marginPosted: 0,
+    equityToMarginRatio: 0,
+    marginCushion: 0,
+    totalNotional: 0,
+    unrealizedPnL: 0,
+    realizedPnL: 0,
+    totalCommissions: 0,
+    netPnL: 0,
+    cashAvailable: 0,
+    currentPortfolioValue: totalValue
+  };
+
+  selected.forEach(s => {
+    const weight = s.currentValue / totalValue;
+
+    weightedMetrics.volatility += s.metrics.volatility * weight;
+    weightedMetrics.sharpeRatio += s.metrics.sharpeRatio * weight;
+    weightedMetrics.maxDrawdown = Math.max(weightedMetrics.maxDrawdown, s.metrics.maxDrawdown);
+    weightedMetrics.winRate += s.metrics.winRate * weight;
+    weightedMetrics.totalTrades += s.metrics.totalTrades;
+    weightedMetrics.avgWin += s.metrics.avgWin * weight;
+    weightedMetrics.avgLoss += s.metrics.avgLoss * weight;
+    weightedMetrics.profitFactor += s.metrics.profitFactor * weight;
+    weightedMetrics.dailyReturn += s.metrics.dailyReturn * weight;
+    weightedMetrics.annualizedReturn += s.metrics.annualizedReturn * weight;
+    weightedMetrics.grossLeverage += s.metrics.grossLeverage * weight;
+    weightedMetrics.netLeverage += s.metrics.netLeverage * weight;
+    weightedMetrics.portfolioLeverage += s.metrics.portfolioLeverage * weight;
+    weightedMetrics.marginPosted += s.metrics.marginPosted;
+    weightedMetrics.totalNotional += s.metrics.totalNotional;
+    weightedMetrics.unrealizedPnL += s.metrics.unrealizedPnL;
+    weightedMetrics.realizedPnL += s.metrics.realizedPnL;
+    weightedMetrics.totalCommissions += s.metrics.totalCommissions;
+    weightedMetrics.netPnL += s.metrics.netPnL;
+    weightedMetrics.cashAvailable += s.metrics.cashAvailable;
+  });
+
+  weightedMetrics.equityToMarginRatio = weightedMetrics.marginPosted > 0
+    ? totalValue / weightedMetrics.marginPosted
+    : 0;
+  weightedMetrics.marginCushion = weightedMetrics.marginPosted > 0
+    ? ((totalValue - weightedMetrics.marginPosted) / totalValue) * 100
+    : 0;
+
+  // Calculate advanced risk metrics (NOW weightedMetrics is available)
+  const sortinoRatio = sortinoRatioFromCurve(combinedCurve, weightedMetrics.annualizedReturn);
+
+  // Information Ratio: active return against the benchmark stream, annualised.
+  const informationRatio = informationRatioVsBenchmark(combinedCurve, selected);
+
+  // Herfindahl-Hirschman Index (concentration risk)
+  const hhi = assetAllocation.reduce((sum, asset) =>
+    sum + Math.pow(asset.percentage, 2), 0
+  );
+
+  // Correlation Matrix (top 5 holdings). A real correlation needs per-symbol price
+  // history, which the API does not expose today (we only have current positions and
+  // the portfolio-level equity curve). Rather than fabricate values with Math.random,
+  // leave it empty so the UI shows an honest "unavailable" state. See issue #56.
+  const topHoldings = assetAllocation.slice(0, 5);
+  const correlationMatrix: number[][] = [];
+
+  // Value at Risk (95% confidence, 1-day)
+  const portfolioStdDev = (weightedMetrics.volatility / 100) * totalValue / Math.sqrt(252);
+  const var95 = totalValue - (totalValue - 1.645 * portfolioStdDev);
+
+  return {
+    totalInvested,
+    totalValue,
+    totalReturn,
+    returnPercent,
+    metrics: weightedMetrics,
+    symbolPnL: sortedSymbols,
+    dailyPnL,
+    strategies: selected,
+    assetAllocation: pieData,
+    strategyAllocation,
+    historicalPerformance,
+    advancedMetrics: {
+      sortinoRatio,
+      informationRatio,
+      hhi,
+      correlationMatrix,
+      topHoldings,
+      var95
+    }
+  };
+}

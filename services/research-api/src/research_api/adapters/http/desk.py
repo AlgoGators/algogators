@@ -1,0 +1,425 @@
+"""QT desk HTTP routes (contract sections 4, 6 and 7).
+
+Every route here is behind QT_DESK_ENABLED (default off, ruling 22): with the
+flag off they answer 404 as if they did not exist. Desk routes also need the
+qt screen (can_use_qt_desk); the approval routes need an approver
+(QT_APPROVERS) or the qt screen.
+
+Mounted under /portfolio/desk so the edge proxy's /portfolio/ rule serves it;
+the browser page /qt/approve is the frontend's.
+"""
+
+from functools import wraps
+from typing import Any
+
+import psycopg2
+from flask import Blueprint, current_app, jsonify, request
+from flask_jwt_extended import get_jwt_identity, jwt_required
+
+from research_api.adapters.http.access import admin_only
+from research_api.adapters.http.portfolio import (
+    can_use_qt_desk,
+    current_user,
+    is_approver,
+)
+from research_api.application.qt.ports import (
+    DeskConflictError,
+    DeskForbiddenError,
+    DeskGoneError,
+    DeskNotFoundError,
+    DeskNotSeededError,
+)
+from research_api.application.qt.settings_use_cases import (
+    ChangeSettingsLock,
+    GetSettings,
+    ListSettingsLocks,
+    RevertSettings,
+    SaveSettings,
+)
+from research_api.application.qt.use_cases import (
+    ApproveDesk,
+    DecideOverride,
+    GetCommand,
+    GetDeskState,
+    ListSymbolChoices,
+    LookupApproval,
+    PublishDesk,
+    RequestOverride,
+    RescindDesk,
+    SaveDeskEdit,
+    SendDesk,
+)
+from research_api.domain.portfolio.registry import portfolio_entries
+from research_api.domain.qt.approvers import APPROVER_ROLES
+from research_api.domain.qt.desk import DeskRuleError, DeskStaleError
+from research_api.domain.qt.settings import SettingsRuleError
+from research_api.extensions import limiter
+from research_api.infrastructure.config.dependencies import (
+    create_desk_dependencies,
+    create_portfolio_dependencies,
+    load_qt_settings,
+)
+
+desk_bp = Blueprint("desk", __name__)
+
+_ERRORS = (
+    (DeskRuleError, 400),
+    (SettingsRuleError, 400),
+    (DeskForbiddenError, 403),
+    (DeskNotFoundError, 404),
+    (DeskNotSeededError, 409),
+    (DeskConflictError, 409),
+    (DeskStaleError, 409),
+    (DeskGoneError, 410),
+)
+
+# Override requests e-mail the VP and the President: at most this many per
+# user (JWT identity). Counted per gunicorn worker (in-memory limiter), and
+# only for requests that were accepted (201).
+OVERRIDE_REQUEST_LIMIT = "5 per hour"
+
+
+def _user_key():
+    return f"desk-user:{get_jwt_identity()}"
+
+
+def _desk_dependencies():
+    return create_desk_dependencies()
+
+
+def desk_enabled(fn):
+    """404 unless QT_DESK_ENABLED is on (ruling 22)."""
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not load_qt_settings().desk_enabled:
+            return jsonify({"error": "The QT desk is not enabled"}), 404
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def desk_user(fn):
+    """403 unless the user may use the QT desk."""
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not can_use_qt_desk():
+            return jsonify({"error": "Insufficient permissions"}), 403
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def handled(fn):
+    """Map desk errors to their HTTP status; anything else is a logged 500."""
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except tuple(e for e, _ in _ERRORS) as exc:
+            status = next(code for error, code in _ERRORS if isinstance(exc, error))
+            body: dict[str, Any] = {"error": str(exc)}
+            if isinstance(exc, DeskStaleError):
+                body["changed"] = exc.symbols
+            return jsonify(body), status
+        except psycopg2.IntegrityError as exc:
+            current_app.logger.warning("[DESK] refused by the database: %s", exc)
+            return jsonify({"error": "The command log refused this request"}), 409
+        except Exception as exc:
+            current_app.logger.error("[DESK] %s failed: %s", request.path, exc, exc_info=True)
+            return jsonify({"error": "The desk request failed"}), 500
+
+    return wrapper
+
+
+def _portfolio(portfolio_id):
+    registry, _reader = create_portfolio_dependencies()
+    cfg = registry.get_portfolio(portfolio_id)
+    if cfg is None:
+        raise DeskNotFoundError("Portfolio not found")
+    return portfolio_entries([cfg])[0]
+
+
+def _body(required=True):
+    payload = request.get_json(silent=True)
+    if payload is None and not required:
+        return {}
+    if not isinstance(payload, dict):
+        raise DeskRuleError("Request body must be a JSON object")
+    return payload
+
+
+def _gone_user():
+    """D-44: a signed-in token whose user was deleted from auth.users does not decide an
+    override (its e-mail claim alone is not trusted)."""
+    return jsonify({"error": "This account no longer exists"}), 403
+
+
+def _approver_role(user):
+    return next((role for role in APPROVER_ROLES if is_approver(user, role)), None)
+
+
+@desk_bp.route("/<portfolio_id>", methods=["GET"])
+@jwt_required()
+@desk_enabled
+@desk_user
+@handled
+def desk_state(portfolio_id):
+    repo, agent, _settings = _desk_dependencies()
+    viewer_is_approver = _approver_role(current_user()) is not None
+    return (
+        jsonify(
+            GetDeskState(repo, agent).execute(
+                _portfolio(portfolio_id), viewer_is_approver=viewer_is_approver
+            )
+        ),
+        200,
+    )
+
+
+@desk_bp.route("/<portfolio_id>/symbols", methods=["GET"])
+@jwt_required()
+@desk_enabled
+@desk_user
+@handled
+def desk_symbols(portfolio_id):
+    repo, _agent, _settings = _desk_dependencies()
+    choices = ListSymbolChoices(repo).execute(_portfolio(portfolio_id))
+    return jsonify({"symbols": choices}), 200
+
+
+@desk_bp.route("/<portfolio_id>/save", methods=["POST"])
+@jwt_required()
+@desk_enabled
+@desk_user
+@handled
+def desk_save(portfolio_id):
+    payload = _body()
+    repo, agent, _settings = _desk_dependencies()
+    result = SaveDeskEdit(repo, agent).execute(
+        _portfolio(portfolio_id),
+        payload.get("changes"),
+        payload.get("reason"),
+        current_user()["email"],
+    )
+    return jsonify(result), 201
+
+
+@desk_bp.route("/<portfolio_id>/approve", methods=["POST"])
+@jwt_required()
+@desk_enabled
+@desk_user
+@handled
+def desk_approve(portfolio_id):
+    """C10: save B and approve it; the engine publishes when C equals B."""
+    payload = _body()
+    repo, agent, _settings = _desk_dependencies()
+    result = ApproveDesk(repo, agent).execute(
+        _portfolio(portfolio_id),
+        payload.get("changes") or [],
+        payload.get("reason"),
+        current_user()["email"],
+        email=payload.get("email"),
+    )
+    return jsonify(result), 201
+
+
+@desk_bp.route("/commands/<int:command_id>", methods=["GET"])
+@jwt_required()
+@desk_enabled
+@desk_user
+@handled
+def desk_command(command_id):
+    repo, _agent, _settings = _desk_dependencies()
+    return jsonify(GetCommand(repo).execute(command_id)), 200
+
+
+@desk_bp.route("/<portfolio_id>/override-request", methods=["POST"])
+@jwt_required()
+@desk_enabled
+@desk_user
+@limiter.limit(
+    OVERRIDE_REQUEST_LIMIT,
+    key_func=_user_key,
+    deduct_when=lambda response: response.status_code == 201,
+)
+@handled
+def desk_override_request(portfolio_id):
+    payload = _body()
+    repo, agent, _settings = _desk_dependencies()
+    result = RequestOverride(repo, agent).execute(
+        _portfolio(portfolio_id), payload.get("reason"), current_user()["email"]
+    )
+    return jsonify(result), 201
+
+
+@desk_bp.route("/<portfolio_id>/publish", methods=["POST"])
+@jwt_required()
+@desk_enabled
+@desk_user
+@handled
+def desk_publish(portfolio_id):
+    payload = _body(required=False)
+    repo, agent, _settings = _desk_dependencies()
+    result = PublishDesk(repo, agent).execute(
+        _portfolio(portfolio_id),
+        current_user()["email"],
+        flow=payload.get("flow"),
+        acknowledged=payload.get("acknowledged"),
+        email=payload.get("email"),
+    )
+    return jsonify(result), 201
+
+
+@desk_bp.route("/<portfolio_id>/send", methods=["POST"])
+@jwt_required()
+@desk_enabled
+@desk_user
+@handled
+def desk_send(portfolio_id):
+    """D-66: e-mail today's approved, unsent book now."""
+    repo, agent, _settings = _desk_dependencies()
+    result = SendDesk(repo, agent).execute(_portfolio(portfolio_id), current_user()["email"])
+    return jsonify(result), 201
+
+
+@desk_bp.route("/<portfolio_id>/rescind", methods=["POST"])
+@jwt_required()
+@desk_enabled
+@desk_user
+@handled
+def desk_rescind(portfolio_id):
+    repo, agent, _settings = _desk_dependencies()
+    user = current_user()
+    result = RescindDesk(repo, agent).execute(
+        _portfolio(portfolio_id),
+        user["email"],
+        is_approver=_approver_role(user) is not None,
+    )
+    return jsonify(result), 201
+
+
+# --- override approval (the e-mailed link opens /qt/approve?token=...) --------
+#
+# The token travels in the POST body, never in an API URL, so it stays out of
+# access logs. AlgoLens only hashes it (sha256) to find the request.
+
+
+@desk_bp.route("/approval", methods=["POST"])
+@jwt_required()
+@desk_enabled
+@limiter.limit("30 per minute")
+@handled
+def approval_lookup():
+    user = current_user()
+    if user["role"] is None:
+        return _gone_user()
+    role = _approver_role(user)
+    if role is None and not can_use_qt_desk():
+        return jsonify({"error": "Insufficient permissions"}), 403
+    repo, agent, _settings = _desk_dependencies()
+    result = LookupApproval(repo, agent).execute(_body().get("token"))
+    result["viewer"] = {
+        "email": user["email"],
+        "approver_role": role,
+        "is_requester": (user["email"] or "").lower()
+        == (result["request"]["requested_by"] or "").lower(),
+    }
+    return jsonify(result), 200
+
+
+@desk_bp.route("/approval/decide", methods=["POST"])
+@jwt_required()
+@desk_enabled
+@limiter.limit("30 per minute")
+@handled
+def approval_decide():
+    payload = _body()
+    user = current_user()
+    if user["role"] is None:
+        return _gone_user()
+    repo, agent, _settings = _desk_dependencies()
+    result = DecideOverride(repo, agent).execute(
+        payload.get("token"),
+        payload.get("approved"),
+        user["email"],
+        _approver_role(user),
+        payload.get("reason"),
+    )
+    return jsonify(result), 201
+
+
+# --- desk settings (A7): strategy_config versions over the config files -------
+
+
+@desk_bp.route("/<portfolio_id>/settings", methods=["GET"])
+@jwt_required()
+@desk_enabled
+@desk_user
+@handled
+def settings_get(portfolio_id):
+    repo, _agent, _settings = _desk_dependencies()
+    return jsonify(GetSettings(repo).execute(_portfolio(portfolio_id))), 200
+
+
+@desk_bp.route("/<portfolio_id>/settings", methods=["POST"])
+@jwt_required()
+@desk_enabled
+@desk_user
+@handled
+def settings_save(portfolio_id):
+    payload = _body()
+    repo, agent, _settings = _desk_dependencies()
+    version = SaveSettings(repo, agent).execute(
+        _portfolio(portfolio_id),
+        payload.get("changes"),
+        payload.get("reason"),
+        current_user()["email"],
+    )
+    return jsonify({"version": version}), 201
+
+
+@desk_bp.route("/<portfolio_id>/settings/revert", methods=["POST"])
+@jwt_required()
+@desk_enabled
+@desk_user
+@handled
+def settings_revert(portfolio_id):
+    payload = _body()
+    repo, agent, _settings = _desk_dependencies()
+    version = RevertSettings(repo, agent).execute(
+        _portfolio(portfolio_id),
+        payload.get("version"),
+        payload.get("reason"),
+        current_user()["email"],
+    )
+    return jsonify({"version": version}), 201
+
+
+# --- D-14: the admin's lock list for desk settings ------------------------------
+
+
+@desk_bp.route("/settings-locks", methods=["GET"])
+@jwt_required()
+@desk_enabled
+@desk_user
+@handled
+def settings_locks_list():
+    repo, _agent, _settings = _desk_dependencies()
+    return jsonify(ListSettingsLocks(repo).execute()), 200
+
+
+@desk_bp.route("/settings-locks", methods=["POST"])
+@jwt_required()
+@desk_enabled
+@admin_only
+@handled
+def settings_locks_change():
+    payload = _body()
+    repo, _agent, _settings = _desk_dependencies()
+    result = ChangeSettingsLock(repo).execute(
+        payload.get("path"), payload.get("locked"), payload.get("reason"), current_user()["email"]
+    )
+    return jsonify(result), 200

@@ -1,11 +1,11 @@
 // tests/live/test_mode_branch_guard.cpp
 //
-// T-DATED safeguard S2 (HD 2026-10-10). THIS TEST READS SOURCE, on purpose: it is a guard, not a
+// THIS TEST READS SOURCE, on purpose: it is a guard, not a
 // behaviour test.
 //
 // A live runner has three ways of being run: with no date, with a date equal to the host's date
-// (production), and with a past date (every test run). Stage 3 found protections that existed in
-// only one of them. This guard fails when a code line of the apps, or of the library they call,
+// (production), and with a past date (every test run). A protection that exists in only one of
+// them is a gap. This guard fails when a code line of the apps, or of the library they call,
 // reads one of the things a run's mode can be told from, outside the lists below:
 //
 //   the date flag            use_override_date, dated_run
@@ -174,15 +174,12 @@ const std::vector<Site> kFuturesSites = {
      "the processing-time print: a console line"},
     {"std::chrono::system_clock::now() - now)",
      "the processing-time print"},
-    {"live::plan_email_report(send_email, std::getenv(live::kEmailBodyDirEnv));",
-     "the report plan (send, or write the body to a file, or neither): "
-     "EmailReportPlan.* (tests/live/test_email_body_file.cpp)"},
-    {"if (email_plan.send) {",
-     "DECISION: mail, on --send-email only. The plan: EmailReportPlan.*; the send "
-     "arm itself is never run by a test, by rule (it mails)"},
-    {"auto send_result = email_sender->send_email(mail_subject, mail_body,",
-     "the send itself, handed to deliver_email_report as its sender; the file-or-send "
-     "choice is made there: EmailDelivery.* (tests/live/test_email_delivery.cpp)"},
+    {"if (send_email && !day_store_failures.empty()) {",
+     "DECISION: a day whose stores failed is not mailed (the e-mail reads the stored day); "
+     "exit 4"},
+    {"} else if (send_email) {",
+     "DECISION: mail, on --send-email only: the book e-mail through the report module "
+     "(live/python_mail.hpp); the send arm itself is never run by a test, by rule (it mails)"},
 };
 
 // --- the equity runner ------------------------------------------------------------------------
@@ -231,15 +228,12 @@ const std::vector<Site> kEquitySites = {
      "the processing-time print: a console line"},
     {"std::chrono::system_clock::now() - now).count() << \"ms\" << std::endl;",
      "the processing-time print"},
-    {"live::plan_email_report(send_email, std::getenv(live::kEmailBodyDirEnv));",
-     "the report plan (send, or write the body to a file, or neither): "
-     "EmailReportPlan.* (tests/live/test_email_body_file.cpp)"},
-    {"if (email_plan.send) {",
-     "DECISION: mail, on --send-email only. The plan: EmailReportPlan.*; the send "
-     "arm itself is never run by a test, by rule (it mails)"},
-    {"email_sender->send_email(mail_subject, mail_body, true, attachments);",
-     "the send itself, handed to deliver_email_report as its sender; the file-or-send "
-     "choice is made there: EmailDelivery.* (tests/live/test_email_delivery.cpp)"},
+    {"if (send_email && persist_failed) {",
+     "DECISION: a day whose results were not stored is not mailed (the e-mail reads the stored "
+     "day); exit 4"},
+    {"} else if (send_email) {",
+     "DECISION: mail, on --send-email only: the book e-mail through the report module "
+     "(live/python_mail.hpp); the send arm itself is never run by a test, by rule (it mails)"},
 };
 
 // --- every other file under apps/ (none is a live runner) --------------------------------------
@@ -249,6 +243,8 @@ const std::map<std::string, std::vector<std::string>> kOtherAppSites = {
     {"apps/backtest/bt_portfolio.cpp", {"auto now = std::chrono::system_clock::now();"}},
     {"apps/backtest/bt_portfolio_conservative.cpp", {"auto now = std::chrono::system_clock::now();"}},
     {"apps/test_database_extensions.cpp", {"auto now = std::chrono::system_clock::now();", "std::chrono::system_clock::now().time_since_epoch())"}},
+    // The read-only dump tool takes its database from the environment.
+    {"apps/tools/contract_rolls_dump.cpp", {"const char* dsn = std::getenv(\"CONTRACT_ROLLS_DSN\");"}},
 };
 
 // --- the library: the lines of each file, and what they are ------------------------------------
@@ -307,6 +303,9 @@ const std::map<std::string, std::pair<const char*, std::vector<std::string>>> kL
      {"TRADE_NGIN_SERIES_DUMP_DIR: a diagnostic dump, no decision",
       {"const char* dir = std::getenv(\"TRADE_NGIN_SERIES_DUMP_DIR\");",
        "const char* dir = std::getenv(\"TRADE_NGIN_SERIES_DUMP_DIR\");"}}},
+    {"include/trade_ngin/strategy/carry_estimator_record.hpp",
+     {"TRADE_NGIN_SERIES_DUMP_DIR: a diagnostic dump, no decision",
+      {"const char* dir = std::getenv(\"TRADE_NGIN_SERIES_DUMP_DIR\");"}}},
     {"include/trade_ngin/strategy/trend_estimator_record.hpp",
      {"TRADE_NGIN_SERIES_DUMP_DIR: a diagnostic dump, no decision",
       {"const char* dir = std::getenv(\"TRADE_NGIN_SERIES_DUMP_DIR\");"}}},
@@ -324,11 +323,6 @@ const std::map<std::string, std::pair<const char*, std::vector<std::string>>> kL
     {"src/core/config_loader.cpp",
      {"the backtest window; no live runner calls it",
       {"std::tm* local_tm = std::localtime(&now_time_t);"}}},
-    {"src/core/email_sender.cpp",
-     {"the MIME boundary of a sent mail; a chart query's column stamp",
-      {"std::string outer_boundary = \"----=_Outer_\" + std::to_string(std::time(nullptr));",
-       "std::string inner_boundary = \"----=_Inner_\" + std::to_string(std::time(nullptr));",
-       "\"  CURRENT_TIMESTAMP AS \\\"time\\\",\""}}},
     {"src/core/logger.cpp",
      {"log file names and line stamps",
       {"auto now = std::chrono::system_clock::now();",
@@ -353,6 +347,9 @@ const std::map<std::string, std::pair<const char*, std::vector<std::string>>> kL
       {"std::chrono::system_clock::now(),",
        "last_update = std::chrono::system_clock::now();",
        "last_update = std::chrono::system_clock::now();"}}},
+    {"src/data/roll_calendar.cpp",
+     {"where the futures calendar file is (rolls step 2); the same in every mode",
+      {"if (const char* env = std::getenv(\"TRADE_NGIN_FUTURES_HOLIDAYS_JSON\")) return env;"}}},
     {"src/execution/execution_engine.cpp",
      {"the execution engine; no live runner uses it",
       {"std::chrono::system_clock::now(),",
@@ -389,6 +386,10 @@ const std::map<std::string, std::pair<const char*, std::vector<std::string>>> kL
        "db, \"WITH m AS (UPDATE trading.live_run_metadata SET sent_at = now()\" +",
        "\"now()::text) WHERE id = \" + std::to_string(row_id) +",
        "const char* flag = std::getenv(\"QT_EMAIL_DISABLED\");"}}},
+    {"src/live/python_mail.cpp",
+     {"the report module's settings (QT_MAIL_PYTHON, QT_MAIL_APP, QT_MAIL_TIMEOUT, "
+      "QT_MAIL_TEST_TO); none is a mode",
+      {"const char* v = std::getenv(name);"}}},
     {"src/live/live_pnl_manager.cpp",
      {"a snapshot stamp nothing stores",
       {"snapshot.timestamp = std::chrono::system_clock::now();"}}},

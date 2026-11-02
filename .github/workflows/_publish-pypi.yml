@@ -1,0 +1,117 @@
+name: publish / pypi
+
+# Reusable. Called by a library's `lib-<name>.publish.yml` after its quality
+# gate has passed on the release commit.
+#
+# Uses PyPI Trusted Publishing (OIDC): the `publish` job mints a short-lived
+# token from its id-token claim, so there is no PyPI API token in repo secrets
+# to leak or rotate. Configure the publisher once per project at
+# https://pypi.org/manage/account/publishing/ with:
+#     owner       AlgoGators
+#     repository  algogators
+#     workflow    lib-<name>.publish.yml     <- the CALLER's filename, not this one
+#     environment <the environment input below>
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: Repo-relative path to the distribution, e.g. libs/algosystem
+        type: string
+        required: true
+      environment:
+        description: >
+          GitHub Environment gating the upload. Put a required reviewer on it —
+          it is the last human checkpoint before a version exists forever.
+        type: string
+        default: pypi
+      repository-url:
+        description: Override to https://test.pypi.org/legacy/ for a rehearsal.
+        type: string
+        default: ''
+      dry-run:
+        description: Build, verify and attest, but do not upload.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build sdist + wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          # Version-from-git backends need the full history and tags.
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Build
+        run: uv build "${{ inputs.path }}" --out-dir dist
+
+      - name: Verify metadata
+        run: uvx twine check --strict dist/*
+
+      - name: Verify the wheel imports on a clean interpreter
+        # Catches the classic packaging bug where a module is present in the repo
+        # but missing from the built wheel: tests pass, users get ImportError.
+        run: |
+          set -euo pipefail
+          wheel=$(ls dist/*.whl)
+          uv venv /tmp/smoke
+          VIRTUAL_ENV=/tmp/smoke uv pip install "$wheel"
+          dist_name=$(basename "$wheel" | cut -d- -f1)
+          VIRTUAL_ENV=/tmp/smoke uv run --no-project python -c "
+          import importlib, sys
+          mod = '${dist_name}'.replace('-', '_')
+          importlib.import_module(mod)
+          print(f'{mod} imports cleanly from the wheel')
+          "
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 7
+
+  publish:
+    name: upload to ${{ inputs.environment }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write       # OIDC token for Trusted Publishing and attestation
+      attestations: write   # build provenance attached to the release artifacts
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*'
+
+      - name: Publish
+        if: ${{ !inputs.dry-run }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ inputs.repository-url }}
+          print-hash: true
+
+      - name: Dry run notice
+        if: ${{ inputs.dry-run }}
+        run: |
+          echo "### Dry run — nothing uploaded" >> "$GITHUB_STEP_SUMMARY"
+          ls -la dist/ >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,139 @@
+name: publish / static site
+
+# Reusable. Called by a front-end app's `app-<name>.publish.yml`.
+#
+# Two targets, because the two front-ends deploy differently today:
+#   s3    — build, sync to a bucket, invalidate CloudFront
+#   pages — build, upload, deploy to GitHub Pages
+#
+# Both authenticate with OIDC. No long-lived AWS keys in repo secrets.
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: Repo-relative path to the app, e.g. apps/gatorqh
+        type: string
+        required: true
+      target:
+        description: s3 | pages
+        type: string
+        default: s3
+      node-version:
+        type: string
+        default: '20'
+      environment:
+        type: string
+        default: production
+      aws-region:
+        type: string
+        default: us-east-1
+      s3-bucket:
+        description: Bucket name, target=s3 only.
+        type: string
+        default: ''
+      cloudfront-distribution-id:
+        description: Invalidated after the sync, target=s3 only.
+        type: string
+        default: ''
+      dry-run:
+        type: boolean
+        default: false
+    secrets:
+      AWS_ROLE_ARN:
+        description: Role assumed via OIDC. Required when target=s3.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter "./${{ inputs.path }}" run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: ${{ inputs.path }}/dist
+          retention-days: 7
+
+  s3:
+    name: deploy to s3
+    if: ${{ inputs.target == 's3' }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: site/
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Sync
+        # Hashed assets get a year of immutable caching; index.html must not,
+        # or users keep running the old bundle after every deploy. Assets are
+        # uploaded before index.html so the new HTML never references a file
+        # that has not landed yet.
+        run: |
+          set -euo pipefail
+          DRY=""
+          [ "${{ inputs.dry-run }}" = "true" ] && DRY="--dryrun"
+          aws s3 sync site/ "s3://${{ inputs.s3-bucket }}/" $DRY \
+            --delete \
+            --exclude 'index.html' \
+            --cache-control 'public,max-age=31536000,immutable'
+          aws s3 cp site/index.html "s3://${{ inputs.s3-bucket }}/index.html" $DRY \
+            --cache-control 'public,max-age=0,must-revalidate'
+
+      - name: Invalidate CloudFront
+        if: ${{ inputs.cloudfront-distribution-id != '' && !inputs.dry-run }}
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "${{ inputs.cloudfront-distribution-id }}" \
+            --paths '/*'
+
+  pages:
+    name: deploy to github pages
+    if: ${{ inputs.target == 'pages' && !inputs.dry-run }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: site
+          path: site/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+      - id: deploy
+        uses: actions/deploy-pages@v4

@@ -1,17 +1,10 @@
 # Set test source files
 set(TEST_SOURCES
-    core/test_chart_series.cpp
     core/test_decimal.cpp
-    core/test_email_chart_strategy_id.cpp
-    core/test_email_fixtures.cpp
     core/test_report_settled_marks.cpp
+    core/test_report_rolls.cpp
     core/test_time_utils_parse.cpp
     core/test_timed_process.cpp
-    core/test_gnuplot_run.cpp
-    core/test_report_charts.cpp
-    core/test_report_day_before.cpp
-    core/test_report_equity_day.cpp
-    core/test_report_held_symbols.cpp
     core/test_result.cpp
     core/test_state_manager.cpp
     core/test_logger.cpp
@@ -21,11 +14,8 @@ set(TEST_SOURCES
     core/test_holiday_checker.cpp
     core/test_holiday_coverage_years.cpp
     core/test_logger_retention.cpp
-    core/test_email_positions_table.cpp
-    core/test_email_strategy_tables.cpp
     core/test_report_risk_lines.cpp
     core/test_report_leverage_console.cpp
-    core/test_report_over_limit.cpp
     core/test_stat_quality.cpp
     core/test_run_id_generator.cpp
     core/test_config_loader.cpp
@@ -65,8 +55,23 @@ set(TEST_SOURCES
     strategy/test_listing_dates.cpp
     data/test_session_classifier_instrument_id.cpp
     data/test_roll_series.cpp
+    data/test_roll_split.cpp
+    data/test_roll_calendar.cpp
+    data/test_contract_bars.cpp
+    data/test_contract_bars_db.cpp
+    data/test_roll_cycle.cpp
+    data/test_roll_cycle_db.cpp
+    data/test_contract_roll_rule.cpp
+    data/test_contract_roll_rule_db.cpp
+    data/test_contract_roll_micros.cpp
+    data/test_contract_rolls_api.cpp
+    data/test_per_contract_source.cpp
+    data/test_carry_quote.cpp
+    data/test_per_contract_places.cpp
     data/test_roll_legs.cpp
     data/test_executions_execution_type_db.cpp
+    data/test_roll_split_db.cpp
+    data/test_report_roll_view_db.cpp
     data/test_strategy_config_db.cpp
     data/test_futures_bar_instrument_id_db.cpp
     data/test_positions_instrument_id_db.cpp
@@ -91,6 +96,7 @@ set(TEST_SOURCES
     backtest/test_listing_loader.cpp
     portfolio/test_loop_fixups.cpp
     portfolio/test_worked_days.cpp
+    portfolio/test_overlay_covariance_pass.cpp
     portfolio/test_portfolio_config_keys.cpp
     risk/test_overlay_wiring.cpp
     risk/test_overlay_columns.cpp
@@ -223,8 +229,6 @@ set(TEST_SOURCES
     live/test_base_bus_off_and_carried_day.cpp
     live/test_session_book_gate.cpp
     live/test_live_runner_small_fixes.cpp
-    live/test_email_body_file.cpp
-    live/test_email_delivery.cpp
     live/test_python_mail.cpp
     live/test_run_args.cpp
     live/test_equity_cash_available.cpp
@@ -235,6 +239,8 @@ set(TEST_SOURCES
     live/test_cost_feed_adjusted_returns.cpp
     live/test_change_bar_pnl.cpp
     live/test_live_roll_legs.cpp
+    live/test_report_roll_query.cpp
+    live/test_live_rerun_repair.cpp
     live/test_live_k01_history.cpp
     live/test_live_roll_write_order.cpp
     live/test_live_listing_guard.cpp
@@ -252,13 +258,14 @@ set(TEST_SOURCES
     live/test_csv_exporter.cpp
     live/test_live_csv_files.cpp
     live/test_console_labels.cpp
-    live/test_report_queries.cpp
     strategy/test_base_strategy.cpp
     strategy/test_trend_following.cpp
     strategy/test_regime_detector.cpp
     strategy/test_trend_following_fast.cpp
     strategy/test_fast_sleeve_configuration.cpp
     strategy/test_trend_estimator.cpp
+    strategy/test_carry_estimator.cpp
+    strategy/test_carry_strategy.cpp
     strategy/test_trend_history_seed.cpp
     strategy/test_equity_slow_rule.cpp
     strategy/test_mean_reversion_backtest.cpp
@@ -312,6 +319,27 @@ target_include_directories(trade_ngin_tests
 
 target_compile_definitions(trade_ngin_tests PRIVATE TESTING USE_DIRECT_DB_CONNECTION
     TRADE_NGIN_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
+# Every test file parses gtest, and most parse the same standard headers: compile them once.
+# Third-party and standard headers only, never trade_ngin's own: several tests include those
+# under `#define private public`, which a precompiled copy would not see.
+target_precompile_headers(trade_ngin_tests
+    PRIVATE
+        <gtest/gtest.h>
+        <algorithm>
+        <chrono>
+        <cmath>
+        <filesystem>
+        <fstream>
+        <map>
+        <memory>
+        <sstream>
+        <string>
+        <thread>
+        <unordered_map>
+        <vector>
+        <nlohmann/json.hpp>
+)
 
 target_link_libraries(trade_ngin_tests
     PRIVATE

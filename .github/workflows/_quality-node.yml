@@ -1,0 +1,118 @@
+name: quality / node
+
+# Reusable. Called by every JS/TS member's `<kind>-<name>.quality.yml`.
+#
+# Same contract as _quality-python.yml: this owns the environment, the member's
+# package.json scripts own the commands.
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: Repo-relative path to the member, e.g. apps/algolens/web
+        type: string
+        required: true
+      node-versions:
+        type: string
+        default: '["20"]'
+      runners:
+        type: string
+        default: '["ubuntu-latest"]'
+      coverage-min:
+        description: Coverage floor, as a percentage. Exposed as $COVERAGE_MIN.
+        type: number
+        default: 0
+      bundle-budget-kb:
+        description: >
+          Fail if the production bundle exceeds this many kilobytes (gzipped).
+          0 disables the check. A dashboard that quietly grows to 4 MB is a
+          regression nobody files a bug for.
+        type: number
+        default: 0
+      e2e:
+        description: Run the Playwright suite. Off by default — it is slow.
+        type: boolean
+        default: false
+      timeout-minutes:
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: node${{ matrix.node }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.runners) }}
+        node: ${{ fromJSON(inputs.node-versions) }}
+    env:
+      COVERAGE_MIN: ${{ inputs.coverage-min }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+
+      - name: Install workspace
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm --filter "./${{ inputs.path }}" run lint
+
+      - name: Typecheck
+        run: pnpm --filter "./${{ inputs.path }}" run typecheck
+
+      - name: Test
+        run: pnpm --filter "./${{ inputs.path }}" run test
+
+      - name: Build
+        run: pnpm --filter "./${{ inputs.path }}" run build
+
+      - name: Bundle budget
+        if: ${{ inputs.bundle-budget-kb > 0 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="${{ inputs.path }}/dist"
+          [ -d "$dist" ] || { echo "::error::no dist/ produced by build"; exit 1; }
+          # Gzipped total of everything the browser actually downloads.
+          total=$(find "$dist" -type f \( -name '*.js' -o -name '*.css' \) \
+                  -exec sh -c 'gzip -c "$1" | wc -c' _ {} \; | awk '{s+=$1} END {print int(s/1024)}')
+          echo "Gzipped JS+CSS: ${total} KB (budget ${{ inputs.bundle-budget-kb }} KB)"
+          echo "### Bundle: ${total} KB / ${{ inputs.bundle-budget-kb }} KB budget" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$total" -gt "${{ inputs.bundle-budget-kb }}" ]; then
+            echo "::error::bundle is ${total} KB, over the ${{ inputs.bundle-budget-kb }} KB budget"
+            exit 1
+          fi
+
+      - name: End-to-end
+        if: ${{ inputs.e2e }}
+        run: |
+          pnpm --filter "./${{ inputs.path }}" exec playwright install --with-deps chromium
+          pnpm --filter "./${{ inputs.path }}" run test:e2e
+
+      - name: Slug
+        id: slug
+        if: always()
+        shell: bash
+        run: echo "value=$(echo '${{ inputs.path }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Playwright report
+        if: ${{ always() && inputs.e2e }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-${{ steps.slug.outputs.value }}-node${{ matrix.node }}-${{ matrix.os }}
+          path: ${{ inputs.path }}/playwright-report
+          if-no-files-found: ignore
+          retention-days: 14

@@ -1,0 +1,12 @@
+# data-ngin's own quality recipes. The default `test` runs the full suite;
+# here the integration-marked tests (live Postgres/TimescaleDB, Databento
+# credentials) are excluded because the PR gate has neither. Run them locally
+# with `uv run pytest services/data-ngin -m integration` against a real stack.
+
+test:
+    uv run pytest "{{ justfile_directory() }}" \
+        -m "not integration" \
+        --cov="{{ justfile_directory() }}" \
+        --cov-report=xml:"{{ justfile_directory() }}/coverage.xml" \
+        --cov-report=term-missing \
+        --cov-fail-under="${COVERAGE_MIN:-0}"

@@ -34,10 +34,8 @@ using StrategyInstancesMap = std::unordered_map<std::string, ITrendFollowingStra
  * This class encapsulates all CSV export functionality, including:
  * - Today's positions (forward-looking, no PnL)
  * - Yesterday's finalized positions (with PnL)
- *
- * Phase 4 Refactoring Component
  */
-/// One row of an equity book's positions files (HD 2026-10-14, section 16.4): the columns of the
+/// One row of an equity book's positions files: the columns of the
 /// report's Today's Positions and settled tables.
 struct EquityCsvRow {
     std::string symbol;
@@ -92,7 +90,7 @@ public:
     /**
      * @brief Export the day's positions file on a day with NO session: every value carried.
      *
-     * T-7a C3 (HD 2026-09-18). Same file name as export_current_positions
+     * Same file name as export_current_positions
      * (YYYY-MM-DD_positions.csv) and the same columns, plus mark_date and forecast_run_date. A
      * second header line states that no session occurred and that every value is carried, not
      * computed; it describes the carried forecast as carried_forecast_label does ("computed by
@@ -122,14 +120,6 @@ public:
                                               const std::chrono::system_clock::time_point& settled,
                                               const std::string& strategy,
                                               const std::vector<EquityCsvRow>& rows);
-
-    /**
-     * @brief Write account_detail_<portfolio>_<date>.csv: a header row of column names and the
-     *        one row of the day (live/account_detail.hpp). Cells are written as given.
-     */
-    Result<std::string> export_account_detail(
-        const std::string& portfolio_id, const std::string& date,
-        const std::vector<std::pair<std::string, std::string>>& columns);
 
     Result<std::string> export_carried_positions(
         const std::chrono::system_clock::time_point& date,

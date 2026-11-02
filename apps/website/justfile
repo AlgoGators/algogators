@@ -1,0 +1,8 @@
+lint:
+	corepack pnpm run lint
+
+typecheck:
+	corepack pnpm run typecheck
+
+test:
+	corepack pnpm run test
