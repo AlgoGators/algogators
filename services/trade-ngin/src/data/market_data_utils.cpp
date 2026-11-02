@@ -23,7 +23,6 @@ std::string get_market_data_columns(AssetClass asset_class) {
         case COMMODITIES:
         case CRYPTO:
             // These asset classes use unadjusted prices directly.
-            // Futures are already back-adjusted per contract conventions.
             // Other asset classes do not have adjustment concepts (splits, dividends).
             return "time, symbol, open, high, low, close, volume";
 
@@ -110,7 +109,7 @@ bool same_values(const FuturesBarCopy& a, const FuturesBarCopy& b) {
 
 std::string build_futures_bar_query(const std::string& full_table_name, bool with_symbol_filter) {
     const std::string cols = get_market_data_columns(AssetClass::FUTURES);
-    // T-ROLLX (LOOP_SPEC v6.1 section 2.1): the kept bar carries its own print's vendor instrument
+    // The kept bar carries its own print's vendor instrument
     // id, LEFT JOINed from the raw table on the exact print (the same key as
     // build_futures_instrument_id_query), NULL when the raw table holds no such print.
     return "SELECT k.time, k.symbol, k.open, k.high, k.low, k.close, k.volume, r.instrument_id FROM ("

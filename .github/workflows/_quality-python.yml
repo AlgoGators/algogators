@@ -1,0 +1,161 @@
+name: quality / python
+
+# Reusable. Called by every Python member's `<kind>-<name>.quality.yml`.
+#
+# This file owns the environment and nothing else: checkout, toolchain, cache,
+# matrix, artifacts. WHAT gets run is `just lint|typecheck|test <path>`, which
+# resolves to the root justfile's defaults unless the service overrides a recipe
+# in its own justfile. Adding a `needs-postgres:` input here would be the wrong
+# fix for a one-service problem — bring the database up inside that service's
+# `test` recipe instead.
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: Repo-relative path to the member, e.g. libs/algosystem
+        type: string
+        required: true
+      python-versions:
+        description: JSON array of interpreter versions to matrix over
+        type: string
+        default: '["3.11"]'
+      runners:
+        description: JSON array of runner labels to matrix over
+        type: string
+        default: '["ubuntu-latest"]'
+      coverage-min:
+        description: Coverage floor, as a percentage. Exposed to just as $COVERAGE_MIN.
+        type: number
+        default: 0
+      strict-types:
+        description: Run mypy --strict. Libraries yes, research services no.
+        type: boolean
+        default: false
+      build-check:
+        description: Build the distribution and validate its metadata. Publishable members only.
+        type: boolean
+        default: false
+      timeout-minutes:
+        type: number
+        default: 20
+
+permissions:
+  contents: read
+
+jobs:
+  # The caller's path filter has to list uv.lock and the root pyproject.toml,
+  # so any lock change fans out to every Python member. Most lock changes touch
+  # one member's dependencies; this skips the matrix for the others. See
+  # platform/ci/quality_needed.py for the exact rule. It fails open: anything
+  # it cannot determine runs the matrix.
+  detect:
+    name: needs quality?
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Pull requests check out the merge commit, whose first parent is
+          # the base branch tip, so HEAD^1..HEAD is exactly the PR's change.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Decide
+        id: decide
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          # In a called workflow, workflow_ref names the caller:
+          # owner/repo/.github/workflows/<file>.yml@ref
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          MEMBER_PATH: ${{ inputs.path }}
+          SERVER: ${{ github.server_url }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          workflow="${WORKFLOW_REF#"$REPO"/}"
+          workflow="${workflow%@*}"
+          base=""
+          case "$EVENT" in
+            pull_request) base="$(git rev-parse HEAD^1)" ;;
+            push)
+              if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+                 && git fetch --no-tags --depth=1 "$SERVER/$REPO" "$BEFORE" 2>/dev/null; then
+                base="$BEFORE"
+              fi
+              ;;
+          esac
+          uv run --no-project --with pyyaml python platform/ci/quality_needed.py \
+            --workflow "$workflow" --member-path "$MEMBER_PATH" --base "$base" \
+            | tee -a "$GITHUB_OUTPUT"
+          grep '^reason=' "$GITHUB_OUTPUT" | tail -1 | sed 's/^reason=/### Quality matrix: /' >> "$GITHUB_STEP_SUMMARY"
+
+  quality:
+    name: py${{ matrix.python }} · ${{ matrix.os }}
+    needs: detect
+    if: ${{ needs.detect.outputs.run == 'true' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.runners) }}
+        python: ${{ fromJSON(inputs.python-versions) }}
+    env:
+      # Consumed by the root justfile's default recipes.
+      COVERAGE_MIN: ${{ inputs.coverage-min }}
+      MYPY_STRICT: ${{ inputs.strict-types }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up uv and Python ${{ matrix.python }}
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          python-version: ${{ matrix.python }}
+
+      - name: Install workspace
+        # --locked fails if uv.lock is stale rather than silently re-resolving,
+        # so a forgotten `uv lock` is caught here instead of in production.
+        # `just` itself comes from the lockfile (rust-just in the dev group).
+        run: uv sync --locked --all-packages --all-groups
+
+      - name: Lint
+        run: uv run just lint "${{ inputs.path }}"
+
+      - name: Typecheck
+        run: uv run just typecheck "${{ inputs.path }}"
+
+      - name: Test
+        run: uv run just test "${{ inputs.path }}"
+
+      - name: Build distribution
+        if: ${{ inputs.build-check }}
+        run: |
+          uv build "${{ inputs.path }}" --out-dir dist
+          uvx twine check dist/*
+
+      - name: Slug
+        id: slug
+        if: always()
+        shell: bash
+        # Artifact names may not contain "/", and inputs.path always does.
+        run: echo "value=$(echo '${{ inputs.path }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ steps.slug.outputs.value }}-py${{ matrix.python }}-${{ matrix.os }}
+          path: ${{ inputs.path }}/coverage.xml
+          if-no-files-found: ignore
+          retention-days: 14

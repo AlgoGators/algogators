@@ -1,0 +1,269 @@
+// include/trade_ngin/data/listing_dates.hpp
+#pragma once
+
+#include <functional>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include "trade_ngin/core/error.hpp"
+#include "trade_ngin/core/types.hpp"
+#include "trade_ngin/data/market_data_utils.hpp"
+
+namespace trade_ngin {
+
+/**
+ * @brief One contract with a listing date and the contract the book trades before it
+ *
+ * portfolio.json's optional "listing_dates" block (off when absent):
+ *   "listing_dates": {"contracts": [{"symbol": "MES", "listed": "2019-05-06", "before": "ES", "ratio": 10}]}
+ * `symbol` and `before` are roots ("MES" for "MES.v.0"); `listed` is a UTC date.
+ */
+struct ListedContract {
+    std::string symbol;  ///< the contract that lists on `listed` (the micro)
+    std::string before;  ///< the contract traded before it (the full-size predecessor)
+    std::string listed;  ///< YYYY-MM-DD
+    double ratio{0.0};   ///< listed contracts per predecessor contract of the same exposure (10 for a micro)
+};
+
+/// One conversion a cycle's signal feed makes due: both contracts printed, the listed one on or
+/// after its listing date. Whether a position is held, and whether both bars are sessions, is the
+/// caller's to read.
+struct ListingConversion {
+    std::string from;  ///< the predecessor's symbol ("ES.v.0")
+    std::string to;    ///< the listed contract's symbol ("MES.v.0")
+    double ratio{0.0};
+    double from_close{0.0};
+    double to_close{0.0};
+};
+
+/// The cost of one conversion leg, as the cost model prices a fill.
+struct ListingLegCost {
+    double commissions_fees{0.0};
+    double implicit_price_impact{0.0};
+    double slippage_market_impact{0.0};
+    double total_transaction_costs{0.0};
+};
+
+/// A vendor instrument-id change that is NOT a roll: from `date` the vendor labels the SAME contract
+/// of `symbol` (a root) with id `to` where it had used `from`. portfolio.json's optional block:
+///   "instrument_id_relabels": [{"symbol": "MES", "date": "2026-02-22", "from": "42140878", "to": "42003800"}]
+/// Every bar of the symbol dated on or after `date` that carries `to` is read as carrying `from`, at
+/// the loader, so no consumer sees a change: no change bar, no hold, no ROLL legs or costs, the
+/// day's move booked as on any day, and the adjusted series keeps that day's return.
+struct InstrumentIdRelabel {
+    std::string symbol;
+    std::string date;  ///< YYYY-MM-DD, the first bar that carries the new id
+    std::string from;
+    std::string to;
+};
+
+/// The relabels a run reads: `declared` with portfolio.json's per_contract_rolls off; none with it
+/// on, where the per-contract rule names each change as one roll between the two contracts of one expiry
+/// (trigger alias, contract_roll_rule.hpp MicroAlias), so no id is read as another.
+std::vector<InstrumentIdRelabel> relabels_read(const std::vector<InstrumentIdRelabel>& declared,
+                                               bool per_contract_rolls);
+/// The line a run logs when it declares relabels and does not read them (the switch on).
+std::string relabels_not_read_line(const std::vector<InstrumentIdRelabel>& declared);
+
+/// How the book moves from the predecessor to the listed contract on the switch rebalance.
+///   kCloseReenter  the predecessor is closed by the engine's close-out and the pass opens the
+///                  listed contract from a held position of zero
+///   kConvert       q predecessor contracts become exactly ratio x q listed contracts, and the pass
+///                  starts from that held position
+///   kOpenAtTarget  the predecessor is closed and the listed contract is opened at its unrounded
+///                  target (bounded by the per-name cap) rounded to the nearest whole contract, a
+///                  half away from zero; the pass starts from that held position
+///   kCarryToTarget a pair whose predecessor is HELD is switched as kOpenAtTarget (one exit of the
+///                  predecessor, one entry of the listed contract at its rounded target); a pair with
+///                  nothing held is left to the pass, as kConvert leaves it
+enum class ListingSwitchRule { kCloseReenter, kConvert, kOpenAtTarget, kCarryToTarget };
+const char* to_string(ListingSwitchRule rule);
+/// "close_reenter", "convert", "open_at_target", "carry_to_target"; false on anything else.
+bool parse_listing_switch_rule(const std::string& text, ListingSwitchRule* out);
+
+/// A switch, of the book (as plan_listing_switch plans it) or of one sleeve's part of it: the fill
+/// that closes the predecessor (signed; 0 when none is held), the fill in the listed contract
+/// (signed; 0 when none), and the listed contract's held quantity after.
+struct ListingSwitch {
+    double close_from{0.0};
+    double trade_to{0.0};
+    double new_to{0.0};
+};
+/// The BOOK's switch (the pass runs on the portfolio book and its whole
+/// numbers are split to the sleeves afterwards). `held_from` and `held_to` are the book's net
+/// holdings; `target_to` is the listed contract's SCALED target in contracts (the capped target
+/// times the overlay's scalar) and `cap_to` the per-name cap
+/// in contracts (0 = none); both are read by kOpenAtTarget and kCarryToTarget only. kCloseReenter plans nothing.
+/// `in_deferral_band`: the held predecessor is on the other side of a forecast weaker than the
+/// deferral band, a holding the pass would HOLD. The two target rules then
+/// carry it as kConvert does (the pass holds the carried position) instead of trading it to a
+/// target the band says not to trade to yet.
+ListingSwitch plan_listing_switch(ListingSwitchRule rule, double ratio, double held_from,
+                                  double held_to, double target_to, double cap_to,
+                                  bool in_deferral_band = false);
+
+/// The fills of a planned switch: the predecessor's close at its close, then the listed contract's
+/// fill at its close, each priced by `cost_of(symbol, signed quantity, price)`; a zero move makes
+/// no fill and is not priced. Type STRATEGY (they are trades of the book: the trade statistics
+/// close the one and open the other); told apart from the pass's fills by their ids ("LC-..." the
+/// close, "LO-..." the listed contract's). Throws std::invalid_argument on a close that is not positive.
+std::vector<ExecutionReport> make_listing_switch_fills(
+    const ListingConversion& conversion, const ListingSwitch& plan, const Timestamp& fill_time,
+    const std::string& id_close, const std::string& id_open,
+    const std::function<ListingLegCost(const std::string&, double, double)>& cost_of);
+
+/**
+ * @brief The tradeable windows of contracts that share one price history
+ *
+ * The vendor stores the predecessor's bars under the later contract's symbol (the E-mini's bars as
+ * "MES.v.0"). With contracts set, a backtest whose window starts before a listing date runs the
+ * predecessor as a symbol of its own on those same bars: the predecessor may hold a position only
+ * on signal bars dated before the listing date, the listed contract only on signal bars dated on
+ * or after it. Both keep the whole history. With no contract set (the default) every method is the
+ * identity and no caller's behaviour changes.
+ */
+class ListingDates {
+public:
+    static ListingDates& instance();
+
+    /// Replaces the contracts. An empty list switches the rule off. Throws std::invalid_argument on
+    /// an entry with an empty root, a date that is not YYYY-MM-DD, a ratio that is not a positive
+    /// whole number, or a root named twice.
+    void set(const std::vector<ListedContract>& contracts);
+    /// set()'s checks alone: throws std::invalid_argument, changes nothing.
+    static void validate(const std::vector<ListedContract>& contracts);
+    void clear();
+    /// The switch rule (kOpenAtTarget unless set). clear() does not change it.
+    void set_switch_rule(ListingSwitchRule rule);
+    ListingSwitchRule switch_rule() const;
+    bool enabled() const;
+    std::vector<ListedContract> contracts() const;
+
+    /// May the symbol hold a position on a signal bar of this instant? A predecessor: only before
+    /// its listing date. A listed contract: only on or after it. Any other symbol: always.
+    bool tradeable(const std::string& symbol, const Timestamp& bar_time) const;
+
+    /// The ratio against the two contracts' sizes: empty when one `before` contract is exactly
+    /// `ratio` listed contracts (before_multiplier == ratio x listed_multiplier), else the line to
+    /// refuse the run with. The ratio is read by rule convert and by the deferral-band carry, so a
+    /// wrong one would carry the wrong exposure.
+    static std::string ratio_error(const ListedContract& contract, double before_multiplier,
+                                   double listed_multiplier);
+
+    /// Is the symbol ("ES.v.0" or "ES") a predecessor of a listed contract?
+    bool is_predecessor(const std::string& symbol) const;
+
+    /// The root a symbol's instrument weight and per-root rules are read under: the listed contract
+    /// for a predecessor ("ES" -> "MES"), the root itself otherwise.
+    std::string pair_root(const std::string& root) const;
+
+    /// The predecessor symbols a run over `symbols` adds for a window starting at `window_start`:
+    /// for every listed contract among `symbols` whose listing date is after the window's start, its
+    /// predecessor with the listed symbol's suffix ("MES.v.0" -> "ES.v.0"), in the contracts' order.
+    std::vector<std::string> predecessor_symbols(const std::vector<std::string>& symbols,
+                                                 const Timestamp& window_start) const;
+
+    /// `symbols` without the predecessors (they have no stored rows of their own), order kept.
+    std::vector<std::string> stored_symbols(const std::vector<std::string>& symbols) const;
+
+    /// The run's universe from the database's symbol list: `symbols` without
+    /// each predecessor whose listed contract is in `symbols` too, order kept. GC.v.0 and SI.v.0
+    /// keep stored rows of their own (the gold and silver micros' grid before their listing), but
+    /// while MGC.v.0 and SIL.v.0 are stored the pair is one instrument, the listed contract; a
+    /// window that starts before the listing adds the predecessor back (predecessor_symbols). A
+    /// predecessor whose listed contract is not stored stays. `dropped` (optional) receives the
+    /// symbols left out. With no contract set: `symbols` itself.
+    std::vector<std::string> run_universe(const std::vector<std::string>& symbols,
+                                          std::vector<std::string>* dropped = nullptr) const;
+
+    /// The declared pairs a run must refuse, one line each, on the database's stored symbol list
+    /// (before run_universe): (1) a pair whose predecessor's .v.0 is stored and its listed
+    /// contract's is not (MGC and SIL without their own rows loaded: the predecessor would
+    /// read the listed contract's rows, which are not there, and get no bars); (2) a pair of the
+    /// full-size grid kind (contract_roll_rule.hpp MicroAlias: MGC, SIL) with per_contract_rolls
+    /// off (the history before the listing is the alias's, which only the per-contract source
+    /// reads; without it the stored listed rows start at the listing). Empty: nothing refused.
+    std::vector<std::string> refusals(const std::vector<std::string>& stored_symbols,
+                                      bool per_contract_rolls) const;
+
+    /// The reverse of refusals(). For every micro of the code's
+    /// own alias table (contract_roll_rule.hpp micro_alias: MGC/GC, SIL/SI, MES/ES, MNQ/NQ, MYM/YM,
+    /// M2K/RTY) whose .v.0 is stored beside its full-size root's .v.0 while `declared` (portfolio.json's
+    /// listing_dates) has no pair for the two, one line naming both and what to add: the run would
+    /// trade the full-size contract and the micro side by side. Read on the database's stored symbol
+    /// list, with or without listing_dates. Empty: nothing refused.
+    static std::vector<std::string> unpaired_micro_refusals(
+        const std::vector<std::string>& stored_symbols, const std::vector<ListedContract>& declared);
+
+    /// For every predecessor in `symbols`: a copy of each row stored under its listed contract's
+    /// symbol, appended under the predecessor's symbol. Rows already there are not touched.
+    /// Each copy's cost_volume (the volume the cost feed prices the predecessor's
+    /// legs on) is the full-size contract's own volume. Before the listed root's micro change
+    /// (contract_roll_rule.hpp MicroAlias) the copied bar is the full-size contract's, so none is
+    /// set; from the change on it is the change marker's (RollFrom::volume), and on a copy with no
+    /// marker volume (the contract left printed nothing that day) the last full-size volume of
+    /// this load, stale by a bar or more (logged once per predecessor). A listed root with no
+    /// micro alias: none set. And the listed contract's own rows of its listing date's session (the
+    /// listing date's bar, and a weekend stub right before a weekday listing) take their
+    /// own_contract_volume as cost_volume, where set (the equity micros: their series carries the
+    /// full-size contract's bar, the volume their own contract's), so its LO- leg pays on its own.
+    void add_predecessor_bars(const std::vector<std::string>& symbols, std::vector<Bar>& bars) const;
+    void add_predecessor_ids(const std::vector<std::string>& symbols,
+                             std::vector<market_data_utils::FuturesInstrumentId>& ids) const;
+
+    /// Replaces the declared relabellings (empty: none). Throws std::invalid_argument on an entry
+    /// with an empty field or a date that is not YYYY-MM-DD. Independent of the contracts.
+    void set_relabels(const std::vector<InstrumentIdRelabel>& relabels);
+    static void validate_relabels(const std::vector<InstrumentIdRelabel>& relabels);
+    /// The id a bar of `symbol` at `bar_time` is read with: `from` where a relabel names its id as
+    /// `to` on or after the relabel's date, the id itself otherwise.
+    std::string read_id(const std::string& symbol, const Timestamp& bar_time,
+                        const std::string& instrument_id) const;
+    /// read_id applied to every bar / id row (the row's date for an id row). No-ops with no relabel.
+    void apply_relabels(std::vector<Bar>& bars) const;
+    void apply_relabels(std::vector<market_data_utils::FuturesInstrumentId>& ids) const;
+    bool has_relabels() const;
+    /// What is wrong with the declared relabels on a load of bars AS STORED (before apply_relabels):
+    /// one line for an entry that rewrites no bar although the load holds a bar of the symbol on
+    /// each side of its date (a wrong id, or nothing to relabel), and one for an entry whose new
+    /// id is already on a bar dated BEFORE its date (the date is late: the true change bar would
+    /// keep the new id and the next be read as the old one, a flip). Empty when all is well.
+    std::vector<std::string> relabel_findings(const std::vector<Bar>& bars) const;
+
+    /// The instrument-id rows of a load as every consumer reads them, backtest and live: the declared
+    /// relabels applied, then every predecessor in `symbols` given the rows of its listed contract.
+    /// The identity with nothing declared; an error is passed through.
+    Result<std::vector<market_data_utils::FuturesInstrumentId>> read_ids(
+        const std::vector<std::string>& symbols,
+        Result<std::vector<market_data_utils::FuturesInstrumentId>> ids) const;
+
+    /// The conversions this signal feed makes due (see ListingConversion), in the contracts' order.
+    std::vector<ListingConversion> conversions_due(const std::vector<Bar>& signal_feed) const;
+
+    /// "MES.v.0" -> "MES"
+    static std::string root_of(const std::string& symbol);
+
+private:
+    struct Entry {
+        ListedContract contract;
+        Timestamp listed_at;  ///< 00:00 UTC of the listing date
+    };
+    ListingDates() = default;
+    static std::vector<Entry> build(const std::vector<ListedContract>& contracts);
+    /// predecessor symbol -> listed symbol, for the predecessors named in `symbols`
+    std::vector<std::pair<std::string, std::string>> pairs_in(
+        const std::vector<std::string>& symbols) const;
+
+    mutable std::mutex mutex_;
+    std::vector<Entry> entries_;
+    struct RelabelEntry {
+        InstrumentIdRelabel relabel;
+        Timestamp from_time;
+    };
+    static std::vector<RelabelEntry> build_relabels(const std::vector<InstrumentIdRelabel>& relabels);
+    std::vector<RelabelEntry> relabels_;
+    ListingSwitchRule rule_{ListingSwitchRule::kOpenAtTarget};
+};
+
+}  // namespace trade_ngin

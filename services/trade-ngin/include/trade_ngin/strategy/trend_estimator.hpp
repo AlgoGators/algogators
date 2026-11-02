@@ -98,7 +98,7 @@ struct Estimate {
 double forecast_scalar(int fast, int slow);
 
 /**
- * @brief The equity slow rule (LOOP_SPEC section 2.5, D40) on one bar's combined forecast.
+ * @brief The equity slow rule on one bar's combined forecast.
  *
  * A NEGATIVE combined forecast stands only when the scaled forecast of every pair in `rule_pairs`
  * (each after its scalar, the attenuation and the cap, before the averaging) is negative; otherwise
@@ -114,15 +114,35 @@ double equity_slow_ruled(double combined, const std::vector<double>& scaled,
 bool pairs_supported(const std::vector<std::pair<int, int>>& pairs, std::string* unsupported = nullptr);
 
 /**
+ * @brief The pairs a contract keeps when the trading rules in `removed` are taken from it for cost
+ *        (portfolio.json's trading_rule_removals; Carver, Advanced Futures Trading Strategies,
+ *        strategy nine, "Removing expensive trading rules").
+ *
+ * A rule's cost rises with its turnover and the turnover with its speed, so the rules the cost
+ * limit takes from a contract are always its FASTEST ones, and the multiplier table (strategy
+ * nine, table 36) is stated for exactly those sets: all six, the five slowest, the four slowest
+ * and so on. A removal is therefore usable only when `removed` is the first k of `pairs` in the
+ * sleeve's own order, fastest first, with at least one pair left and none named twice. Anything
+ * else is refused: `refusal` (when given) says why and the result is empty.
+ */
+std::vector<std::pair<int, int>> pairs_after_removal(const std::vector<std::pair<int, int>>& pairs,
+                                                     const std::vector<std::pair<int, int>>& removed,
+                                                     std::string* refusal = nullptr);
+
+/**
  * @brief The estimators at the window's last bar.
  * @param window the trailing consumed bars (at most kWindowBars are read: the last ones)
  * @param vol_span the EWMA span of the volatility (32 for the trend sleeve, 16 for the fast one)
  * @param pairs the EWMAC pairs
  * @param fdm the forecast diversification multiplier for this number of pairs
  * @param attenuate whether the attenuation acts
+ * @param forecast_sigma_bars when given, receives the forecast's volatility at every window bar
+ *        (window index; 0 at the first bar, which has no return): the carry rules divide by it
+ *        (carry_estimator.hpp). Nothing else changes with it.
  */
 Estimate estimate(const Window& window, int vol_span, const std::vector<std::pair<int, int>>& pairs,
-                  double fdm, bool attenuate = true);
+                  double fdm, bool attenuate = true,
+                  std::vector<double>* forecast_sigma_bars = nullptr);
 
 }  // namespace trend_estimator
 }  // namespace trade_ngin

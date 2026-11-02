@@ -2,6 +2,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -39,6 +40,36 @@ TEST(PostgresParamSafety, ValidIdentifiersAccepted) {
     EXPECT_TRUE(db.validate_identifier("equities_data.fundamentals_1d").is_ok());
     EXPECT_TRUE(db.validate_identifier("_underscore_start").is_ok());
     EXPECT_TRUE(db.validate_identifier("col_with_digits_123").is_ok());
+}
+
+TEST(PostgresParamSafety, TableNameAcceptsQualifiedNameAndRejectsSqlKeyword) {
+    PostgresDatabase db = make_offline_db();
+    EXPECT_TRUE(db.validate_table_name("backtest.final_positions").is_ok());
+    auto rejected = db.validate_table_name("backtest.drop_table");
+    ASSERT_TRUE(rejected.is_error());
+    EXPECT_EQ(rejected.error()->code(), ErrorCode::INVALID_ARGUMENT);
+}
+
+TEST(PostgresParamSafety, StrategyIdAcceptsCurrentBoundaryAndRejectsCommentOpener) {
+    PostgresDatabase db = make_offline_db();
+    EXPECT_TRUE(db.validate_strategy_id(std::string(100, 'A')).is_ok());
+    auto too_long = db.validate_strategy_id(std::string(101, 'A'));
+    ASSERT_TRUE(too_long.is_error());
+    EXPECT_EQ(too_long.error()->code(), ErrorCode::INVALID_ARGUMENT);
+    auto comment = db.validate_strategy_id("alpha--beta");
+    ASSERT_TRUE(comment.is_error());
+    EXPECT_EQ(comment.error()->code(), ErrorCode::INVALID_ARGUMENT);
+}
+
+TEST(PostgresParamSafety, IdentifierAcceptsCurrentBoundaryAndRejectsLeadingDigit) {
+    PostgresDatabase db = make_offline_db();
+    EXPECT_TRUE(db.validate_identifier(std::string(64, 'a')).is_ok());
+    auto too_long = db.validate_identifier(std::string(65, 'a'));
+    ASSERT_TRUE(too_long.is_error());
+    EXPECT_EQ(too_long.error()->code(), ErrorCode::INVALID_ARGUMENT);
+    auto leading_digit = db.validate_identifier("1column");
+    ASSERT_TRUE(leading_digit.is_error());
+    EXPECT_EQ(leading_digit.error()->code(), ErrorCode::INVALID_ARGUMENT);
 }
 
 TEST(PostgresParamSafety, EmptyIdentifierRejected) {
@@ -89,7 +120,7 @@ TEST(PostgresParamSafety, OversizeRejected) {
 }
 
 // Existing validate_strategy_id has slightly different rules (allows dash,
-// 50-char cap). Pin those to ensure Phase 5's new helper doesn't accidentally
+// 100-char cap). Pin those to ensure Phase 5's new helper doesn't accidentally
 // converge them (they intentionally differ -- strategy_id is a value, not
 // an identifier).
 TEST(PostgresParamSafety, ValidateStrategyIdAcceptsDash) {
@@ -128,6 +159,34 @@ TEST(PostgresParamSafety, UpdateLiveResultsRejectsHostileColumnName) {
     EXPECT_EQ(r.error()->code(), ErrorCode::INVALID_ARGUMENT);
 }
 
+// Migration 036: a typed cell's column and type are concatenated too (the value is quoted), so
+// both are checked before the connection is looked at.
+TEST(PostgresParamSafety, TheLiveResultsWritersRejectAHostileCellColumnOrType) {
+    PostgresDatabase db = make_offline_db();
+    const std::unordered_map<std::string, double> numbers{{"sharpe_ratio", 1.2}};
+    const std::vector<std::vector<LiveResultsCell>> hostile = {
+        {{"x; DROP TABLE t", "numeric", std::string("1")}},
+        {{"worst_day_date", "date); DROP TABLE t; --", std::string("2025-10-10")}},
+        {{"worst_day_date", "timestamptz", std::nullopt}}};
+    for (const auto& cells : hostile) {
+        auto u = db.update_live_results("LIVE-EQUITY-MR", Timestamp{}, numbers, "BASE_PORTFOLIO",
+                                        "trading.live_results", nullptr, cells);
+        ASSERT_TRUE(u.is_error());
+        EXPECT_EQ(u.error()->code(), ErrorCode::INVALID_ARGUMENT);
+        auto i = db.store_live_results_complete("LIVE-EQUITY-MR", Timestamp{}, numbers, {},
+                                                nlohmann::json(), "BASE_PORTFOLIO",
+                                                "trading.live_results", nlohmann::json(), cells);
+        ASSERT_TRUE(i.is_error());
+        EXPECT_EQ(i.error()->code(), ErrorCode::INVALID_ARGUMENT);
+    }
+    // A well-formed cell passes the check and fails later, on the connection the fixture lacks.
+    auto ok = db.update_live_results("LIVE-EQUITY-MR", Timestamp{}, numbers, "BASE_PORTFOLIO",
+                                     "trading.live_results", nullptr,
+                                     {{"worst_day_date", "date", std::string("2025-10-10")}});
+    ASSERT_TRUE(ok.is_error());
+    EXPECT_NE(ok.error()->code(), ErrorCode::INVALID_ARGUMENT);
+}
+
 TEST(PostgresParamSafety, StoreLiveResultsCompleteRejectsHostileColumnName) {
     PostgresDatabase db = make_offline_db();
     std::unordered_map<std::string, double> metrics{{"sharpe_ratio", 1.2}};
@@ -136,4 +195,55 @@ TEST(PostgresParamSafety, StoreLiveResultsCompleteRejectsHostileColumnName) {
                                             nlohmann::json(), "BASE_PORTFOLIO", "trading.live_results");
     ASSERT_TRUE(r.is_error());
     EXPECT_EQ(r.error()->code(), ErrorCode::INVALID_ARGUMENT);
+}
+
+// DB-corp-action-table-name-unvalidated. The three corporate-action reads
+// interpolate `table_name` into their FROM clause. Each refuses a name outside
+// the allowlist before it looks at the connection, so the refusal runs here
+// with no database: an offline object answers INVALID_ARGUMENT for a hostile
+// name and CONNECTION_ERROR for the real one (the check does not refuse
+// everything).
+TEST(PostgresParamSafety, TheCorpActionReadsRefuseAHostileTableNameBeforeTheConnection) {
+    PostgresDatabase db = make_offline_db();
+    const std::vector<std::string> symbols = {"AAPL"};
+    const char* hostile[] = {
+        "trading.positions; DROP TABLE trading.positions",
+        "trading.positions WHERE 1=1 UNION SELECT * FROM trading.live_results",
+        "trading.positions--",
+        "trading.positions/*x*/",
+        "trading positions",
+        "trading.\"positions\"",
+        "",
+    };
+    for (const char* t : hostile) {
+        auto inception = db.get_position_inception_dates("ID", "NAME", "PORTFOLIO", symbols, t);
+        ASSERT_TRUE(inception.is_error()) << "accepted table_name: '" << t << "'";
+        EXPECT_EQ(inception.error()->code(), ErrorCode::INVALID_ARGUMENT)
+            << "get_position_inception_dates, table_name '" << t
+            << "': " << inception.error()->what();
+
+        auto holding =
+            db.get_current_holding_start_dates("ID", "NAME", "PORTFOLIO", symbols, "2026-06-15", t);
+        ASSERT_TRUE(holding.is_error()) << "accepted table_name: '" << t << "'";
+        EXPECT_EQ(holding.error()->code(), ErrorCode::INVALID_ARGUMENT)
+            << "get_current_holding_start_dates, table_name '" << t
+            << "': " << holding.error()->what();
+
+        auto last_buy = db.get_last_buy_dates("ID", "NAME", "PORTFOLIO", symbols, "2026-06-01",
+                                              "2026-06-15", t);
+        ASSERT_TRUE(last_buy.is_error()) << "accepted table_name: '" << t << "'";
+        EXPECT_EQ(last_buy.error()->code(), ErrorCode::INVALID_ARGUMENT)
+            << "get_last_buy_dates, table_name '" << t << "': " << last_buy.error()->what();
+    }
+
+    auto inception = db.get_position_inception_dates("ID", "NAME", "PORTFOLIO", symbols);
+    ASSERT_TRUE(inception.is_error());
+    EXPECT_EQ(inception.error()->code(), ErrorCode::CONNECTION_ERROR);
+    auto holding = db.get_current_holding_start_dates("ID", "NAME", "PORTFOLIO", symbols);
+    ASSERT_TRUE(holding.is_error());
+    EXPECT_EQ(holding.error()->code(), ErrorCode::CONNECTION_ERROR);
+    auto last_buy =
+        db.get_last_buy_dates("ID", "NAME", "PORTFOLIO", symbols, "2026-06-01", "2026-06-15");
+    ASSERT_TRUE(last_buy.is_error());
+    EXPECT_EQ(last_buy.error()->code(), ErrorCode::CONNECTION_ERROR);
 }

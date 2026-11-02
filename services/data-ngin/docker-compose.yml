@@ -1,0 +1,88 @@
+# Run from this directory. Build contexts point at the repo root because the
+# service depends on the workspace lib platform-db (not on PyPI); the code is
+# INSTALLED into the images, no source volume-mounts needed.
+#
+# Airflow 3 needs these in a .env next to this file (never commit it):
+#   AIRFLOW_DB_CONN     metadata DB DSN (postgresql+psycopg2://...)
+#   AIRFLOW_JWT_SECRET  shared by every Airflow component to sign task tokens
+#   AIRFLOW_SECRET_KEY  signs UI sessions
+# Generate the two secrets with: openssl rand -hex 32
+
+x-airflow-common: &airflow-common
+  build:
+    context: ../..
+    dockerfile: services/data-ngin/Dockerfile.airflow
+  image: data-ngin-airflow:local
+  environment:
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_DB_CONN:?AIRFLOW_DB_CONN is unset}
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    # Keep the FAB auth manager (Airflow 3 defaults to the dev-only simple
+    # one) so existing users carry over and OIDC can plug in later.
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    # Airflow 3 task processes report back through the API server, not the DB.
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?AIRFLOW_JWT_SECRET is unset}
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY:?AIRFLOW_SECRET_KEY is unset}
+    AIRFLOW__API__EXPOSE_CONFIG: "non-sensitive-only"
+  volumes:
+    # Logs only: mounting all of /opt/airflow would shadow the DAGs baked
+    # into the image with whatever the volume held from its first run.
+    - airflow_logs:/opt/airflow/logs
+
+services:
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    command: >
+      bash -c "airflow db migrate &&
+               airflow connections create-default-connections"
+
+  airflow-api-server:
+    <<: *airflow-common
+    container_name: airflow-api-server
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    command: ["airflow", "api-server"]
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    command: ["airflow", "scheduler"]
+
+  # Airflow 3 parses DAG files in its own process; the scheduler no longer does.
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: airflow-dag-processor
+    restart: always
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    command: ["airflow", "dag-processor"]
+
+  api:
+    build:
+      context: ../..
+      dockerfile: services/data-ngin/Dockerfile
+    container_name: data-ngin-api
+    restart: always
+    environment: {}
+      # DATA_NGIN_CONFIG_PATH: only set to override the packaged
+      # data_ngin/config/config.yaml default.
+      # DATA_NGIN_API_KEY: set this before exposing the API beyond localhost --
+      # unset, the API-key check is disabled (see data_ngin/api/server.py).
+    ports:
+      - "8000:8000"
+
+volumes:
+  airflow_logs:

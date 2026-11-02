@@ -168,6 +168,9 @@ TEST(LiveSettingsCheck, ASleeveThatIsNotATrendStrategyIsNotCheckedAsOne) {
         other["config"] = Json::object();  // no sleeve keys: a trend check would refuse it
         other["default_allocation"] = 0.0;
         p["strategies"]["OTHER"] = other;
+        // A book of two sleeves carries no trading_rule_removals (the loader refuses the list
+        // outside a book of one trend sleeve, as BASE's two sleeves have none).
+        p.erase("trading_rule_removals");
     });
     auto r = check_live_settings_overlay(dir, "qt_conservative", Json::object());
     EXPECT_TRUE(r.is_ok()) << r.error()->what();
@@ -311,12 +314,14 @@ TEST(LiveSettingsCheck, EverySettingTheDeskCanSaveIsReadByALiveRun) {
         }
         auto live = ConfigLoader::load(tmpl(), "qt_conservative", &overrides);
         ASSERT_TRUE(live.is_ok()) << name;
-        // Two optimisation knobs are read into AppConfig members its to_json does not write.
+        // Three settings are read into AppConfig members its to_json does not write.
         const bool member_moved =
             (name == "optimization.sign_close_band" &&
              live.value().sign_close_band != base.value().sign_close_band) ||
             (name == "optimization.b_sigma_floor" &&
-             live.value().b_sigma_floor != base.value().b_sigma_floor);
+             live.value().b_sigma_floor != base.value().b_sigma_floor) ||
+            (name == "per_contract_rolls" &&
+             live.value().per_contract_rolls != base.value().per_contract_rolls);
         if (live.value().to_json() == base_config && !member_moved) {
             problems.push_back(name + " = " + value.dump() +
                                ": saved but not read (no change in the parsed config)");

@@ -1,7 +1,9 @@
 #include "trade_ngin/live/live_pnl_manager.hpp"
 #include "trade_ngin/core/logger.hpp"
+#include "trade_ngin/core/stat_quality.hpp"
 #include <cmath>
 #include <mutex>
+#include <set>
 #include <unordered_set>
 
 namespace trade_ngin {
@@ -31,6 +33,7 @@ Result<LivePnLManager::FinalizationResult> LivePnLManager::finalize_previous_day
 
     if (previous_positions.empty()) {
         INFO("No positions to finalize for Day T-1");
+        INFO(stat_quality::finalize_line(0, {}));
         result.success = true;
         return Result<FinalizationResult>(result);
     }
@@ -41,6 +44,10 @@ Result<LivePnLManager::FinalizationResult> LivePnLManager::finalize_previous_day
     }
 
     double total_finalized_pnl = 0.0;
+    // STAT_QUALITY: the held symbols of the settled book and, of them, the
+    // ones with no close on the settled date. A log line only: nothing below reads the two.
+    std::set<std::string> held_symbols;
+    std::set<std::string> held_no_bar;
 
     INFO("Finalizing " + std::to_string(previous_positions.size()) + " positions for Day T-1");
     INFO("DEBUG FINALIZATION: Starting finalize_previous_day()");
@@ -52,14 +59,18 @@ Result<LivePnLManager::FinalizationResult> LivePnLManager::finalize_previous_day
         // Get Day T-1 close (current close for Day T-1)
         // T-1 data is REQUIRED - if missing, add position with 0 PnL to maintain continuity
         auto t1_it = t1_close_prices.find(symbol);
+        if (quantity != 0.0) {
+            held_symbols.insert(symbol);
+            if (t1_it == t1_close_prices.end()) held_no_bar.insert(symbol);
+        }
         if (t1_it == t1_close_prices.end()) {
             Position finalized_pos = position;
             result.position_realized_pnl[symbol] = 0.0;
             if (unrealized_policy == UnrealizedPolicy::MARK_TO_MARKET) {
-                // E2-F19 R-1 / R-2 (cash book): a symbol with no T-1 print -- a halt, a
+                // Cash book: a symbol with no T-1 print -- a halt, a
                 // thin name, a feed gap -- realized nothing today (its trade flow is what
                 // the day's own run recorded, kept as-is) and is still worth its last
-                // known mark. Writing 0/0 here erased a real level for a day and had it
+                // known mark. Writing 0/0 here would erase a real level for a day and have it
                 // reappear the next session as a phantom jump in daily unrealized.
                 finalized_pos.realized_pnl = position.realized_pnl;
                 finalized_pos.unrealized_pnl = position.unrealized_pnl;
@@ -89,7 +100,7 @@ Result<LivePnLManager::FinalizationResult> LivePnLManager::finalize_previous_day
             result.position_realized_pnl[symbol] = 0.0;
             if (unrealized_policy == UnrealizedPolicy::MARK_TO_MARKET) {
                 // Cash book with a T-1 close but no T-2 close: the mark IS computable from
-                // the cost basis, and realized is the day's trade flow (R-1 / R-2).
+                // the cost basis, and realized is the day's trade flow.
                 double avg_price = position.average_price.as_double();
                 finalized_pos.realized_pnl = position.realized_pnl;
                 finalized_pos.unrealized_pnl =
@@ -113,7 +124,7 @@ Result<LivePnLManager::FinalizationResult> LivePnLManager::finalize_previous_day
         // Get point value for the symbol
         double point_value = get_point_value(symbol);
 
-        // Calculate Day T-1 PnL. T-ROLLX-FIX (LOOP_SPEC v6.1 sections 2.1, 6.6): a change bar or a
+        // Calculate Day T-1 PnL. A change bar or a
         // withheld bar books no settlement move (zero_pnl_symbols).
         double yesterday_position_pnl =
             zero_pnl_symbols.count(symbol)
@@ -136,7 +147,7 @@ Result<LivePnLManager::FinalizationResult> LivePnLManager::finalize_previous_day
 
         // Create finalized position with realized PnL.
         //
-        // E2-F19 R-1: what lands in the ROW's realized_pnl follows the settlement model.
+        // What lands in the ROW's realized_pnl follows the settlement model.
         // SETTLED (futures): the settlement move IS the day's realized. MARK_TO_MARKET
         // (equities): the row keeps the trade realized the day's own run recorded; the
         // move is a mark and belongs in unrealized_pnl below. The aggregate fields
@@ -154,7 +165,7 @@ Result<LivePnLManager::FinalizationResult> LivePnLManager::finalize_previous_day
         // being settled here at close(T); that whole move is booked as realized just
         // above, so there is no unrealized component. Writing one would record the same
         // settlement move twice, because on a futures row average_price IS day_t2_close
-        // and the expression below reduces exactly to the realized formula (E2-F3).
+        // and the expression below reduces exactly to the realized formula.
         //
         // MARK_TO_MARKET (equities): average_price is a true weighted cost basis, so the
         // expression is the genuine unrealized P&L.
@@ -164,7 +175,7 @@ Result<LivePnLManager::FinalizationResult> LivePnLManager::finalize_previous_day
                 (avg_price > 0.0 && quantity != 0.0)
                     ? Decimal(quantity * (day_t1_close - avg_price) * point_value)
                     : Decimal(0.0);
-            // E2-F1: carry the same figure into the aggregate so the row-sums-to-aggregate
+            // Carry the same figure into the aggregate so the row-sums-to-aggregate
             // invariant (protocol L5) holds by construction. Deliberately accumulated inside
             // the MARK_TO_MARKET branch only -- under SETTLED this stays 0.0 for futures
             // without needing a second guard anywhere.
@@ -185,9 +196,9 @@ Result<LivePnLManager::FinalizationResult> LivePnLManager::finalize_previous_day
     INFO("DEBUG FINALIZATION: Result.finalized_daily_pnl (GROSS)=" + std::to_string(result.finalized_daily_pnl));
     result.finalized_portfolio_value = calculate_portfolio_value(previous_portfolio_value, net_pnl);
 
-    INFO("Day T-1 finalization complete: Total PnL (Gross)=" + std::to_string(total_finalized_pnl) +
-         ", Net PnL=" + std::to_string(net_pnl) +
-         ", Portfolio Value=" + std::to_string(result.finalized_portfolio_value));
+    INFO(
+        finalization_complete_line(total_finalized_pnl, net_pnl, result.finalized_portfolio_value));
+    INFO(stat_quality::finalize_line(held_symbols.size(), held_no_bar));
 
     result.success = true;
     return Result<FinalizationResult>(result);
@@ -340,7 +351,7 @@ double LivePnLManager::get_point_value(const std::string& symbol) const {
         }
     }
 
-    // E2-F38 / BA-7: a share is a share: one unit, point value 1.0. There is nothing to guess.
+    // A share is a share: one unit, point value 1.0. There is nothing to guess.
     if (asset_type_ != AssetType::FUTURE) {
         WARN("No registry entry for " + symbol + "; it is not a futures symbol, so its "
              "point value is 1.0.");

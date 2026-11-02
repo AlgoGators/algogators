@@ -1,0 +1,51 @@
+# TWC / Kalshi Weather Index settlement study (twc, 2026-10-15). Source: docs/TWC_SETTLEMENT.md, docs/TWC_HOURLY_PREREG.md
+- strategy_id: twc_daily_settle_vs_cli_metar
+  name: Kalshi daily KXHIGH*/KXLOW* settlement after the switch to The Weather Company, vs NWS CLI / METAR / 5-min ASOS (settlement-mechanics check)
+  venue: kalshi
+  status: rejected
+  evidence: docs/TWC_SETTLEMENT.md
+  verdict: "No TWC-specific edge. All 42 pre-existing daily temperature series switched rules from NWS CLI to The Weather Company with event date 2026-08-14 (6 later-launched series were TWC from launch). TWC expiration_value equals the NWS CLI final on 2,837 of 2,838 city-days (2026-08-14..10-13). The one exception is a gross TWC error, not QC: KXHIGHMIA-26AUG29 settled 90F while CLI and every METAR said 85F, so the 'below 88' bracket (34k contracts) lost. Versus round(METAR including 6-h groups), highs match 98.9% and lows 85.6% (lows settle 1F lower 11.6% of days, predictable when the 5-min min is below the METAR min). CLI-era backtests remain representative and wxlive P&L logic (5-min feed overstates the settlement max) is unchanged."
+  key_numbers: {events: 2840, twc_eq_cli: 2837, twc_gross_errors: 1, high_eq_metar6h: 0.989, low_eq_metar6h: 0.856, high_eq_5min: 0.709, low_eq_5min: 0.926, switch_event_date: "2026-08-14"}
+  gaps: 5-min/1-min ASOS only for 378 complete station-days (IEM archive); one TWC gross error in 2,840 is a tail-rate estimate with wide uncertainty.
+  next_tests: Re-run scripts/research/twc_source_map.py daily to catch further source/station changes.
+  retest_if: Kalshi changes the daily source again, or TWC values start diverging from CLI (>0.5% of city-days).
+- strategy_id: twc_hourly_post_reading_latency
+  name: Kalshi hourly temperature (KXTEMP*H/HS) - trade after the stated reading time once the reading is public
+  venue: kalshi
+  status: rejected
+  evidence: docs/TWC_SETTLEMENT.md
+  verdict: "Impossible by construction: the rulebook sets Last Trading Time = the settlement minute S and the markets close exactly at S. Zero volume in 34,517 one-minute candles after S over 1,061 KWI-era hours; recorder KXTEMPMIAH last prints land 2-6 s before S (5 of 6 events)."
+  key_numbers: {hours: 1061, post_close_candles: 34517, post_close_volume: 0}
+  gaps: none
+  next_tests: none
+  retest_if: Kalshi lists hourly contracts whose last trading time is after the reading time.
+- strategy_id: twc_hourly_index_convergence_taker
+  name: Kalshi hourly temperature index markets - taker in the last 1-10 min using the free Kalshi Weather Index (canonical t+300 s or per-station pending readings ~145 s after the minute)
+  venue: kalshi
+  status: rejected
+  evidence: docs/TWC_SETTLEMENT.md; docs/TWC_HOURLY_PREREG.md
+  verdict: "Pre-registered (30 cells, train <= 2026-09-30, test 10-01..10-14, 4 cities, 177k decisions). Settlement = the canonical Kalshi Weather Index point at S on 100% of 3,470 events with index history, and the per-station pending readings on the free /live_data/weather endpoint reproduce it exactly ~145 s after each minute (vs 300 s for the canonical point). Still the market beats the empirical index nowcast at every k (test Brier 0.101-0.104 vs 0.113-0.161) and all 30 test cells lose (-1.8 to -6.5c/contract, most CIs < 0). Pending info adds a sliver (k=1 blend Brier 0.1013 vs market 0.1023) that is far below the ~6-10c spread plus taker fee. Other participants price the stations faster (direct Synoptic/HF-ASOS)."
+  key_numbers: {decisions: 177198, test_best_c: -1.77, test_worst_c: -6.48, train_best_c: 4.81, brier_mkt_test_k1: 0.1023, brier_modelP_test_k1: 0.1133, pending_lag_s: 145, contracts_per_day_4series: 640000}
+  gaps: 1-min candles (no depth); empirical dI model pools all hours (no diurnal drift); maker side not tested (needs recorder depth for all 4 series).
+  next_tests: Optional - a causal maker test that quotes off the pending index once the recorder covers KXTEMPNYCHS/CHIHS/LAXHS books for 2+ weeks (needs recorder config change by the user).
+  retest_if: A free sub-60 s HF-ASOS feed appears, or spreads at k<=3 widen above 15c with stale quotes.
+- strategy_id: twc_hourly_twc_era_metar_settle
+  name: TWC-era hourly temperature markets (Aug 7 - Sep 10 2026) - buy the side implied by the last routine METAR before close
+  venue: kalshi
+  status: rejected
+  evidence: docs/TWC_SETTLEMENT.md
+  verdict: "Historical (series replaced by the Synoptic-index *HS series on 2026-09-10). TWC's 'temperature at S' equalled the last METAR at or before S (obs :51-:56) on 99.5% of 4,008 events. But the book went one-sided as soon as that METAR was observed: two-sided quotes fall from 43% of markets at S-8 to 2% at S-5. With the measured free aviationweather.gov latency (~4 min, n=11) only 2 of 30,730 markets still offered the implied side below $1. A hypothetical 2-min feed would have found 1,287 fills at +8.8c (candle closes, no depth) - someone faster already took it."
+  key_numbers: {events: 4008, xv_eq_last_metar: 0.995, buyable_at_4min_latency: 2, buyable_at_2min_latency: 1287, c_per_at_2min: 8.79, awc_latency_median_min: 3.9}
+  gaps: AWC latency from one 70-min sample; candles have no depth.
+  next_tests: none (series no longer listed)
+  retest_if: Kalshi re-lists hourly markets settling on a single-station TWC/METAR reading.
+- strategy_id: twc_qc_spike_fade
+  name: Fade market moves on raw single-station spikes that TWC / Kalshi-index QC will reject
+  venue: kalshi
+  status: rejected
+  evidence: docs/TWC_SETTLEMENT.md
+  verdict: "No QC events to trade. The Kalshi Weather Index spatial QC (reject at >= max(4C, 6xMAD)) rejected nothing in ~244k index-minutes across 4 cities (only 4 range and 10 provider-QC codes); member spreads >= 4C are routine and enter the index. Daily: in 28 TWC-era days where a single METAR spike set the max, TWC/CLI kept it in 27; TWC applies no visible QC beyond CLI."
+  key_numbers: {index_minutes: 244440, spatial_rejections: 0, daily_spike_days: 28, spike_excluded: 1}
+  gaps: Synoptic provider flags not visible beyond the code field.
+  next_tests: none
+  retest_if: Kalshi tightens the index QC thresholds.

@@ -4,8 +4,10 @@
 #include <unordered_set>
 #include <nlohmann/json.hpp>
 #include "trade_ngin/backtest/backtest_coordinator.hpp"
+#include "trade_ngin/backtest/backtest_metrics_calculator.hpp"
 #include "trade_ngin/backtest/equity_cost_warmup.hpp"
 #include "trade_ngin/core/config_loader.hpp"
+#include "trade_ngin/core/resolved_sleeves.hpp"
 #include "trade_ngin/core/logger.hpp"
 #include "trade_ngin/core/time_utils.hpp"
 #include "trade_ngin/data/database_pooling.hpp"
@@ -57,7 +59,7 @@ int main() {
 
         // Wire the shared HolidayChecker into EquityInstrument's static slot so
         // any market-hours queries on equity instruments consult the calendar.
-        // Phase 6 §6a: path resolved via HolidayChecker::resolve_holidays_path.
+        // The path is resolved via HolidayChecker::resolve_holidays_path.
         auto holiday_checker_ptr = std::make_shared<HolidayChecker>(
             HolidayChecker::resolve_holidays_path());
         EquityInstrument::set_holiday_checker(holiday_checker_ptr);
@@ -107,7 +109,7 @@ int main() {
         // COLLECT ENABLED STRATEGIES + LOAD SYMBOLS FROM CONFIG
         // ========================================
         // Iterate strategies_config (validates types, ERRORs on an unknown type
-        // instead of silently skipping it -- review §F10) rather than hardcoding
+        // instead of silently skipping it) rather than hardcoding
         // the MEAN_REVERSION key.
         auto strat_entries_result = trade_ngin::apps::collect_enabled_equity_strategies(
             app_config.strategies_config, "enabled_backtest");
@@ -149,7 +151,7 @@ int main() {
 
         // Register equity instruments in the registry. Pass the exchange JSON
         // path so per-symbol exchanges are correctly populated (NASDAQ/NYSE/etc)
-        // instead of every symbol silently defaulting to NYSE. Closes audit §1.2.
+        // instead of every symbol silently defaulting to NYSE.
         auto equity_reg_result = registry.load_equity_instruments(
             symbols, "data/equity_exchanges.json");
         if (equity_reg_result.is_error()) {
@@ -158,13 +160,13 @@ int main() {
             return 1;
         }
 
-        // Phase 2 leverage guardrail (audit §3.3): CASH-mode equities cannot
+        // Leverage guardrail: CASH-mode equities cannot
         // be in a portfolio with max_gross_leverage > 1.0 -- cash accounts
         // can't borrow, so a leverage cap above 1.0 is structurally invalid.
         // Fail fast at startup rather than silently producing nonsense margin.
-        // The optimizer is hard-coded off below (HD 2026-09-01). A config that says
+        // The optimizer is hard-coded off below. A config that says
         // otherwise is a contradiction, and silently winning it would leave the operator
-        // believing a setting that does nothing. Silent on today's config, which says false.
+        // believing a setting that does nothing. Silent on a config that says false.
         if (auto optimizer_guard =
                 apps::refuse_if_optimizer_requested(app_config.use_optimization);
             optimizer_guard.is_error()) {
@@ -197,9 +199,9 @@ int main() {
         // ========================================
         // CONFIGURE BACKTEST PARAMETERS
         // ========================================
-        // Window resolution lives in ConfigLoader::resolve_backtest_window (M-12).
+        // Window resolution lives in ConfigLoader::resolve_backtest_window.
         // With backtest.frozen_end_date unset -- the deployed state -- it is the
-        // same now()/lookback_years arithmetic this block used to do inline.
+        // now()/lookback_years arithmetic.
         bool frozen_window = false;
         auto now = std::chrono::system_clock::now();
         auto window = trade_ngin::ConfigLoader::resolve_backtest_window(
@@ -207,7 +209,7 @@ int main() {
         Timestamp start_date = window.first;
         Timestamp end_date = window.second;
         if (frozen_window) {
-            WARN("M-12 FROZEN BACKTEST WINDOW in force: end_date pinned to "
+            WARN("FROZEN BACKTEST WINDOW in force: end_date pinned to "
                  + app_config.backtest.frozen_end_date
                  + ". This is a TEST configuration; a production run must not show this line.");
         }
@@ -226,6 +228,9 @@ int main() {
         coord_config.use_optimization = app_config.use_optimization;
         coord_config.store_trade_details = app_config.backtest.store_trade_details;
         coord_config.portfolio_id = app_config.portfolio_id;
+        // K of the equity statistics grid (NYSE sessions), the one factor the run's
+        // annualised statistics use.
+        coord_config.statistics_sessions_per_year = app_config.statistics.equity_sessions_per_year;
 
         auto coordinator = std::make_unique<BacktestCoordinator>(db, &registry, coord_config);
 
@@ -327,16 +332,16 @@ int main() {
 
         // Register tier-appropriate equity cost configs before the backtest runs, on both cost
         // managers that price a fill (the coordinator's execution manager's and the
-        // PortfolioManager's own, E2-C9). Closes audit §1.1: previously unconfigured equities
-        // fell through to futures defaults ($1.50/share commission, point_value=100).
+        // PortfolioManager's own). Unconfigured equities would otherwise fall through to
+        // futures defaults ($1.50/share commission, point_value=100).
         //
-        // H-13 (HD 2026-09-21): the window is the 30 calendar days BEFORE start_date, ending
-        // strictly before it, so the tiers are set from bars that existed when the backtest
-        // starts; it used to be the 30 days AFTER start_date (a look-ahead). It is loaded with
-        // MarketDataBus publishing disabled, as the futures runners and run_portfolio load theirs,
-        // so the bars reach only the two cost registrations: with the bus on, every warm-up row
-        // was a BAR event, a full PortfolioManager cycle fed the strategies future bars before the
-        // run, and the PM's history kept them on the warm-up query's adjustment basis.
+        // The window is the 30 calendar days BEFORE start_date, ending strictly before it, so
+        // the tiers are set from bars that existed when the backtest starts (no look-ahead).
+        // It is loaded with MarketDataBus publishing disabled, as the futures runners and
+        // run_portfolio load theirs, so the bars reach only the two cost registrations: with
+        // the bus on, every warm-up row would be a BAR event, a full PortfolioManager cycle
+        // would feed the strategies future bars before the run, and the PM's history would
+        // keep them on the warm-up query's adjustment basis.
         backtest::register_equity_cost_warmup(
             symbols, start_date,
             [&](const Timestamp& from, const Timestamp& to) {
@@ -365,17 +370,18 @@ int main() {
         std::cout << "\n======= Equity Mean Reversion Backtest Results =======" << std::endl;
         std::cout << "Total Return: " << std::fixed << std::setprecision(2)
                   << (backtest_results.total_return * 100.0) << "%" << std::endl;
-        std::cout << "Sharpe Ratio: " << std::setprecision(3) << backtest_results.sharpe_ratio
+        std::cout << "Sharpe Ratio: " << std::setprecision(3) << ratio_or_na(backtest_results.sharpe_ratio)
                   << std::endl;
-        std::cout << "Sortino Ratio: " << backtest_results.sortino_ratio << std::endl;
+        std::cout << "Sortino Ratio: " << ratio_or_na(backtest_results.sortino_ratio) << std::endl;
         std::cout << "Max Drawdown: " << std::setprecision(2)
                   << (backtest_results.max_drawdown * 100.0) << "%" << std::endl;
-        std::cout << "Calmar Ratio: " << std::setprecision(3) << backtest_results.calmar_ratio
+        std::cout << "Calmar Ratio: " << std::setprecision(3) << ratio_or_na(backtest_results.calmar_ratio)
                   << std::endl;
-        std::cout << "Volatility: " << std::setprecision(2)
+        std::cout << "Volatility (annualised): " << std::setprecision(2)
                   << (backtest_results.volatility * 100.0) << "%" << std::endl;
-        std::cout << "Win Rate: " << (backtest_results.win_rate * 100.0) << "%" << std::endl;
-        std::cout << "Total Trades: " << backtest_results.total_trades << std::endl;
+        std::cout << "Trade win rate (closing fills): " << (backtest_results.win_rate * 100.0)
+                  << "%" << std::endl;
+        std::cout << "Closing fills: " << backtest_results.total_trades << std::endl;
         std::cout << "====================================================" << std::endl;
 
         // Save results
@@ -402,6 +408,21 @@ int main() {
                     {"position_size", mr.position_size},
                     {"vol_lookback", mr.vol_lookback},
                     {"allow_fractional_shares", mr.allow_fractional_shares}};
+                // The sleeve's resolved risk_target is mean_reversion's above; the
+                // window rule, the warm-up and the sessions a year the calculator applied to
+                // the statistics are added.
+                trade_ngin::add_backtest_run_keys(
+                    config_json, app_config.backtest.lookback_years,
+                    app_config.backtest.frozen_end_date, backtest_results.warmup_days,
+                    backtest_results.statistics_sessions_per_year);
+                std::vector<trade_ngin::ResolvedSleeve> resolved_sleeves;
+                for (const auto& entry : strat_entries) {
+                    resolved_sleeves.push_back(
+                        {entry.id, std::nullopt,
+                         trade_ngin::apps::build_mean_reversion_config(entry.def["config"]).risk_target,
+                         entry.allocation / total_allocation});
+                }
+                INFO(trade_ngin::resolved_sleeves_log_line(app_config.portfolio_id, resolved_sleeves));
             }
 
             auto save_result = coordinator->save_portfolio_results_to_db(

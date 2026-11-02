@@ -1,0 +1,47 @@
+name: trade-ngin · publish
+
+# A tagged release image. Production deploys come from the `prod` branch
+# (svc-trade-ngin.deploy.yml), not from tags.
+
+on:
+  push:
+    tags: ['trade-ngin/v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-cpp.yml
+    with:
+      path: services/trade-ngin
+      # Imported pre-monorepo code: one toolchain first; restore clang/msvc + sanitizers as the code is cleaned.
+      builds: '[{"preset":"ci-gcc13","os":"ubuntu-24.04"}]'
+      sanitizers: '[]'
+      run-clang-tidy: false
+      # 3,900+ pre-existing violations; reformat once the feature branches land.
+      run-clang-format: false
+    secrets: inherit
+
+  image:
+    needs: quality
+    uses: ./.github/workflows/_publish-container.yml
+    with:
+      path: services/trade-ngin
+      image: algogators/trade-ngin-engine
+      environment: ghcr
+      # The image compiles the engine and its tests from scratch.
+      timeout-minutes: 120
+      push: ${{ !(inputs.dry-run || false) }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    secrets: inherit
+

@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
 #include <chrono>
+#include <cmath>
+#include <limits>
 #include <memory>
 #include "../core/test_base.hpp"
 #include "../data/test_db_utils.hpp"
+#include "trade_ngin/live/live_historical_metrics.hpp"
 #include "trade_ngin/storage/live_results_manager.hpp"
 
 using namespace trade_ngin;
@@ -119,6 +122,31 @@ TEST_F(LiveResultsManagerTest, SaveLiveResultsInvokesStoreLiveResultsComplete) {
     EXPECT_EQ(db_->call_count("store_live_results_complete"), 1);
 }
 
+// Migration 036: the typed cells reach both writes; a cell with no value travels as none.
+TEST_F(LiveResultsManagerTest, TheTypedCellsReachTheInsertAndTheUpdate) {
+    const std::vector<LiveResultsCell> cells = {
+        {"worst_day_date", "date", std::string("2025-10-10")},
+        {"monthly_skew", "numeric", std::nullopt},
+        {"calendar_year_returns", "jsonb", std::string("{}")}};
+    mgr_->set_metrics({{"total_return", 0.05}}, {});
+    mgr_->set_cells(cells);
+    ASSERT_TRUE(mgr_->save_live_results(date_at(2026, 3, 15)).is_ok());
+    ASSERT_EQ(db_->last_live_cells.size(), 3u);
+    EXPECT_EQ(db_->last_live_cells[0].column, "worst_day_date");
+    EXPECT_EQ(*db_->last_live_cells[0].value, "2025-10-10");
+    EXPECT_FALSE(db_->last_live_cells[1].value.has_value());
+
+    // The Day T-1 refresh: the cells go with the numbers, and alone they are still an UPDATE.
+    size_t rows = 0;
+    db_->reset_call_counts();
+    ASSERT_TRUE(mgr_->update_live_results(date_at(2026, 3, 14), {{"sharpe_ratio", 1.5}}, &rows, cells)
+                    .is_ok());
+    EXPECT_EQ(db_->call_count("update_live_results"), 1);
+    EXPECT_EQ(db_->last_update_cells.size(), 3u);
+    ASSERT_TRUE(mgr_->update_live_results(date_at(2026, 3, 14), {}, &rows, cells).is_ok());
+    EXPECT_EQ(db_->call_count("update_live_results"), 2);
+}
+
 TEST_F(LiveResultsManagerTest, SaveEquityCurveWhenSetInvokesStoreTradingEquityCurve) {
     mgr_->set_equity(1'050'000.0);
     db_->reset_call_counts();
@@ -127,12 +155,126 @@ TEST_F(LiveResultsManagerTest, SaveEquityCurveWhenSetInvokesStoreTradingEquityCu
     EXPECT_EQ(db_->call_count("store_trading_equity_curve"), 1);
 }
 
+// T-8D-2 R47: an equity value the curve cannot hold is refused. No curve row is written, no
+// stored value is read to stand in for it, and the error is returned.
+TEST_F(LiveResultsManagerTest, SaveEquityCurveRefusesAnInvalidValueAndWritesNoRow) {
+    const double invalid[] = {0.0, -5.0, 999.99, std::numeric_limits<double>::quiet_NaN(),
+                              std::numeric_limits<double>::infinity(),
+                              -std::numeric_limits<double>::infinity()};
+    for (double equity : invalid) {
+        mgr_->set_equity(equity);
+        db_->reset_call_counts();
+        auto r = mgr_->save_equity_curve(date_at(2026, 3, 15));
+        ASSERT_TRUE(r.is_error()) << equity;
+        EXPECT_EQ(r.error()->code(), ErrorCode::INVALID_DATA) << equity;
+        EXPECT_NE(std::string(r.error()->what()).find("2026-03-15"), std::string::npos)
+            << "the error names the date: " << r.error()->what();
+        EXPECT_EQ(db_->call_count("store_trading_equity_curve"), 0) << equity;
+    }
+    // The boundary: 1,000 is a value the curve holds.
+    mgr_->set_equity(1000.0);
+    db_->reset_call_counts();
+    EXPECT_TRUE(mgr_->save_equity_curve(date_at(2026, 3, 15)).is_ok());
+    EXPECT_EQ(db_->call_count("store_trading_equity_curve"), 1);
+}
+
+TEST_F(LiveResultsManagerTest, TheStorableEquityValuesAreTheFiniteOnesFromOneThousand) {
+    EXPECT_TRUE(storable_equity_curve_value(1000.0));
+    EXPECT_TRUE(storable_equity_curve_value(500000.0));
+    EXPECT_FALSE(storable_equity_curve_value(999.999999));
+    EXPECT_FALSE(storable_equity_curve_value(0.0));
+    EXPECT_FALSE(storable_equity_curve_value(-1000.0));
+    EXPECT_FALSE(storable_equity_curve_value(std::numeric_limits<double>::quiet_NaN()));
+    EXPECT_FALSE(storable_equity_curve_value(std::numeric_limits<double>::infinity()));
+}
+
+// R47: save_all_results reports the refused table; the other tables are still written.
+TEST_F(LiveResultsManagerTest, SaveAllResultsReportsEquityCurveFailedOnAnInvalidValue) {
+    mgr_->set_positions({make_pos("AAPL", 100.0)});
+    mgr_->set_metrics({{"total_return", 0.05}}, {});
+    mgr_->set_equity(0.0);
+    db_->reset_call_counts();
+    auto r = mgr_->save_all_results("RUN", date_at(2026, 3, 15));
+    ASSERT_TRUE(r.is_error());
+    EXPECT_NE(std::string(r.error()->what()).find("equity_curve"), std::string::npos)
+        << r.error()->what();
+    EXPECT_EQ(db_->call_count("store_trading_equity_curve"), 0);
+    EXPECT_EQ(db_->call_count("store_live_results_complete"), 1);
+}
+
+// A statistic with no value, through the manager as the runners drive it. The day's row: the block's INSERT
+// columns are copied into the row's metrics, so a profit factor without a value is no column of
+// the INSERT. The Day T-1 refresh: the block's UPDATE columns go to update_live_results, which
+// hands the writer a NULL cell for it and no number.
+TEST_F(LiveResultsManagerTest, AProfitFactorWithNoValueIsNullOnBothWritesOfTheBlock) {
+    HistoricalMetrics no_loss;  // one winning session, no losing one
+    no_loss.total_days = 1;
+    no_loss.winning_days = 1;
+    no_loss.gross_profit = 1000.0;
+    no_loss.profit_factor = std::numeric_limits<double>::quiet_NaN();
+
+    std::unordered_map<std::string, double> double_metrics = {{"daily_pnl", 1000.0}};
+    for (const auto& [column, value] : historical_metrics_double_columns(no_loss)) {
+        double_metrics[column] = value;
+    }
+    mgr_->set_metrics(double_metrics, historical_metrics_int_columns(no_loss));
+    ASSERT_TRUE(mgr_->save_live_results(date_at(2026, 3, 15)).is_ok());
+    EXPECT_EQ(db_->last_live_metrics.count("profit_factor"), 0u);
+    EXPECT_EQ(db_->last_live_metrics.count("gross_profit"), 1u);
+
+    size_t rows = 0;
+    ASSERT_TRUE(mgr_->update_live_results(date_at(2026, 3, 14),
+                                          historical_metrics_update_columns(no_loss), &rows)
+                    .is_ok());
+    EXPECT_EQ(db_->last_update_values.count("profit_factor"), 0u);
+    EXPECT_EQ(db_->last_update_values.count("gross_profit"), 1u);
+    ASSERT_EQ(db_->last_update_cells.size(), 1u);
+    EXPECT_EQ(db_->last_update_cells[0].column, "profit_factor");
+    EXPECT_FALSE(db_->last_update_cells[0].value.has_value());
+
+    // With a losing session the column is a number on both writes and no cell is added.
+    HistoricalMetrics with_loss = no_loss;
+    with_loss.gross_loss = 2000.0;
+    with_loss.profit_factor = 0.5;
+    EXPECT_DOUBLE_EQ(historical_metrics_double_columns(with_loss).at("profit_factor"), 0.5);
+    ASSERT_TRUE(mgr_->update_live_results(date_at(2026, 3, 14),
+                                          historical_metrics_update_columns(with_loss), &rows)
+                    .is_ok());
+    EXPECT_DOUBLE_EQ(db_->last_update_values.at("profit_factor"), 0.5);
+    EXPECT_TRUE(db_->last_update_cells.empty());
+}
+
 TEST_F(LiveResultsManagerTest, UpdateLiveResultsInvokesUpdate) {
     db_->reset_call_counts();
     auto r = mgr_->update_live_results(date_at(2026, 3, 15),
                                         {{"realized_pnl", 1234.5}});
     EXPECT_TRUE(r.is_ok());
     EXPECT_EQ(db_->call_count("update_live_results"), 1);
+}
+
+// The Day T-1 statistics refresh must know when its UPDATE changed no row.
+TEST_F(LiveResultsManagerTest, UpdateLiveResultsReportsTheRowsTheUpdateChanged) {
+    size_t rows = 99;
+    db_->update_live_results_rows = 1;
+    ASSERT_TRUE(mgr_->update_live_results(date_at(2026, 3, 15), {{"sharpe_ratio", 1.5}}, &rows)
+                    .is_ok());
+    EXPECT_EQ(rows, 1u);
+
+    db_->update_live_results_rows = 0;
+    ASSERT_TRUE(mgr_->update_live_results(date_at(2026, 3, 15), {{"sharpe_ratio", 1.5}}, &rows)
+                    .is_ok());
+    EXPECT_EQ(rows, 0u) << "a date with no row reports 0 rows, not the previous call's count";
+
+    // Nothing sent: an empty update and a manager with storage off both report 0 rows.
+    rows = 99;
+    db_->update_live_results_rows = 1;
+    ASSERT_TRUE(mgr_->update_live_results(date_at(2026, 3, 15), {}, &rows).is_ok());
+    EXPECT_EQ(rows, 0u);
+    LiveResultsManager off(db_, /*store_enabled=*/false, "STRAT_X", "PORT_Y");
+    rows = 99;
+    ASSERT_TRUE(off.update_live_results(date_at(2026, 3, 15), {{"sharpe_ratio", 1.5}}, &rows)
+                    .is_ok());
+    EXPECT_EQ(rows, 0u);
 }
 
 TEST_F(LiveResultsManagerTest, UpdateEquityCurveInvokesUpdateLiveEquityCurve) {
@@ -183,13 +325,13 @@ TEST_F(LiveResultsManagerTest, NotConnectedDbCausesError) {
     EXPECT_TRUE(r.is_error());
 }
 
-// ===================== FIX-0: storage key threading =====================
+// ===================== storage key threading =====================
 //
-// Live rows are keyed (strategy_id, strategy_name, portfolio_id). Before FIX-0
-// ResultsManagerBase passed strategy_id_ for BOTH id and name, and the equity runner
-// never set portfolio_id, so the coordinator's BASE_PORTFOLIO default (the futures
-// book) went on the row. Two of three key columns differed from what every read used,
-// which is why run N+1 loaded an empty book. These tests pin all three columns at the
+// Live rows are keyed (strategy_id, strategy_name, portfolio_id). Passing strategy_id_
+// for BOTH id and name, with no portfolio_id set (so the coordinator's BASE_PORTFOLIO
+// default, the futures book, goes on the row), would leave two of three key columns
+// different from what every read uses, and run N+1 would load an empty book. These
+// tests pin all three columns at the
 // DB-call boundary in both shapes: the equity shape (distinct name) and the futures
 // shape (empty name, which must still write id-as-name byte-for-byte).
 
@@ -217,7 +359,7 @@ TEST_F(LiveResultsManagerKeyTest, PositionsWriteUnderDistinctStrategyName) {
 
     auto key = db_->last_key("store_positions");
     EXPECT_EQ(key.strategy_id, "LIVE_EQUITY_MEAN_REVERSION");
-    // Pre-FIX-0 this was "LIVE_EQUITY_MEAN_REVERSION" — strategy_id_ was passed twice.
+    // Not "LIVE_EQUITY_MEAN_REVERSION": strategy_id_ is not passed twice.
     EXPECT_EQ(key.strategy_name, "EQUITY_MEAN_REVERSION");
     EXPECT_EQ(key.portfolio_id, "EQUITY_PORTFOLIO");
 }
@@ -246,7 +388,7 @@ TEST_F(LiveResultsManagerKeyTest, ExecutionsAndSignalsShareThePositionsKey) {
 
 TEST_F(LiveResultsManagerKeyTest, EmptyStrategyNameFallsBackToStrategyIdForFutures) {
     // Inverse pin: the futures runners never set strategy_name, and their existing rows
-    // are keyed (strategy_id, strategy_id, portfolio_id). FIX-0 must not move them.
+    // are keyed (strategy_id, strategy_id, portfolio_id). The key threading must not move them.
     auto mgr = make_mgr("LIVE_TREND_FOLLOWING", "BASE_PORTFOLIO", "");
     mgr->set_positions({make_pos("ES", 5.0)});
     ASSERT_TRUE(mgr->save_positions_snapshot(date_at(2026, 3, 15)).is_ok());
@@ -265,7 +407,7 @@ TEST_F(LiveResultsManagerKeyTest, DefaultedStrategyNameArgPreservesFuturesKey) {
     EXPECT_EQ(mgr.get_strategy_name(), "LIVE_TREND_FOLLOWING");
 }
 
-// ===================== F-J: save_all_results failure propagation =====================
+// ===================== save_all_results failure propagation =====================
 
 TEST_F(LiveResultsManagerKeyTest, SaveAllResultsReportsAFailedTableInsteadOfExitingClean) {
     auto mgr = make_mgr("LIVE_EQUITY_MEAN_REVERSION", "EQUITY_PORTFOLIO",
@@ -276,8 +418,8 @@ TEST_F(LiveResultsManagerKeyTest, SaveAllResultsReportsAFailedTableInsteadOfExit
     db_->fail_on_call("store_live_results_complete");
 
     auto r = mgr->save_all_results("RUN_1", date_at(2026, 3, 15));
-    // Pre-F-J every per-table error was logged and swallowed, so this returned ok and the
-    // runner exited 0 with trading.live_results missing.
+    // A per-table error logged and swallowed would return ok here, and the runner would exit 0
+    // with trading.live_results missing.
     ASSERT_TRUE(r.is_error());
     EXPECT_EQ(r.error()->code(), ErrorCode::DATABASE_ERROR);
     EXPECT_NE(std::string(r.error()->what()).find("live_results"), std::string::npos);

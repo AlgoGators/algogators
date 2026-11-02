@@ -1,0 +1,47 @@
+# platform/db's own recipes. `lint`, `typecheck` and `test` are NOT overridden,
+# so CI keeps running the workspace defaults (ruff, mypy, pytest) unchanged.
+#
+# The migrations under migrations/ are plain SQL applied by hand (pgAdmin or
+# psql) to the target database. This recipe is how you prove a migration is
+# safe before doing that: it brings up a throwaway Postgres in Docker, applies
+# every migration twice in filename order (any error on the second pass is a
+# real idempotency defect), then runs the matching assertion script from
+# tests/sql/. Needs Docker; on Windows, Git Bash.
+
+set shell := ["bash", "-uc"]
+set windows-shell := ["C:/Program Files/Git/bin/bash.exe", "-uc"]
+
+here := justfile_directory()
+pg_image := env("PG_IMAGE", "postgres:16-alpine")
+
+# Apply every migration twice against a throwaway Postgres, then run the checks.
+migrate-idempotent:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name="platform-db-migrate-$$"
+    cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
+    trap cleanup EXIT
+    docker run -d --name "$name" -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=scratch "{{ pg_image }}" >/dev/null
+    for _ in $(seq 1 60); do
+        docker exec "$name" pg_isready -U postgres >/dev/null 2>&1 && break
+        sleep 1
+    done
+    # Run one SQL file; print everything but NOTICE chatter; fail on psql failure.
+    run_sql() {
+        local out
+        if ! out=$(docker exec -i "$name" psql -U postgres -d scratch -v ON_ERROR_STOP=1 -q -f - < "$1" 2>&1); then
+            echo "$out"; echo "FAILED: $1"; exit 1
+        fi
+        grep -v NOTICE <<< "$out" || true
+    }
+    for pass in 1 2; do
+        for f in "{{ here }}"/migrations/*.sql; do
+            echo "pass $pass: $(basename "$f")"
+            run_sql "$f"
+        done
+    done
+    for f in "{{ here }}"/tests/sql/*_check.sql; do
+        echo "check: $(basename "$f")"
+        docker exec -i "$name" psql -U postgres -d scratch -v ON_ERROR_STOP=1 -q -f - < "$f" 2>&1 | tail -1
+        [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "FAILED: $f"; exit 1; }
+    done

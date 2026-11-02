@@ -1,6 +1,7 @@
 // src/core/config_loader.cpp
 
 #include "trade_ngin/core/config_loader.hpp"
+#include <cstring>
 
 #include <algorithm>
 #include <cctype>
@@ -32,10 +33,9 @@ Result<nlohmann::json> ConfigLoader::load_json_file(const std::filesystem::path&
             ErrorCode::JSON_PARSE_ERROR,
             "Failed to parse JSON file " + file_path.string() + ": " + e.what(), "ConfigLoader");
     } catch (const std::exception& e) {
-        return make_error<nlohmann::json>(ErrorCode::FILE_IO_ERROR,
-                                          "Error reading config file " + file_path.string() + ": " +
-                                              e.what(),
-                                          "ConfigLoader");
+        return make_error<nlohmann::json>(
+            ErrorCode::FILE_IO_ERROR,
+            "Error reading config file " + file_path.string() + ": " + e.what(), "ConfigLoader");
     }
 }
 
@@ -79,15 +79,14 @@ bool find_key(const nlohmann::json& node, const std::string& key, const std::str
 }
 
 /**
- * @brief S7 -- the keys schema 2 removed are load ERRORS, not ignored leftovers.
+ * @brief The keys schema 2 removed are load ERRORS, not ignored leftovers.
  *
  * Ignoring them is what makes a migration silently half-applied: a `use_risk_management:
  * false` left behind in a file nobody re-read would read as "risk is off" to a human and
  * as nothing at all to the loader, and the book would gate while its config says it does
  * not. Each message names the key's path and what replaced it.
  *
- * removed-key guard: delete after the first production run on schema 2 (the lead names
- * the release; LEAD_RULINGS_C7 item 15 records it as an open question for HD).
+ * removed-key guard: it can go once every production config is on schema 2.
  */
 Result<void> check_removed_keys(const nlohmann::json& merged, const std::string& portfolio_id) {
     const std::string config_prefix = "config for " + portfolio_id + ": ";
@@ -97,8 +96,8 @@ Result<void> check_removed_keys(const nlohmann::json& merged, const std::string&
             ErrorCode::INVALID_DATA,
             config_prefix + where +
                 " (use_risk_management) was removed in schema 2; risk is assigned by risk.json "
-                "\"modules\". Delete the key (a leftover false would silently turn risk back on, "
-                "T-RISK-ARCH_ADVERSARIAL E2)",
+                "\"modules\". Delete the key (a leftover false would silently turn risk back on"
+                ")",
             "ConfigLoader");
     }
     if (merged.contains("risk_defaults")) {
@@ -148,8 +147,8 @@ Result<AppConfig> ConfigLoader::extract_config(const nlohmann::json& merged) {
         if (merged.contains("initial_capital")) {
             config.initial_capital = merged.at("initial_capital").get<double>();
         }
-        // "reserve_capital_pct" (OPT-N4) is no longer read: nothing sized on it (J3, deleted
-        // T-7a). A deployed portfolio.json that still carries the key (or "reserve_capital",
+        // "reserve_capital_pct" is not read: nothing sizes on it. A deployed portfolio.json that
+        // still carries the key (or "reserve_capital",
         // the name the stored run metadata used) loads unchanged, the key is ignored, and the
         // run says so once.
         for (const char* key : {"reserve_capital_pct", "reserve_capital"}) {
@@ -175,7 +174,7 @@ Result<AppConfig> ConfigLoader::extract_config(const nlohmann::json& merged) {
         if (merged.contains("optimization")) {
             const auto& optimization = merged.at("optimization");
             config.opt_config.from_json(optimization);
-            // LOOP_SPEC section 7.7: the one pass's keys, strictly when present (a futures book
+            // The one pass's keys, strictly when present (a futures book
             // requires them: require_loop_keys), and the optimiser's retired keys, noted.
             config.has_cost_penalty_scalar = optimization.contains("cost_penalty_scalar");
             for (const char* key : {"sign_close_band", "b_sigma_floor"}) {
@@ -255,7 +254,7 @@ Result<AppConfig> ConfigLoader::extract_config(const nlohmann::json& merged) {
         }
         config.use_optimization = merged.at("use_optimization").get<bool>();
 
-        // T-6c commit B: the PortfolioManager's covariance history length, in prices per
+        // The PortfolioManager's covariance history length, in prices per
         // symbol. Optional; absent means 756 (the trend sleeve's own history cap). A value
         // that is not a whole number of at least 2 is refused: one price gives no return.
         if (merged.contains("covariance_history_prices")) {
@@ -272,7 +271,7 @@ Result<AppConfig> ConfigLoader::extract_config(const nlohmann::json& merged) {
             config.covariance_history_prices = v.get<size_t>();
         }
 
-        // T-7b-1 7d: how many union dates a covariance participant's last close may trail the
+        // How many union dates a covariance participant's last close may trail the
         // newest before the optimiser leaves it out of the date intersection. Optional; absent
         // means 5. 0 is allowed (every participant must print on the newest date).
         if (merged.contains("covariance_stale_dates")) {
@@ -290,7 +289,36 @@ Result<AppConfig> ConfigLoader::extract_config(const nlohmann::json& merged) {
             config.covariance_stale_dates = v.get<size_t>();
         }
 
-        // LOOP_SPEC sections 2.5 and 7.7 (D40): the equity slow rule. Parsed strictly when present;
+        // The per-contract roll switch. Optional, boolean, off when absent.
+        if (merged.contains("per_contract_rolls")) {
+            const auto& v = merged.at("per_contract_rolls");
+            if (!v.is_boolean()) {
+                return make_error<AppConfig>(
+                    ErrorCode::INVALID_DATA,
+                    "config for " + config.portfolio_id +
+                        ": portfolio.json \"per_contract_rolls\" must be true or false (absent "
+                        "means false), got " + v.dump(),
+                    "ConfigLoader");
+            }
+            config.per_contract_rolls = v.get<bool>();
+        }
+        // The switch-bar setting, "held" (absent) or "vendor".
+        if (merged.contains("per_contract_switch_bar")) {
+            const auto& v = merged.at("per_contract_switch_bar");
+            if (!v.is_string() ||
+                (v.get<std::string>() != "held" && v.get<std::string>() != "vendor")) {
+                return make_error<AppConfig>(
+                    ErrorCode::INVALID_DATA,
+                    "config for " + config.portfolio_id +
+                        ": portfolio.json \"per_contract_switch_bar\" must be \"held\" or "
+                        "\"vendor\" (absent means \"held\"), got " +
+                        v.dump(),
+                    "ConfigLoader");
+            }
+            config.per_contract_switch_bar = v.get<std::string>();
+        }
+
+        // The equity slow rule. Parsed strictly when present;
         // the futures runners require it (require_loop_keys).
         if (merged.contains("equity_slow_rule")) {
             const auto& v = merged.at("equity_slow_rule");
@@ -333,7 +361,257 @@ Result<AppConfig> ConfigLoader::extract_config(const nlohmann::json& merged) {
             config.equity_slow_rule = rule;
         }
 
-        // LOOP_SPEC sections 3.1 and 7.7 (D19): the sizing mode and the starting capital. Parsed
+        // The two blocks below are optional and strict: a key that is not one of the block's own is
+        // refused (a misspelt key would otherwise be read as absent and a default would apply); a key
+        // starting with an underscore is a note. A top-level key that is a near miss of a block's
+        // name is refused too, since a misspelt block is an absent block.
+        auto unknown_key = [](const nlohmann::json& object,
+                              std::initializer_list<const char*> known) -> std::string {
+            for (auto it = object.begin(); it != object.end(); ++it) {
+                const std::string& key = it.key();
+                if (!key.empty() && key[0] == '_') continue;
+                if (std::find_if(known.begin(), known.end(),
+                                 [&](const char* k) { return key == k; }) == known.end()) {
+                    return key;
+                }
+            }
+            return {};
+        };
+        for (auto it = merged.begin(); it != merged.end(); ++it) {
+            const std::string& key = it.key();
+            for (const char* block :
+                 {"listing_dates", "instrument_id_relabels", "trading_rule_removals", "carry"}) {
+                // "listing_date...", "instrument_id_relabel...": the block's name less its last letter
+                const std::string stem(block, std::strlen(block) - 1);
+                if (key != block && key.rfind(stem, 0) == 0) {
+                    return make_error<AppConfig>(
+                        ErrorCode::INVALID_DATA,
+                        "config for " + config.portfolio_id + ": portfolio.json has a key \"" + key +
+                            "\" that is not \"" + block + "\" (a misspelt block is an absent block)",
+                        "ConfigLoader");
+                }
+            }
+        }
+
+        // Declared vendor id relabellings: optional; parsed strictly when present.
+        if (merged.contains("instrument_id_relabels")) {
+            const auto& v = merged.at("instrument_id_relabels");
+            auto bad = [&](const std::string& what) {
+                return make_error<AppConfig>(
+                    ErrorCode::INVALID_DATA,
+                    "config for " + config.portfolio_id +
+                        ": portfolio.json \"instrument_id_relabels\" " + what +
+                        " (expected [{\"symbol\": \"MES\", \"date\": \"2026-02-22\", \"from\": "
+                        "\"42140878\", \"to\": \"42003800\"}]), got " + v.dump(),
+                    "ConfigLoader");
+            };
+            if (!v.is_array()) return bad("must be a list");
+            for (const auto& entry : v) {
+                if (entry.is_object()) {
+                    const std::string extra = unknown_key(entry, {"symbol", "date", "from", "to"});
+                    if (!extra.empty()) return bad("names an entry with an unknown key \"" + extra + "\"");
+                }
+                for (const char* key : {"symbol", "date", "from", "to"}) {
+                    if (!entry.is_object() || !entry.contains(key) || !entry.at(key).is_string()) {
+                        return bad("names an entry without string \"symbol\", \"date\", \"from\" and \"to\"");
+                    }
+                }
+                config.instrument_id_relabels.push_back(
+                    {entry.at("symbol").get<std::string>(), entry.at("date").get<std::string>(),
+                     entry.at("from").get<std::string>(), entry.at("to").get<std::string>()});
+            }
+            try {
+                ListingDates::validate_relabels(config.instrument_id_relabels);
+            } catch (const std::invalid_argument& e) {
+                return bad(std::string("is not usable: ") + e.what());
+            }
+        }
+
+        // Listing dates: optional; parsed strictly when present.
+        if (merged.contains("listing_dates")) {
+            const auto& v = merged.at("listing_dates");
+            auto bad = [&](const std::string& what) {
+                return make_error<AppConfig>(
+                    ErrorCode::INVALID_DATA,
+                    "config for " + config.portfolio_id + ": portfolio.json \"listing_dates\" " +
+                        what +
+                        " (expected {\"contracts\": [{\"symbol\": \"MES\", \"listed\": "
+                        "\"2019-05-06\", \"before\": \"ES\", \"ratio\": 10}]}), got " + v.dump(),
+                    "ConfigLoader");
+            };
+            if (!v.is_object() || !v.contains("contracts") || !v.at("contracts").is_array()) {
+                return bad("must be an object with a \"contracts\" list");
+            }
+            if (const std::string extra = unknown_key(v, {"contracts", "switch_rule"}); !extra.empty()) {
+                return bad("has an unknown key \"" + extra + "\"");
+            }
+            if (v.contains("switch_rule") &&
+                (!v.at("switch_rule").is_string() ||
+                 !parse_listing_switch_rule(v.at("switch_rule").get<std::string>(),
+                                            &config.listing_switch_rule))) {
+                return bad("\"switch_rule\" must be \"close_reenter\", \"convert\", \"open_at_target\" or "
+                           "\"carry_to_target\"");
+            }
+            for (const auto& entry : v.at("contracts")) {
+                if (entry.is_object()) {
+                    const std::string extra = unknown_key(entry, {"symbol", "listed", "before", "ratio"});
+                    if (!extra.empty()) return bad("names a contract with an unknown key \"" + extra + "\"");
+                }
+                if (!entry.is_object() || !entry.contains("symbol") || !entry.contains("listed") ||
+                    !entry.contains("before") || !entry.at("symbol").is_string() ||
+                    !entry.at("listed").is_string() || !entry.at("before").is_string() ||
+                    !entry.contains("ratio") || !entry.at("ratio").is_number()) {
+                    return bad("names a contract without string \"symbol\", \"listed\" and "
+                               "\"before\" and a number \"ratio\"");
+                }
+                config.listing_dates.push_back({entry.at("symbol").get<std::string>(),
+                                                entry.at("before").get<std::string>(),
+                                                entry.at("listed").get<std::string>(),
+                                                entry.at("ratio").get<double>()});
+            }
+            try {
+                ListingDates::validate(config.listing_dates);  // the runner switches it on
+            } catch (const std::invalid_argument& e) {
+                return bad(std::string("is not usable: ") + e.what());
+            }
+        }
+
+        // Trading rules removed from a contract by cost: optional; parsed strictly when present.
+        // The loader checks the block's form and that the book is one trend sleeve; the sleeve
+        // checks the list against its own pairs when it is built (TrendFollowingStrategy).
+        if (merged.contains("trading_rule_removals")) {
+            const auto& v = merged.at("trading_rule_removals");
+            auto bad = [&](const std::string& what) {
+                return make_error<AppConfig>(
+                    ErrorCode::INVALID_DATA,
+                    "config for " + config.portfolio_id +
+                        ": portfolio.json \"trading_rule_removals\" " + what +
+                        " (expected {\"ZR\": [[2, 8], [4, 16]], ...}: symbol to the EMA pairs it "
+                        "does not run), got " + v.dump(),
+                    "ConfigLoader");
+            };
+            if (!v.is_object()) return bad("must be an object");
+            for (auto it = v.begin(); it != v.end(); ++it) {
+                const std::string& symbol = it.key();
+                if (!symbol.empty() && symbol[0] == '_') continue;  // a note
+                if (symbol.empty() || symbol.find('.') != std::string::npos) {
+                    return bad("names a contract \"" + symbol +
+                               "\" that is not a base symbol (\"ZR\", not \"ZR.v.0\")");
+                }
+                const auto& pairs = it.value();
+                if (!pairs.is_array() || pairs.empty()) {
+                    return bad("needs a non-empty list of pairs for " + symbol +
+                               " (a contract that keeps every rule is not listed)");
+                }
+                std::vector<std::pair<int, int>> removed;
+                for (const auto& pair : pairs) {
+                    if (!pair.is_array() || pair.size() != 2 || !pair[0].is_number_integer() ||
+                        !pair[1].is_number_integer() || pair[0].get<int64_t>() <= 0 ||
+                        pair[1].get<int64_t>() <= 0 || pair[0].get<int64_t>() > 100000 ||
+                        pair[1].get<int64_t>() > 100000) {
+                        return bad("names a pair for " + symbol +
+                                   " that is not two positive whole numbers");
+                    }
+                    removed.emplace_back(pair[0].get<int>(), pair[1].get<int>());
+                }
+                config.trading_rule_removals[symbol] = std::move(removed);
+            }
+            // The rule sets forecast weights within ONE trend sleeve. A book of several sleeves
+            // (BASE's trend and fast sleeves) has no list of its own and is refused, never read
+            // as if the block were absent.
+            int sleeves = 0;
+            bool trend_only = true;
+            if (merged.contains("strategies") && merged.at("strategies").is_object()) {
+                const nlohmann::json& strategies = merged.at("strategies");
+                for (const auto& entry : strategies.items()) {
+                    const auto& def = entry.value();
+                    if (!def.is_object()) continue;
+                    const auto flag = [&](const char* key) {
+                        return def.contains(key) && def.at(key).is_boolean() &&
+                               def.at(key).get<bool>();
+                    };
+                    if (!flag("enabled_backtest") && !flag("enabled_live")) continue;
+                    ++sleeves;
+                    trend_only = trend_only && def.contains("type") && def.at("type").is_string() &&
+                                 def.at("type").get<std::string>() == "TrendFollowingStrategy";
+                }
+            }
+            if (!config.trading_rule_removals.empty() && (sleeves != 1 || !trend_only)) {
+                return bad("applies to a book of exactly one enabled TrendFollowingStrategy "
+                           "sleeve; this book enables " + std::to_string(sleeves));
+            }
+        }
+
+        // Carry (trade-ngin #185): optional; parsed strictly when present. Weight 0 is carry off.
+        if (merged.contains("carry")) {
+            const auto& v = merged.at("carry");
+            auto bad = [&](const std::string& what) {
+                return make_error<AppConfig>(
+                    ErrorCode::INVALID_DATA,
+                    "config for " + config.portfolio_id + ": portfolio.json \"carry\" " + what +
+                        " (expected {\"weight\": 0.4, \"spans\": [5, 20, 60, 120], \"scalar\": "
+                        "30}), got " + v.dump(),
+                    "ConfigLoader");
+            };
+            if (!v.is_object()) return bad("must be an object");
+            const std::string unknown = unknown_key(v, {"weight", "spans", "scalar"});
+            if (!unknown.empty()) return bad("has an unknown key \"" + unknown + "\"");
+            CarryConfig carry;
+            carry.present = true;
+            if (!v.contains("weight") || !v.at("weight").is_number() ||
+                !(v.at("weight").get<double>() >= 0.0 && v.at("weight").get<double>() <= 1.0)) {
+                return bad("needs a weight from 0 to 1");
+            }
+            carry.weight = v.at("weight").get<double>();
+            if (v.contains("spans")) {
+                const auto& spans = v.at("spans");
+                if (!spans.is_array() || spans.empty()) return bad("needs a non-empty list of spans");
+                carry.spans.clear();
+                for (const auto& span : spans) {
+                    if (!span.is_number_integer() || span.get<int64_t>() <= 0 ||
+                        span.get<int64_t>() > 10000 ||
+                        (!carry.spans.empty() && span.get<int64_t>() <= carry.spans.back())) {
+                        return bad("names spans that are not positive whole numbers, fastest first");
+                    }
+                    carry.spans.push_back(span.get<int>());
+                }
+            }
+            if (v.contains("scalar")) {
+                if (!v.at("scalar").is_number() || !(v.at("scalar").get<double>() > 0.0)) {
+                    return bad("needs a positive scalar");
+                }
+                carry.scalar = v.at("scalar").get<double>();
+            }
+            // The carry rules join ONE trend sleeve's forecast: with carry on a book of several
+            // sleeves, or of another kind of sleeve, is refused.
+            if (carry.enabled()) {
+                int sleeves = 0;
+                bool trend_only = true;
+                if (merged.contains("strategies") && merged.at("strategies").is_object()) {
+                    const nlohmann::json& strategies = merged.at("strategies");
+                    for (const auto& entry : strategies.items()) {
+                        const auto& def = entry.value();
+                        if (!def.is_object()) continue;
+                        const auto flag = [&](const char* key) {
+                            return def.contains(key) && def.at(key).is_boolean() &&
+                                   def.at(key).get<bool>();
+                        };
+                        if (!flag("enabled_backtest") && !flag("enabled_live")) continue;
+                        ++sleeves;
+                        trend_only = trend_only && def.contains("type") && def.at("type").is_string() &&
+                                     def.at("type").get<std::string>() == "TrendFollowingStrategy";
+                    }
+                }
+                if (sleeves != 1 || !trend_only) {
+                    return bad("with a weight above 0 applies to a book of exactly one enabled "
+                               "TrendFollowingStrategy sleeve; this book enables " +
+                               std::to_string(sleeves));
+                }
+            }
+            config.carry = carry;
+        }
+
+        // The sizing mode and the starting capital. Parsed
         // strictly when present; the futures runners require both (require_loop_keys).
         if (merged.contains("sizing_mode")) {
             const auto& v = merged.at("sizing_mode");
@@ -410,6 +688,18 @@ Result<AppConfig> ConfigLoader::extract_config(const nlohmann::json& merged) {
             config.live.from_json(merged.at("live"));
         }
 
+        // Statistics convention (the sessions a year per series; a positive number each)
+        if (merged.contains("statistics")) {
+            config.statistics.from_json(merged.at("statistics"));
+            if (!(config.statistics.futures_sessions_per_year > 0.0) ||
+                !(config.statistics.equity_sessions_per_year > 0.0)) {
+                return make_error<AppConfig>(
+                    ErrorCode::INVALID_ARGUMENT,
+                    "statistics.sessions_per_year must be positive for futures and equities",
+                    "ConfigLoader");
+            }
+        }
+
         // Strategy defaults
         if (merged.contains("strategy_defaults")) {
             config.strategy_defaults.from_json(merged.at("strategy_defaults"));
@@ -423,6 +713,32 @@ Result<AppConfig> ConfigLoader::extract_config(const nlohmann::json& merged) {
         // Strategies (raw JSON for factory)
         if (merged.contains("strategies")) {
             config.strategies_config = merged.at("strategies");
+        }
+
+        if (merged.contains("asset_class")) {
+            std::string asset_class_str = merged.at("asset_class").get<std::string>();
+            if (asset_class_str == "futures") {
+                config.asset_class = AssetClass::FUTURES;
+            } else if (asset_class_str == "equities") {
+                config.asset_class = AssetClass::EQUITIES;
+            } else if (asset_class_str == "options") {
+                config.asset_class = AssetClass::OPTIONS;
+            } else if (asset_class_str == "fixed_income") {
+                config.asset_class = AssetClass::FIXED_INCOME;
+            } else if (asset_class_str == "currencies") {
+                config.asset_class = AssetClass::CURRENCIES;
+            } else if (asset_class_str == "commodities") {
+                config.asset_class = AssetClass::COMMODITIES;
+            } else if (asset_class_str == "crypto") {
+                config.asset_class = AssetClass::CRYPTO;
+            } else {
+                return make_error<AppConfig>(ErrorCode::INVALID_DATA,
+                                             "Invalid asset_class: " + asset_class_str,
+                                             "ConfigLoader");
+            }
+        } else {
+            // Default to FUTURES if not specified
+            config.asset_class = AssetClass::FUTURES;
         }
 
         return config;
@@ -441,19 +757,16 @@ Result<void> ConfigLoader::validate_config(const AppConfig& config) {
     if (config.database.host.empty() || config.database.username.empty() ||
         config.database.password.empty() || config.database.name.empty()) {
         return make_error<void>(ErrorCode::INVALID_DATA,
-                                "Missing required database configuration fields",
-                                "ConfigLoader");
+                                "Missing required database configuration fields", "ConfigLoader");
     }
     if (config.initial_capital <= 0.0) {
-        return make_error<void>(ErrorCode::INVALID_DATA,
-                                "initial_capital must be positive",
+        return make_error<void>(ErrorCode::INVALID_DATA, "initial_capital must be positive",
                                 "ConfigLoader");
     }
     if (config.strategies_config.is_null() || !config.strategies_config.is_object() ||
         config.strategies_config.empty()) {
         return make_error<void>(ErrorCode::INVALID_DATA,
-                                "strategies configuration is missing or empty",
-                                "ConfigLoader");
+                                "strategies configuration is missing or empty", "ConfigLoader");
     }
 
     // G-03: the lookback window has to be long enough for the strategies that
@@ -552,7 +865,7 @@ Result<void> ConfigLoader::require_loop_keys(const AppConfig& config) {
                 "({\"symbols\": [\"M2K\", \"MES\", \"MNQ\", \"MYM\"], \"pairs\": [[32, 128], [64, 256]]})",
             "ConfigLoader");
     }
-    // LOOP_SPEC sections 4, 7.7 and 12: the overlay's limits. The book's carver module carries
+    // The overlay's limits. The book's carver module carries
     // R_max, R_jump_max and R_shock_max (ratios to tau); its max_gross_leverage and
     // max_net_leverage are L_max and L_net_max.
     {
@@ -633,7 +946,7 @@ std::pair<Timestamp, Timestamp> ConfigLoader::resolve_backtest_window(
     if (local_tm != nullptr) anchor_tm = *local_tm;
     Timestamp end_date = now;
 
-    // M-12: the frozen window, taken only when a config explicitly carries the
+    // The frozen window, taken only when a config explicitly carries the
     // key. Anything unparseable is refused rather than silently ignored -- a
     // typo in a test config that quietly reverted to now() would reintroduce the
     // very drift this exists to remove, and it would do it invisibly.
@@ -766,8 +1079,7 @@ Result<AppConfig> ConfigLoader::load(const std::filesystem::path& config_base_pa
     auto validation_result = validate_config(config_result.value());
     if (validation_result.is_error()) {
         return make_error<AppConfig>(validation_result.error()->code(),
-                                     validation_result.error()->what(),
-                                     "ConfigLoader");
+                                     validation_result.error()->what(), "ConfigLoader");
     }
 
     log_config_summary(config_result.value());
@@ -913,6 +1225,23 @@ Result<void> ConfigLoader::check_overlay(const nlohmann::json& overlay,
                                 "portfolio.json only",
                                 "ConfigLoader");
     }
+    // The per-contract blocks are the engine's data about the contracts (when each
+    // micro listed, its renamed ids, the rules each contract drops), not desk settings. The
+    // settings check does not run their meaning checks, so a changed block would pass it
+    // and then stop every later run of the portfolio.
+    for (const char* engine_data :
+         {"listing_dates", "instrument_id_relabels", "trading_rule_removals", "carry"}) {
+        if (overlay.contains(engine_data)) {
+            return make_error<void>(ErrorCode::INVALID_DATA,
+                                    std::string(engine_data) +
+                                        (std::string(engine_data) == "carry"
+                                             ? " (the strategy's forecast rules)"
+                                             : " (the engine's per-contract data)") +
+                                        " cannot be overridden from the database: it stays in "
+                                        "portfolio.json",
+                                    "ConfigLoader");
+        }
+    }
     if (find_secret_key(overlay, "", &where)) {
         return make_error<void>(ErrorCode::INVALID_DATA,
                                 where + " looks like a credential and cannot be overridden",
@@ -993,10 +1322,10 @@ Result<AppConfig> ConfigLoader::load_legacy(const std::filesystem::path& config_
     // Load the single config file
     auto json_result = load_json_file(config_file_path);
     if (json_result.is_error()) {
-        return make_error<AppConfig>(json_result.error()->code(),
-                                     "Failed to load legacy config: " +
-                                         std::string(json_result.error()->what()),
-                                     "ConfigLoader");
+        return make_error<AppConfig>(
+            json_result.error()->code(),
+            "Failed to load legacy config: " + std::string(json_result.error()->what()),
+            "ConfigLoader");
     }
 
     const auto& config_json = json_result.value();
@@ -1032,8 +1361,7 @@ Result<AppConfig> ConfigLoader::load_legacy(const std::filesystem::path& config_
         auto validation_result = validate_config(config);
         if (validation_result.is_error()) {
             return make_error<AppConfig>(validation_result.error()->code(),
-                                         validation_result.error()->what(),
-                                         "ConfigLoader");
+                                         validation_result.error()->what(), "ConfigLoader");
         }
         log_config_summary(config);
         return config;

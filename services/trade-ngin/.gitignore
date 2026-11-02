@@ -40,3 +40,5 @@ config/defaults.json
 config/portfolios/conservative/portfolio.json
 config/portfolios/conservative/risk.json
 email.json
+/AGENTS.md
+futures_release_run/

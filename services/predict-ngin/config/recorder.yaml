@@ -1,0 +1,332 @@
+# Read-only order-book recorder config. See docs/RECORDER.md.
+# The recorder NEVER places orders; it only calls public market-data endpoints.
+#
+# IDs: Kalshi = market ticker, Polymarket = CLOB token id (QUOTE them),
+#      Polymarket US = market slug.
+#
+# Pair review 2026-10-12: every pair below was checked against the public market
+# endpoints (Kalshi /markets/{ticker} rules_primary/secondary, Polymarket gamma
+# question/description/gameStartTime, Polymarket US /v1/markets?slug= question/sides).
+# status: verified     = same event, same date, same winning condition on all legs
+#         needs-review = plausible but something (e.g. start time) does not line up exactly
+# Residual rule differences are listed in `note` -- read them before booking P&L.
+#
+# Polymarket: only the FIRST-outcome token is recorded (yes_token). The second token's
+# CLOB book is the exact complement (bid p <-> ask 1-p, same sizes -- visible in every
+# price_change, which carries both assets), so recording it would double PM storage for
+# no information. Add `no_token:` back if you want it anyway.
+#
+# Sports conventions: Polymarket game markets are TEAM outcomes; yes_token = first team
+# in the PM slug. Polymarket US game books are priced in the first ("long") side, which
+# is the first team in the US slug. The Kalshi leg is the same team.
+# Sports rule differences common to all game pairs: if a game is CANCELLED, Kalshi
+# resolves to a "fair price", Polymarket 50-50, Polymarket US per its own rules.
+#
+# Instruments: 10 pairs x 3 legs = 30 (10 Kalshi, 10 Polymarket, 10 Polymarket US).
+# Games expire after they finish; re-run discovery / refresh this list every few days.
+
+defaults:
+  depth: 10                 # top-N levels stored per side
+  ws_sample_interval_s: 1.0 # WS books are sampled at most this often (only if changed)
+  heartbeat_s: 60           # unchanged books are still written this often
+  flush_interval_s: 300     # buffer -> parquet part file
+  output_dir: data/live_books
+
+venues:
+  kalshi:
+    # auto = WS if KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_PATH are set (and `cryptography`
+    # is installed), else public REST polling (no key needed).
+    mode: auto
+    rest_poll_interval_s: 2.0
+    max_requests_per_s: 8        # Basic tier ~20 reads/s; leave headroom (REST fallback only)
+    trades_poll_interval_s: 15
+    max_markets_per_conn: 1000   # discovered markets per WS connection (static pairs get their own)
+    silence_audit_s: 120         # WS: REST-check books silent this long (0 = off); mismatch -> reconnect shard
+    audit_interval_s: 60
+    audit_max_per_round: 10      # <= 10 REST reads/min at 1 req/s
+  polymarket:
+    mode: ws                     # public market WS, no key
+    max_requests_per_s: 10       # REST resync only
+    resync_interval_s: 600       # full REST snapshot every 10 min as integrity check
+  polymarket_us:
+    mode: rest                   # public gateway REST; WS needs a KYC'd API key
+    rest_poll_interval_s: 2.0    # 10 slugs / 2 s = 5 req/s
+    max_requests_per_s: 8        # 25 req/s per IP limit
+
+pairs:
+  # ---------------------------------------------------------------- macro / Fed
+  # FOMC Oct 27-28, 2026. Kalshi "Hike of 0bps on Oct 28" / PM "no change after the
+  # October 2026 meeting" / US "does not change the upper bound ... October 2026 FOMC".
+  # Off-grid moves: PM rounds UP to the nearest 25; US rounds to the nearest listed option;
+  # Kalshi brackets are exact -- irrelevant unless the Fed moves by a non-multiple of 25.
+  - name: fed-2026-10-hold
+    status: verified
+    kalshi: {ticker: KXFEDDECISION-26OCT-H0}
+    polymarket:
+      yes_token: "111061902544814266207267295505639408607400625795891618462682726460921782993748"
+    polymarket_us: {slug: rdc-usfed-fomc-2026-10-28-nochng, outcome: "yes"}
+    note: Kalshi closes 2026-10-28 17:59Z (before the 2pm ET statement); PM/US trade until the release.
+
+  - name: fed-2026-10-hike25
+    status: verified
+    kalshi: {ticker: KXFEDDECISION-26OCT-H25}
+    polymarket:
+      yes_token: "55159722761418013044126414276680602270318000841690689684819994448621694923050"
+    polymarket_us: {slug: rdc-usfed-fomc-2026-10-28-hike25, outcome: "yes"}
+    note: same rounding caveat as fed-2026-10-hold.
+
+  # ---------------------------------------------------------------- MLB futures
+  - name: mlb-2026-ws-champion-lad
+    status: verified
+    kalshi: {ticker: KXMLB-26-LAD}
+    polymarket:
+      yes_token: "1204155327844132216976037605131756626466220080116229118353112706411786559118"
+    polymarket_us: {slug: tec-mlb-champ-2026-09-27-lad, outcome: "yes"}
+    note: Dodgers win the 2026 World Series. All three resolve on the official series winner. (NL-pennant pair KXMLBNL-26-LAD / PM 97209439...729 / US tec-mlb-nlchamp-2026-09-27-lad also verified; left out to stay <= 30 instruments.)
+
+  # ---------------------------------------------------------------- MLB games (LCS)
+  - name: mlb-2026-10-12-lad-mil
+    status: verified
+    kalshi: {ticker: KXMLBGAME-26OCT122000LADMIL-LAD}
+    polymarket:
+      yes_token: "90674515154806304598327967883140350059806255690346797701826119081248016015646"  # Dodgers
+    polymarket_us: {slug: aec-mlb-lad-mil-2026-10-12, outcome: lad}
+    note: NLCS Game 2, Oct 12 21:00Z. Kalshi event "Game 2 LAD vs MIL (Oct 12)" = PM mlb-lad-mil-2026-10-12 (gameStartTime 21:00Z) = US "scheduled for October 12, 2026 at 9:00 PM UTC".
+
+  - name: mlb-2026-10-12-cle-tb
+    status: verified
+    kalshi: {ticker: KXMLBGAME-26OCT122000CLETB-CLE}
+    polymarket:
+      yes_token: "76307785777215011376501321581123848167186459212365021045227741553401694865501"  # Guardians
+    polymarket_us: {slug: aec-mlb-cle-tb-2026-10-12, outcome: cle}
+    note: ALCS Game 1, 8:00 PM ET Oct 12 (= Oct 13 00:00Z) on all three venues.
+
+  - name: mlb-2026-10-13-cle-tb
+    status: verified
+    kalshi: {ticker: KXMLBGAME-26OCT132000CLETB-CLE}
+    polymarket:
+      yes_token: "32702709036324313301558718828927816856796058093646071608392646066073985089049"  # Guardians
+    polymarket_us: {slug: aec-mlb-cle-tb-2026-10-13, outcome: cle}
+    note: ALCS Game 2, 8:00 PM ET Oct 13 (= Oct 14 00:00Z) on all three venues.
+
+  - name: mlb-2026-10-14-mil-lad
+    status: verified
+    kalshi: {ticker: KXMLBGAME-26OCT142000MILLAD-MIL}
+    polymarket:
+      yes_token: "54424278853969816959131438694607417715048834984853918507561001622506294921155"  # Brewers
+    polymarket_us: {slug: aec-mlb-mil-lad-2026-10-14, outcome: mil}
+    note: NLCS Game 3, 8:00 PM ET Oct 14 (= Oct 15 00:00Z) on all three venues.
+
+  - name: mlb-2026-10-15-mil-lad
+    status: needs-review
+    kalshi: {ticker: KXMLBGAME-26OCT152000MILLAD-MIL}
+    polymarket:
+      yes_token: "94020617785802733190190349640410293974482789603054797897629524150356233473542"  # Brewers
+    polymarket_us: {slug: aec-mlb-mil-lad-2026-10-15, outcome: mil}
+    note: NLCS Game 4, Oct 15. Kalshi ticker says 8:00 PM ET but PM/US list 9:00 PM ET (01:00Z) -- only one MIL-LAD game that day, so almost surely the same game; re-check once the start time is final.
+
+  # ---------------------------------------------------------------- NFL
+  - name: nfl-2026-10-12-buf-lar
+    status: verified
+    kalshi: {ticker: KXNFLGAME-26OCT12BUFLAR-BUF}
+    polymarket:
+      yes_token: "62947499320390431651528838662673965097490542171836453297585075709612395925534"  # Bills
+    polymarket_us: {slug: aec-nfl-buf-lar-2026-10-12, outcome: buf}
+    note: MNF Bills @ Rams, 8:15 PM ET Oct 12 (PM slug uses the UTC date nfl-buf-la-2026-10-13). Overtime counts everywhere; a TIE resolves 0.50 on Kalshi and 50-50 on PM.
+
+  - name: nfl-2026-10-15-sea-den
+    status: verified
+    kalshi: {ticker: KXNFLGAME-26OCT15SEADEN-SEA}
+    polymarket:
+      yes_token: "61085243734073593459419955931627362545950081431149347585770687210061098950896"  # Seahawks
+    polymarket_us: {slug: aec-nfl-sea-den-2026-10-15, outcome: sea}
+    note: TNF Seahawks vs Broncos, 8:15 PM ET Oct 15 (PM slug nfl-sea-den-2026-10-16, UTC date). Tie = 0.50 / 50-50.
+
+markets: []
+  # single-venue markets (maker-opportunity study only), e.g.
+  # - {venue: kalshi, ticker: KXFEDDECISION-26OCT-C25}
+
+# ------------------------------------------------------------------ discovery
+# Rolling, series-based subscriptions (see docs/RECORDER.md "Discovery"). Each group is
+# re-queried every refresh_s; markets that stop qualifying are unsubscribed, and every
+# market is dropped locally close_grace_s after its close_time. Series tickers verified
+# against GET /series and open events on 2026-10-13.
+discovery:
+  close_grace_s: 120
+  series_scan_s: 21600          # category groups: re-scan which series have open events (6 h)
+  kalshi:
+    max_requests_per_s: 1.0     # discovery REST budget; other research processes share this IP
+    groups:
+      # --- crypto: 15-minute up/down (listed ahead as `unopened`, so the next window is
+      #     subscribed before it opens)
+      - {name: k-crypto-15m, series: [KXBTC15M, KXETH15M, KXSOL15M], refresh_s: 60,
+         max_hours_to_close: 0.6, include_unopened: true}
+      # --- crypto above/below: current + next hour, nearest strikes only (300-400 per series)
+      - {name: k-crypto-hourly, series: [KXBTCD, KXETHD, KXSOLD], refresh_s: 60,
+         max_hours_to_close: 1.2, include_unopened: true, nearest_strikes: 10}
+      # ...and the 5pm-ET daily / Friday weekly events of the same series
+      - {name: k-crypto-daily, series: [KXBTCD, KXETHD, KXSOLD], refresh_s: 300,
+         max_hours_to_close: 30, nearest_strikes: 12}
+      # --- index: hourly above/below (KXNASDAQ100U alone has ~2,800 open markets)
+      - {name: k-index-hourly, series: [KXINXU, KXNASDAQ100U], refresh_s: 60,
+         max_hours_to_close: 4, nearest_strikes: 10}
+      - {name: k-index-daily, series: [KXINX, KXNASDAQ100], refresh_s: 300,
+         max_hours_to_close: 30, nearest_strikes: 12}
+      # --- commodities (daily)
+      - {name: k-commodities, series: [KXWTI, KXGOLDD, KXBRENTD], refresh_s: 300,
+         max_hours_to_close: 30, nearest_strikes: 12}
+      # --- econ releases + Fed (CPI Oct 14 12:30Z, FOMC Oct 28, payrolls, claims, GDP, PCE).
+      #     KXAAAGASD (daily AAA gas) had no open event on 2026-10-13; it is picked up
+      #     automatically when one opens. KXAAAGASW is the weekly version.
+      - name: k-econ
+        series: [KXCPI, KXCPICORE, KXCPIYOY, KXCPICOREYOY, KXFEDDECISION, KXFED, KXRATECUT,
+                 KXRATECUTCOUNT, KXPAYROLLS, KXU3, KXJOBLESSCLAIMS, KXGDP, KXPCECORE, KXPCEHEAD,
+                 KXAAAGASD, KXAAAGASW]
+        refresh_s: 600
+        max_hours_to_close: 2000      # ~83 days: next two Fed meetings / CPI prints; drops 2027 contracts
+        heartbeat_s: 120
+      # --- weather: daily high temperature, the 18 cities ForecastEx also lists
+      #     (station-matched in docs/FIN_E_FORECASTEX_XVENUE_2026-10-13.md; NYC/Denver excluded there)
+      - name: k-weather-high
+        series: [KXHIGHAUS, KXHIGHCHI, KXHIGHLAX, KXHIGHMIA, KXHIGHPHIL, KXHIGHTATL, KXHIGHTBOS,
+                 KXHIGHTDAL, KXHIGHTDC, KXHIGHTHOU, KXHIGHTLV, KXHIGHTMIN, KXHIGHTNOLA, KXHIGHTOKC,
+                 KXHIGHTPHX, KXHIGHTSATX, KXHIGHTSEA, KXHIGHTSFO]
+        refresh_s: 900
+        max_hours_to_close: 48
+        depth: 5
+      # --- daily rain (multi-city, launched 2026-07-16; largest weather series). Its trace=0 rule was
+      #     mispriced for ~6 weeks after launch (docs/SETTLE_PROXY_PARTIAL_INFO_2026-10-15.md); recorded
+      #     so the next settlement-rule change can be studied live from day one.
+      - {name: k-weather-rain, series: [KXRAIN], refresh_s: 900, max_hours_to_close: 48, depth: 5}
+      # --- mention markets ("will X say Y"): every series in Kalshi's Mentions category that
+      #     has an open event (76 series / ~1,350 markets on 2026-10-13). For the NO-maker audit:
+      #     trades + top-of-book depth; quiet books heartbeat every 5 min.
+      - {name: k-mentions, category: Mentions, refresh_s: 900, depth: 5, heartbeat_s: 300}
+      # --- sports combo legs: player props and game lines (C1 prop-leg quoting / combo-leg LIP / parlay5
+      #     paper quotes; docs/PARLAY5_COMBO_OVERPRICING_2026-10-15.md §8). User-approved 2026-10-15.
+      #     Sports close_time sits ~45 h after expected expiration (checked 2026-10-15 on live markets),
+      #     so max_hours_to_close 60 starts recording ~15 h before the game ends.
+      - name: k-sports-props
+        series: [KXNFLANYTD, KXNFLRECYDS, KXNFLPASSYDS, KXNFLRSHYDS, KXNFLREC, KXNFLPASSTDS, KXNFL2TD,
+                 KXNFLFIRSTTD, KXNBAPTS, KXNBAREB, KXNBA3PT, KXNBAAST, KXNBASTL, KXNBABLK]
+        refresh_s: 600
+        max_hours_to_close: 60
+        depth: 5
+        heartbeat_s: 120
+        track_settlement: true
+      - name: k-sports-lines
+        series: [KXNFLGAME, KXNFLSPREAD, KXNFLTOTAL, KXNBAGAME, KXNBASPREAD, KXNBATOTAL,
+                 KXNHLGAME, KXNHLSPREAD, KXNHLTOTAL, KXNCAAMBGAME]
+        refresh_s: 600
+        max_hours_to_close: 60
+        nearest_strikes: 6
+        depth: 5
+        heartbeat_s: 120
+        track_settlement: true
+      # --- 2026 US midterm general elections (Nov 3, 2026; docs/ELEX_ELECTIONS_2026-10-14.md §7).
+      #     Race winners: every Elections-category series matching series_regex that has an open
+      #     event, 2026 events only (SENATEGA-28 etc. are dropped by event_regex). No primaries:
+      #     those live in other series. ~980 markets on 2026-10-14 (KXHOUSERACE ~707).
+      #     Books every 5 s (on change) normally; 1 s on election night (window below covers
+      #     both 18:00 ET Nov 3 and the pre-registered 22:00Z start, through 12:00 ET Nov 4).
+      #     Close/settlement times -> settlement: below.
+      - name: k-elex-races
+        category: Elections
+        series_regex: '^(CONTROL[HS]|SENATE[A-Z]{2}S?|GOVPARTY[A-Z]{2}|HOUSE[A-Z]{2}\d+|KXHOUSERACE)$'
+        event_regex: '-(26|2026)$'
+        refresh_s: 1800
+        depth: 5
+        heartbeat_s: 300
+        sample_interval_s: 5
+        sample_windows:
+          - {start: "2026-11-03T17:00:00-05:00", end: "2026-11-04T12:00:00-05:00", interval_s: 1, heartbeat_s: 30}
+        track_settlement: true
+      # --- chamber control / seat counts / combos for the 2026 Congress (events -27, -27FEB,
+      #     -27JAN03, -27NOV03; the -29 / POWER-28 events are later cycles). ~90 markets.
+      - name: k-elex-control
+        series: [KXBALANCEPOWERCOMBO, KXDSENATESEATS, RSENATESEATS, KXDHOUSESEATS, KXRHOUSESEATS,
+                 KXDSENATESEATSH, KXHOUSEPOPVOTEMARGIN, KXBLUEWAVECOMBO, KXBLUETSUNAMICOMBO,
+                 KXCLOSESTSENATE]
+        event_regex: '-27([A-Z]{3}(\d{2})?)?$'
+        refresh_s: 1800
+        depth: 5
+        heartbeat_s: 300
+        sample_interval_s: 5
+        sample_windows:
+          - {start: "2026-11-03T17:00:00-05:00", end: "2026-11-04T12:00:00-05:00", interval_s: 1, heartbeat_s: 30}
+        track_settlement: true
+      # --- Kalshi Liquidity Incentive Program (LIP) markets for the lipfwd forward test
+      #     (docs/LIPFWD_PREREG_2026-10-15.md). Every market listed by the public
+      #     GET /incentive_programs (active + upcoming within 25 min, so a 15-minute window is
+      #     subscribed before it opens), ranked by reward $/day, top max_markets only.
+      #     depth 15 reaches the 1,000-contract LIP target on 99.6% of book sides (probe of 600
+      #     markets, 2026-10-14). Programme snapshots -> data/live_books/kalshi/*/lip-HH.parquet.
+      #     Markets already in another group keep that group's settings but get depth 15.
+      - name: k-lip
+        incentives: true
+        refresh_s: 1200
+        incentive_lookahead_s: 1500
+        max_markets: 1500
+        min_reward_per_day: 1.0
+        depth: 15
+        heartbeat_s: 120
+        track_settlement: true
+      # --- PROPOSED 2026-10-15 (UFLOW S3 opening-quote study; not yet deployed to atlas -- the
+      #     recorder only picks this up after a code update + restart, which needs user approval).
+      #     Every event of Indiana / Wisconsin / national daily AAA gas and the NYC daily high, from
+      #     before the official open (include_unopened; gas events open 08:00 ET and close 23:59 ET,
+      #     KXHIGHNY opens 10:00 ET the day before) through close, so open+2h is always covered.
+      #     docs/UFLOW_RESEARCH_DESIGN_2026-10-15.md needs 30 opening dates per series.
+      #     Series checked via GET /series/{ticker} 2026-10-15: all four exist, quadratic fees,
+      #     17 strikes per gas event, 6 per KXHIGHNY event (~75 markets total).
+      #     Caveats: (1) KXAAAGASD is also in k-econ/k-lip, and a market held by several groups keeps
+      #     the FIRST group's heartbeat/sampling (only depth is maxed), so heartbeat_s 30 may not apply
+      #     there; (2) whether status=unopened lists gas/weather events before open is unverified
+      #     (k-lip saw KXAAAGASD-26OCT16 at 07:50:49 ET, 9 min before open, via /incentive_programs).
+      #     Discovery cost: 4 series x 2 statuses / 60 s = 0.13 req/s of the 1.0 req/s budget.
+      - name: k-uflow-open
+        series: [KXAAAGASDIN, KXAAAGASDWI, KXAAAGASD, KXHIGHNY]
+        refresh_s: 60
+        include_unopened: true
+        max_hours_to_close: 48
+        depth: 15
+        heartbeat_s: 30
+        track_settlement: true
+  polymarket:
+    max_requests_per_s: 2.0
+    groups:
+      # Crypto up/down (knowledge only). First outcome token ("Up") only; its book is the
+      # exact complement of "Down". bbo events off (the 1 s books carry the touch).
+      # 5m books burst ~1,000+ msgs/s; Polymarket drops such a connection now and then
+      # ("1013 slow consumer"), so each group has its own WS and 5m keeps only current + next.
+      - {name: pm-crypto-5m, tags: [5M], slug_regex: '^(btc|eth|sol)-updown-5m-', refresh_s: 60,
+         max_hours_to_close: 0.15, depth: 5}
+      - {name: pm-crypto-15m, tags: [15M], slug_regex: '^(btc|eth|sol)-updown-15m-', refresh_s: 60,
+         max_hours_to_close: 0.5, depth: 5}
+      - {name: pm-crypto-1h, tags: [1H], slug_regex: '^(bitcoin|ethereum|solana)-up-or-down-',
+         refresh_s: 120, max_hours_to_close: 1.2, depth: 5}
+      - {name: pm-crypto-4h, tags: [4h], slug_regex: '^(btc|eth|sol)-updown-4h-', refresh_s: 300,
+         max_hours_to_close: 4.2, depth: 5}
+
+# ------------------------------------------------------------------ settlement log
+# Kalshi status/result changes (close, determination, settlement time) for every market of a
+# group with track_settlement: true -> data/live_books/kalshi/*/status-HH.parquet.
+# GET /markets?tickers=... (100 per request, <= 1 req/s): ~11 requests per sweep for ~1,070 markets.
+settlement:
+  enabled: true
+  interval_s: 3600          # hourly
+  fast_interval_s: 300      # every 5 min from election night through Nov 10 (ET)
+  fast_windows:
+    - {start: "2026-11-03T18:00:00-05:00", end: "2026-11-11T00:00:00-05:00"}
+  max_requests_per_s: 1.0
+  batch: 100
+
+# ------------------------------------------------------------------ Polymarket RTDS
+# Public real-time data socket: Chainlink reference prices (settlement source of the PM
+# crypto up/down markets) and Binance prices. -> data/live_books/polymarket_rtds/*/prices-HH
+rtds:
+  enabled: true
+  url: wss://ws-live-data.polymarket.com
+  topics:
+    - {topic: crypto_prices_chainlink, symbols: [btc/usd, eth/usd, sol/usd]}
+    - {topic: crypto_prices, symbols: [btcusdt, ethusdt, solusdt]}
