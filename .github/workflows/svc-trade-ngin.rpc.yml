@@ -1,0 +1,110 @@
+name: trade-ngin · rpc
+
+# The live path's checks beyond the C++ build (svc-trade-ngin.quality.yml):
+# the gRPC server engine-rpc runs (the QT desk, the catch-up scheduler, the
+# report), the migrations it depends on (025 command log, 027 daily cutoff,
+# 028 ops.data_ready, 029 rescind) with their rollbacks on postgres:16, and the
+# schema-ownership guard. Moved from trade-ngin's rpc.yml and ci-cd-pipeline.yml
+# with the import (#90). svc-trade-ngin.deploy.yml calls it before a deploy.
+
+on:
+  pull_request:
+    paths:
+      - services/trade-ngin/proto/**
+      - services/trade-ngin/services/rpc/**
+      - services/trade-ngin/scripts/**
+      - services/trade-ngin/deploy/**
+      - services/trade-ngin/migrations/**
+      - services/trade-ngin/src/data/**
+      - services/trade-ngin/src/storage/**
+      - .github/workflows/svc-trade-ngin.rpc.yml
+  push:
+    branches: [main]
+    paths:
+      - services/trade-ngin/proto/**
+      - services/trade-ngin/services/rpc/**
+      - services/trade-ngin/scripts/**
+      - services/trade-ngin/deploy/**
+      - services/trade-ngin/migrations/**
+      - services/trade-ngin/src/data/**
+      - services/trade-ngin/src/storage/**
+      - .github/workflows/svc-trade-ngin.rpc.yml
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: services/trade-ngin
+
+jobs:
+  rpc:
+    name: rpc stubs and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          # Ubuntu 24.04's python3, the interpreter the image runs.
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install -r services/rpc/requirements-dev.txt
+      - name: Generate stubs
+        run: PYTHON=python sh services/rpc/gen.sh
+      - name: Test
+        working-directory: services/trade-ngin/services/rpc
+        run: python -m pytest -q
+      - name: qt_grpc_call.py imports against the generated stubs
+        run: PYTHONPATH=services/rpc python -c "import importlib.util as u; s = u.spec_from_file_location('call', 'scripts/qt_grpc_call.py'); s.loader.exec_module(u.module_from_spec(s))"
+
+  migration:
+    name: migration ${{ matrix.test }} on postgres 16
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - test_025_qt_command_log_hardening
+          - test_027_qt_daily_cutoff
+          - test_028_ops_data_ready
+          - test_029_qt_rescind
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test the migration and its rollback on a throwaway postgres:16
+        env:
+          TEST: ${{ matrix.test }}
+        run: |
+          docker run -d --name pg -e POSTGRES_PASSWORD=x postgres:16
+          # TCP: the image's init-time server listens on the socket only, so this waits for the real one.
+          for _ in $(seq 1 60); do docker exec pg pg_isready -h 127.0.0.1 -U postgres && break; sleep 1; done
+          docker cp migrations pg:/m
+          docker exec -e QT_MIGRATION_TEST_THROWAWAY=1 -u postgres pg bash "/m/$TEST.sh"
+
+  schema-ownership:
+    name: schema ownership guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fail if a forbidden schema is referenced
+        # ADR-000 C-3 assigns futures_data/equities_data/options_data/synthetic to
+        # data-ngin, auth to AlgoLens and research to algosystem: trade-ngin never
+        # writes into them. src/data and src/storage hold every schema-qualified
+        # SQL identifier in trade-ngin.
+        run: |
+          FORBIDDEN='"(futures_data|equities_data|options_data|synthetic|auth|research)\.'
+          if grep -rnE "$FORBIDDEN" src/data src/storage --include="*.cpp" --include="*.hpp"; then
+            echo "::error::Found a reference to a schema trade-ngin does not own (see ADR-000 C-3). If this is intentional, update the allow-list in this workflow and confirm with whoever owns that schema."
+            exit 1
+          fi
+          echo "OK: no forbidden-schema references found in src/data or src/storage."

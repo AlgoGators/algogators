@@ -1,0 +1,62 @@
+# settle (2026-10-15): generalising the weather settlement-mechanics lead to other Kalshi data-release series.
+# Source: docs/SETTLE_PROXY_PARTIAL_INFO.md, scripts/research/settle_*.py, data/vendor/settle/.
+- strategy_id: settle_tsa_weekly_partial_info
+  name: KXTSAW weekly-average TSA throughput vs already-published daily TSA numbers (PIT nowcast taker)
+  venue: kalshi
+  status: rejected
+  evidence: "docs/SETTLE_PROXY_PARTIAL_INFO.md"
+  verdict: "No edge, and too small. A PIT nowcast (published days plus a YoY-scaled forecast for unpublished days; TSA posts Mon-Fri by 09:00 ET) ties the market before releases: test Brier 0.096 vs 0.100, and train 0.125 vs 0.087 (market better). The market barely reprices at the 09:00 release (slope 0.09-0.12 of the model move at +5 to +240 min), so the release is not news to it. Train-selected taker (L=5 min, theta 10c): train +$57/yr at $1k (Sharpe 0.4), test +$371/yr with CI [-29, 969] and avg deployed $4. KXTSAW settles on the FIRST-published daily numbers; TSA later revised 2023-25 weeks up by 0.1-0.4%, which flipped 21 strike outcomes vs today's tsa.gov table. No revisions in 2026."
+  key_numbers: {weeks: 189, brier_test_model: 0.0964, brier_test_market: 0.1000, test_pnl_yr_1k: 371, test_ci_1k: "[-29, 969]", avg_dep: 4, grid_cells: 18, revision_flips: 21}
+  gaps: "Local tape only (no book; next same-side print fills at 25% share); the publication time is the stated 09:00 ET + 15 min, not measured."
+  next_tests: "None."
+  retest_if: "KXTSAW volume grows more than 10x."
+- strategy_id: settle_aaa_gas_partial_info
+  name: KXAAAGASW / KXAAAGASM (AAA national average on a Monday / month end) vs already-published AAA daily values (momentum nowcast taker)
+  venue: kalshi
+  status: rejected
+  evidence: "docs/SETTLE_PROXY_PARTIAL_INFO.md"
+  verdict: "The market prices more than the published AAA dailies. The AAA daily history was rebuilt from 912 Wayback captures of gasprices.aaa.com plus Kalshi settlement values; AAA updates at about 03:00-04:00 ET, and settlement equals the published value (0 mismatches above 0.0005 on 328 dates). Test Brier, model vs market: W 0.148 vs 0.113; M 0.076 vs 0.060. The market hardly moves at the AAA update, because it already moved earlier (it prices GasBuddy/OPIS-type real-time data). Train-best taker KXAAAGASM (L=5 min, theta 10c): train +$564/yr at $10k, CI [53, 1095]; test -$1,171/yr, CI [-2260, -200]. Every KXAAAGASW cell is negative in train."
+  key_numbers: {grid_cells: 36, brier_test_W_model: 0.148, brier_test_W_market: 0.113, brier_test_M_model: 0.076, brier_test_M_market: 0.060, oos_pnl_yr_10k_trainbest: -1171}
+  gaps: "No GasBuddy history (the faster proxy); tape-only fills; the test window is the 2026 gas spike."
+  next_tests: "None. A GasBuddy-based test would need paid or scraped history."
+  retest_if: "Free GasBuddy daily-average history becomes available AND the recorder shows KXAAAGASD asks lagging GasBuddy moves by more than 1h."
+- strategy_id: settle_rain_daily_trace_rule
+  name: Kalshi daily rain (KXRAINNYC to 2026-07 with trace=YES; KXRAIN multi-city from 2026-07 with trace=0) - METAR precip proxy vs CLI settlement
+  venue: kalshi
+  status: rejected
+  evidence: "docs/SETTLE_PROXY_PARTIAL_INFO.md"
+  verdict: "The proxy equals settlement, and the market prices it before the public METAR. For KXRAIN (34 stations, 1,991 markets, 55.7M contracts in 3 months), the end-of-day METAR state determines the result: MEAS 452/452 YES, NONE 1317/1317 NO, trace/precip-wx-only 220/222 NO. The 'trace counts as 0' rule is priced (median YES 3.5c one hour after the last precip report on trace days). After the first public METAR with measurable precip, YES is already at 0.98-0.99. On old KXRAINNYC (trace = YES) the same holds: 111/111 trace-or-precip-wx days resolved YES, the market median was 0.98, and only $624 of below-95c YES offers were ever lifted after a signal in 13 months. Decided-YES taker (buy at the next YES print 1 min after the METAR): test +$40/yr at $1k, +$100 at $10k (CI [32, 175]), avg deployed < $18. Causal trace-trap NO taker (precip wx seen, nothing measurable, quiet >= 60/120 min, P(YES) from the train rate): the market overpriced YES in the first 6 weeks after launch (12-24 h to close: market 0.46 vs realised 0.28), then became calibrated (test 0.31 vs 0.33). The taker made +$134 to +$447/yr in train and -$357 to -$664/yr in test, with all 6 test cells negative. This was a launch transient."
+  key_numbers: {kxrain_markets: 1991, kxrain_contracts_3mo: 55689134, meas_to_yes: "452/452", none_to_no: "1317/1317", trace_to_no: "220/222", s1_test_pnl_yr_10k: 100, s2_test_pnl_yr: "-357 to -664", grid_cells: 24}
+  gaps: "METAR availability assumed obs+5 min; tape from the public trades API (no book)."
+  next_tests: "None."
+  retest_if: "Kalshi changes the rain settlement source or rule again: the S2 mispricing existed only in the first ~6 weeks after the 2026-07-16 rule change, so log the first weeks of any new rule live (add KXRAIN to the recorder)."
+- strategy_id: settle_monthly_cumulative_decided
+  name: Monthly rain / snow series (16 series) - buy YES once the published month-to-date CLI total passes the strike
+  venue: kalshi
+  status: rejected
+  evidence: "docs/SETTLE_PROXY_PARTIAL_INFO.md"
+  verdict: "The market already prices it. Of 381 'decided' strikes, 380 won; the 1 loss was a station switch (Chicago moved to ORD), not a settlement gap. The market's last price at the CLI publication averaged 0.95-0.99. Only 1,879 YES contracts were lifted after signals across 2024-26: +$5/yr, avg deployed $5."
+  key_numbers: {signals: 381, pnl_yr_1k: 4.75, avg_dep: 5}
+  gaps: "Rule station can change month to month (read per-market rules)."
+  next_tests: "None."
+  retest_if: "Never on its own; capacity is far below the bar."
+- strategy_id: settle_hmonth_era5_proxy
+  name: KXHMONTH / KXHMONTHRANGE (NOAA global monthly temperature) vs Copernicus ERA5 daily (public about 10 days before NOAA)
+  venue: kalshi
+  status: rejected
+  evidence: "docs/SETTLE_PROXY_PARTIAL_INFO.md"
+  verdict: "The market beats the ERA5-mapped model at every horizon (Brier 0.057 vs 0.110 at ERA5 completion, 26 events). ERA5 and NOAA disagree on 'record month' in 12 of 141 months, and NOAA anomaly = 0.61 + 0.90*ERA5 with sd 0.045 C, comparable to the 0.065 C bracket width. Taker: -$14 to +$36/yr, avg deployed < $1."
+  key_numbers: {events: 26, brier_model: 0.110, brier_market: 0.057}
+  gaps: "Small N (about 1 event per month)."
+  next_tests: "None."
+  retest_if: "Never."
+- strategy_id: settle_spotify_weekly_partial_info
+  name: KXSPOTIFYW weekly #1 vs already-published Spotify daily #1s (sweep signal)
+  venue: kalshi
+  status: rejected
+  evidence: "docs/SETTLE_PROXY_PARTIAL_INFO.md"
+  verdict: "The signal is real but already priced. A song that swept every published daily #1 after 2 or more days won 100% of weeks, but traded at 0.94-0.98. Taker at +30 min: 3 fills in 12 months, +$1/yr."
+  key_numbers: {sweep_win_rate_k2plus: 1.0, market_px: "0.94-0.98", pnl_yr: 1}
+  gaps: "None material."
+  next_tests: "None."
+  retest_if: "Never."

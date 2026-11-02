@@ -29,8 +29,10 @@ std::string RunIdGenerator::generate_timestamp_string(const Timestamp& timestamp
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         timestamp.time_since_epoch()).count() % 1000;
 
+    std::tm tm{};
+    gmtime_r(&time_t, &tm);
     std::stringstream ss;
-    ss << std::put_time(std::gmtime(&time_t), "%Y%m%d_%H%M%S");
+    ss << std::put_time(&tm, "%Y%m%d_%H%M%S");
     ss << "_" << std::setfill('0') << std::setw(3) << ms;
 
     return ss.str();
@@ -38,8 +40,10 @@ std::string RunIdGenerator::generate_timestamp_string(const Timestamp& timestamp
 
 std::string RunIdGenerator::generate_date_string(const Timestamp& date) {
     auto time_t = std::chrono::system_clock::to_time_t(date);
+    std::tm tm{};
+    gmtime_r(&time_t, &tm);
     std::stringstream ss;
-    ss << std::put_time(std::gmtime(&time_t), "%Y%m%d");
+    ss << std::put_time(&tm, "%Y%m%d");
     return ss.str();
 }
 

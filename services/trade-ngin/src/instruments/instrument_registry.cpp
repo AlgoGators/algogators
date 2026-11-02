@@ -55,8 +55,11 @@ std::shared_ptr<Instrument> InstrumentRegistry::get_instrument(const std::string
     if (!had_variant_suffix && instruments_.count(cleaned_symbol) > 0) {
         // fall through to the map lookup below with no remap
     } else
-    // Handle special cases for micro futures
-    if (cleaned_symbol == "ES") {
+    // Handle special cases for micro futures (off while listing dates are in force: the full-size
+    // row is then the contract the book trades before the micro's listing date)
+    if (!full_size_remap_) {
+        // no remap: the root's own row or nothing
+    } else if (cleaned_symbol == "ES") {
         cleaned_symbol = "MES";
     } else if (cleaned_symbol == "YM") {
         cleaned_symbol = "MYM";
@@ -109,6 +112,26 @@ std::shared_ptr<OptionInstrument> InstrumentRegistry::get_option_instrument(
     }
 
     return std::dynamic_pointer_cast<OptionInstrument>(instrument);
+}
+
+InstrumentRegistry& InstrumentRegistry::instance() {
+    static InstrumentRegistry instance;
+    return instance;
+}
+
+Result<void> InstrumentRegistry::initialize_without_database() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    db_ = nullptr;
+    initialized_ = true;
+    return Result<void>();
+}
+
+void InstrumentRegistry::clear() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    instruments_.clear();
+    db_ = nullptr;
+    initialized_ = false;
+    full_size_remap_ = true;
 }
 
 Result<void> InstrumentRegistry::load_instruments() {
@@ -317,8 +340,11 @@ bool InstrumentRegistry::has_instrument(const std::string& symbol) const {
     if (!had_variant_suffix && instruments_.count(cleaned_symbol) > 0) {
         // fall through to the map lookup below with no remap
     } else
-    // Handle special cases for micro futures
-    if (cleaned_symbol == "ES") {
+    // Handle special cases for micro futures (off while listing dates are in force: the full-size
+    // row is then the contract the book trades before the micro's listing date)
+    if (!full_size_remap_) {
+        // no remap: the root's own row or nothing
+    } else if (cleaned_symbol == "ES") {
         cleaned_symbol = "MES";
     } else if (cleaned_symbol == "YM") {
         cleaned_symbol = "MYM";

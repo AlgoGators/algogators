@@ -1,0 +1,20 @@
+# Docker builds that use the repository root as their context (research-api, algolens-web, ...)
+# send everything below. Keep out what no image needs: it is large and can hold secrets.
+.git
+.github
+**/.venv
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.coverage
+**/coverage
+**/dist
+**/preview
+**/.env
+**/.env.*
+!**/.env.example
+services/trade-ngin
+infra
+docs

@@ -1,0 +1,187 @@
+{
+ "chunks": [
+  {
+   "chunk": 5,
+   "rows_old": 3129451,
+   "rows_new": 3129451,
+   "tickers": 11023,
+   "old_load_s": 6.8710100000025705,
+   "old_post_s": 1.957331300000078,
+   "new_total_s": 1.3494245000038063,
+   "Fa": {
+    "fills_old": 1038190,
+    "fills_new": 1038190,
+    "fills_identical": true,
+    "cells_identical": true,
+    "cells": 247332,
+    "gross_old": -75164223.0,
+    "gross_new": -75164223.0,
+    "fee_old": 7844063.0,
+    "fee_new": 7844063.0,
+    "sim_fills": 14492,
+    "sim_pnl_old": -7116.779999999999,
+    "sim_pnl_new": -7116.779999999999,
+    "sim_pnl_identical": true
+   },
+   "Fb": {
+    "fills_old": 462528,
+    "fills_new": 462528,
+    "fills_identical": true,
+    "cells_identical": true,
+    "cells": 196409,
+    "gross_old": -33589556.0,
+    "gross_new": -33589556.0,
+    "fee_old": 2536211.0,
+    "fee_new": 2536211.0,
+    "sim_fills": 18915,
+    "sim_pnl_old": -13136.529999999999,
+    "sim_pnl_new": -13136.529999999999,
+    "sim_pnl_identical": true
+   },
+   "Fc": {
+    "fills_old": 690672,
+    "fills_new": 690672,
+    "fills_identical": true,
+    "cells_identical": true,
+    "cells": 193301,
+    "gross_old": -58136002.0,
+    "gross_new": -58136002.0,
+    "fee_old": 4291917.0,
+    "fee_new": 4291917.0,
+    "sim_fills": 21223,
+    "sim_pnl_old": -9307.13,
+    "sim_pnl_new": -9307.13,
+    "sim_pnl_identical": true
+   },
+   "volume_identical": true
+  },
+  {
+   "chunk": 17,
+   "rows_old": 3236122,
+   "rows_new": 3236122,
+   "tickers": 11316,
+   "old_load_s": 6.922838400001638,
+   "old_post_s": 2.0168198000028497,
+   "new_total_s": 1.3693957999930717,
+   "Fa": {
+    "fills_old": 1087507,
+    "fills_new": 1087507,
+    "fills_identical": true,
+    "cells_identical": true,
+    "cells": 251017,
+    "gross_old": -60187725.0,
+    "gross_new": -60187725.0,
+    "fee_old": 8858199.5,
+    "fee_new": 8858199.5,
+    "sim_fills": 16242,
+    "sim_pnl_old": -6366.41,
+    "sim_pnl_new": -6366.41,
+    "sim_pnl_identical": true
+   },
+   "Fb": {
+    "fills_old": 471296,
+    "fills_new": 471296,
+    "fills_identical": true,
+    "cells_identical": true,
+    "cells": 199758,
+    "gross_old": -33035028.0,
+    "gross_new": -33035028.0,
+    "fee_old": 2815907.5,
+    "fee_new": 2815907.5,
+    "sim_fills": 23584,
+    "sim_pnl_old": -11515.11,
+    "sim_pnl_new": -11515.11,
+    "sim_pnl_identical": true
+   },
+   "Fc": {
+    "fills_old": 724658,
+    "fills_new": 724658,
+    "fills_identical": true,
+    "cells_identical": true,
+    "cells": 196773,
+    "gross_old": -65041979.0,
+    "gross_new": -65041979.0,
+    "fee_old": 4603784.5,
+    "fee_new": 4603784.5,
+    "sim_fills": 22169,
+    "sim_pnl_old": -4490.819999999999,
+    "sim_pnl_new": -4490.819999999999,
+    "sim_pnl_identical": true
+   },
+   "volume_identical": true
+  },
+  {
+   "chunk": 40,
+   "rows_old": 3102503,
+   "rows_new": 3102503,
+   "tickers": 11123,
+   "old_load_s": 6.942090700002154,
+   "old_post_s": 1.9790299000014784,
+   "new_total_s": 1.3516704000066966,
+   "Fa": {
+    "fills_old": 1080605,
+    "fills_new": 1080605,
+    "fills_identical": true,
+    "cells_identical": true,
+    "cells": 253118,
+    "gross_old": -61593605.0,
+    "gross_new": -61593605.0,
+    "fee_old": 9127055.5,
+    "fee_new": 9127055.5,
+    "sim_fills": 25877,
+    "sim_pnl_old": -8786.31,
+    "sim_pnl_new": -8786.31,
+    "sim_pnl_identical": true
+   },
+   "Fb": {
+    "fills_old": 475686,
+    "fills_new": 475686,
+    "fills_identical": true,
+    "cells_identical": true,
+    "cells": 201513,
+    "gross_old": -39616204.0,
+    "gross_new": -39616204.0,
+    "fee_old": 2912268.0,
+    "fee_new": 2912268.0,
+    "sim_fills": 36416,
+    "sim_pnl_old": -21984.35,
+    "sim_pnl_new": -21984.35,
+    "sim_pnl_identical": true
+   },
+   "Fc": {
+    "fills_old": 707280,
+    "fills_new": 707280,
+    "fills_identical": true,
+    "cells_identical": true,
+    "cells": 198577,
+    "gross_old": -16135502.0,
+    "gross_new": -16135502.0,
+    "fee_old": 4508181.5,
+    "fee_new": 4508181.5,
+    "sim_fills": 43619,
+    "sim_pnl_old": -15455.329999999998,
+    "sim_pnl_new": -15455.329999999998,
+    "sim_pnl_identical": true
+   },
+   "volume_identical": true
+  }
+ ],
+ "old_nondeterminism": {
+  "Fa": {
+   "run1_fills": 1038178,
+   "run2_fills": 1038240,
+   "run1_gross_minus_run2": -14006.0
+  },
+  "Fb": {
+   "run1_fills": 462534,
+   "run2_fills": 462610,
+   "run1_gross_minus_run2": -7865.0
+  },
+  "Fc": {
+   "run1_fills": 690684,
+   "run2_fills": 690746,
+   "run1_gross_minus_run2": -5860.0
+  }
+ },
+ "ALL_IDENTICAL": true
+}

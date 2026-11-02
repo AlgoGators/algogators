@@ -1,0 +1,42 @@
+# Airflow image for the data-ngin DAGs. Airflow is deliberately NOT a
+# workspace dependency (its pins conflict with the rest of the monorepo), so
+# it lives only here, in the deploy image.
+# Build context is the REPO ROOT:
+#   docker build -f services/data-ngin/Dockerfile.airflow .
+ARG AIRFLOW_VERSION=3.3.2
+FROM apache/airflow:${AIRFLOW_VERSION}-python3.11
+# Re-declared so the pip pin below can see it (FROM-scope ARGs end at FROM).
+ARG AIRFLOW_VERSION
+
+USER root
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libpq-dev && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+USER airflow
+WORKDIR /opt/airflow
+
+# Install the service package (and its workspace lib) into Airflow's
+# environment so the DAGs can `import data_ngin`. apache-airflow is pinned in
+# the same install so a service dependency can never silently up- or
+# downgrade Airflow away from the base image's version.
+COPY --chown=airflow:root platform/db /opt/deps/platform-db
+COPY --chown=airflow:root services/data-ngin /opt/deps/data-ngin
+# The FAB provider (auth manager + Dex OAuth login, which needs authlib) and
+# the postgres provider are named explicitly: the prod compose selects the
+# FAB auth manager and webserver_config.py logs in through Dex.
+RUN pip install --no-cache-dir \
+    "apache-airflow==${AIRFLOW_VERSION}" \
+    "apache-airflow-providers-fab>=3.9.0" \
+    "apache-airflow-providers-postgres>=5.10" \
+    "authlib>=1.3" \
+    /opt/deps/platform-db \
+    /opt/deps/data-ngin
+
+COPY --chown=airflow:root services/data-ngin/dags /opt/airflow/dags
+# Dex (GitHub) login for the UI; AIRFLOW_LOGIN=db falls back to local users.
+COPY --chown=airflow:root services/data-ngin/webserver_config.py /opt/airflow/webserver_config.py
+
+EXPOSE 8080
