@@ -10,6 +10,9 @@ on:
       - 'pyproject.toml'
       - '.github/workflows/_quality-python.yml'
       - '.github/workflows/svc-research-api.quality.yml'
+      # the engine's gRPC contract, which research-api carries a copy of (the protos job)
+      - 'services/trade-ngin/proto/**'
+      - 'services/trade-ngin/services/rpc/gen_versions.py'
   push:
     branches: [main]
     paths:
@@ -20,6 +23,9 @@ on:
       - 'pyproject.toml'
       - '.github/workflows/_quality-python.yml'
       - '.github/workflows/svc-research-api.quality.yml'
+      # the engine's gRPC contract, which research-api carries a copy of (the protos job)
+      - 'services/trade-ngin/proto/**'
+      - 'services/trade-ngin/services/rpc/gen_versions.py'
   workflow_dispatch:
 
 concurrency:
@@ -41,15 +47,36 @@ jobs:
       build-check: false
     secrets: inherit
 
+  # AlgoLens calls the engine with a copy of its protos; the engine refuses another major version,
+  # so the copy must match services/trade-ngin exactly (decision 0031).
+  protos:
+    name: protos match the engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            services/research-api
+            services/trade-ngin/proto
+            services/trade-ngin/services/rpc/gen_versions.py
+          sparse-checkout-cone-mode: false
+      - run: sh services/research-api/scripts/sync_protos.sh --check
+
   gate:
     name: svc-research-api quality
     if: always()
-    needs: [quality]
+    needs: [quality, protos]
     runs-on: ubuntu-latest
     steps:
       - name: Report result
         run: |
           if [ "${{ needs.quality.result }}" != "success" ]; then
             echo "::error::quality result was ${{ needs.quality.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.protos.result }}" != "success" ]; then
+            echo "::error::the vendored protos differ from services/trade-ngin (scripts/sync_protos.sh)"
             exit 1
           fi
