@@ -1,5 +1,8 @@
-// K3, the netting adjustment (T-7b-2 8b). See include/trade_ngin/transaction_cost/netting.hpp.
+// The netting adjustment. See include/trade_ngin/transaction_cost/netting.hpp.
 
+#ifdef _MSC_VER
+#include <intrin.h>
+#endif
 #include "trade_ngin/transaction_cost/netting.hpp"
 
 #include <algorithm>
@@ -8,8 +11,33 @@
 #include <map>
 #include <numeric>
 #include <sstream>
+#include <stdexcept>
 
 namespace trade_ngin {
+
+namespace {
+struct MulDiv {
+    uint64_t quotient;
+    uint64_t remainder;
+};
+
+/// floor(a * b / d) and a * b mod d, with a * b held exactly in 128 bits. The quotient must fit
+/// in 64 bits (here b <= d, so it is at most a).
+MulDiv mul_div(uint64_t a, uint64_t b, uint64_t d) {
+#ifdef _MSC_VER
+    uint64_t high = 0;
+    const uint64_t low = _umul128(a, b, &high);
+    uint64_t rem = 0;
+    const uint64_t quotient = _udiv128(high, low, d, &rem);
+    return {quotient, rem};
+#else
+    using u128 = unsigned __int128;
+    const u128 product = static_cast<u128>(a) * b;
+    return {static_cast<uint64_t>(product / d), static_cast<uint64_t>(product % d)};
+#endif
+}
+}  // namespace
+
 namespace transaction_cost {
 
 namespace {
@@ -83,20 +111,22 @@ NettingOutcome net_symbol_day(const std::vector<NettingLeg>& legs, const Account
 
     // credit_total split pro rata to C(q_i) in whole 1e-8 units: the floor of each exact quota,
     // then one unit to each of the largest remainders (a tie to the smaller sleeve name) until the
-    // parts sum to |credit_total|; the sign is applied after, as S2's split does for a short book.
-    using u128 = unsigned __int128;
-    const u128 magnitude = static_cast<u128>(credit < 0 ? -static_cast<__int128>(credit)
-                                                        : static_cast<__int128>(credit));
-    const u128 total = static_cast<u128>(weight_total);
+    // parts sum to |credit_total|; the sign is applied after, so a negative credit splits as its magnitude does.
+    // magnitude * w is exact in 128 bits (mul_div below); the quota never exceeds magnitude
+    // because w <= weight_total, so it fits in 64.
+    const uint64_t magnitude = credit < 0 ? 0 - static_cast<uint64_t>(credit)
+                                           : static_cast<uint64_t>(credit);
+    const uint64_t total = static_cast<uint64_t>(weight_total);
     std::vector<int64_t> part(legs.size(), 0);
-    std::vector<u128> remainder(legs.size(), 0);
-    u128 assigned = 0;
+    std::vector<uint64_t> remainder(legs.size(), 0);
+    uint64_t assigned = 0;
     for (size_t i = 0; i < legs.size(); ++i) {
-        const u128 w = static_cast<u128>(std::max<int64_t>(legs[i].own_cost.raw_value(), 0));
-        const u128 exact = magnitude * w;
-        part[i] = static_cast<int64_t>(exact / total);
-        remainder[i] = exact % total;
-        assigned += exact / total;
+        const uint64_t w =
+            static_cast<uint64_t>(std::max<int64_t>(legs[i].own_cost.raw_value(), 0));
+        const MulDiv split = mul_div(magnitude, w, total);
+        part[i] = static_cast<int64_t>(split.quotient);
+        remainder[i] = split.remainder;
+        assigned += split.quotient;
     }
     std::vector<size_t> order(legs.size());
     std::iota(order.begin(), order.end(), size_t{0});
@@ -160,6 +190,45 @@ NettingReport apply_netting_adjustments(
         }
     }
     return rep;
+}
+
+std::string unnetted_row_refusal(const ExecutionReport& fill) {
+    if (fill.execution_type == ExecutionType::STRATEGY || fill.netting_adjustment == Decimal()) {
+        return {};
+    }
+    return std::string("NETTING_REFUSED: the ") +
+           (fill.execution_type == ExecutionType::ROLL ? "ROLL" : "BORROW") + " row " + fill.exec_id +
+           " (" + fill.symbol + ") carries a netting adjustment of " +
+           fill.netting_adjustment.to_string() +
+           "; a ROLL leg and a BORROW row are never netted and must carry exactly 0";
+}
+
+Decimal unnetted_cost(const ExecutionReport& fill) {
+    const std::string refusal = unnetted_row_refusal(fill);
+    if (!refusal.empty()) throw NettingRefused(refusal);
+    return fill.total_transaction_costs;
+}
+
+double add_net_costs(double running, const std::vector<ExecutionReport>& fills, size_t from) {
+    for (size_t i = from; i < fills.size(); ++i) {
+        const std::string refusal = unnetted_row_refusal(fills[i]);
+        if (!refusal.empty()) throw NettingRefused(refusal);
+        running += static_cast<double>(net_cost(fills[i]));
+    }
+    return running;
+}
+
+RunCostTotals run_cost_totals(const std::vector<ExecutionReport>& fills) {
+    RunCostTotals totals;
+    for (const auto& e : fills) {
+        if (e.execution_type != ExecutionType::STRATEGY) (void)unnetted_cost(e);
+        totals.transaction_costs += static_cast<double>(net_cost(e));
+        if (e.execution_type == ExecutionType::ROLL) {
+            totals.roll_costs += static_cast<double>(unnetted_cost(e));
+            ++totals.roll_fills;
+        }
+    }
+    return totals;
 }
 
 }  // namespace transaction_cost

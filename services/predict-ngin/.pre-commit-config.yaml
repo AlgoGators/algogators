@@ -1,0 +1,22 @@
+# Install once with: uv run pre-commit install
+# Ruff and the whitespace fixers are limited to predict_ngin/ (legacy code is not linted yet);
+# the safety hooks (large files, private keys) run on every file.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.1
+    hooks:
+      - id: ruff-check
+        files: ^predict_ngin/
+        args: [--fix]
+      - id: ruff-format
+        files: ^predict_ngin/
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: [--maxkb=2048]
+      - id: detect-private-key
+      - id: end-of-file-fixer
+        files: ^predict_ngin/
+      - id: trailing-whitespace
+        files: ^predict_ngin/

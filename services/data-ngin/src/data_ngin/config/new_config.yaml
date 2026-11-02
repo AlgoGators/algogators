@@ -1,0 +1,82 @@
+# Databento futures pipeline, full contract list (new_data_pipeline_dag)
+# -> new_algo_data.futures_data.
+loader:
+  class: "CSVLoader"
+  module: "loader.csv_loader"
+  # Relative paths resolve against DATA_NGIN_CONTRACTS_DIR, else the
+  # contracts/ directory packaged with data_ngin.
+  file_path: "new_full_contracts.csv"
+
+inserter:
+  class: "OhlcvRepository"
+  module: "repository.ohlcv_repository"
+
+fetcher:
+  class: "BatchDownloadDatabentoFetcher"
+  module: "fetcher.batch_download_databento_fetcher"
+
+cleaner:
+  class: "DatabentoCleaner"
+  module: "cleaner.databento_cleaner"
+
+# Data provider configuration
+provider:
+  name: "databento"
+  asset: "FUTURE"                   # FUTURE, EQUITY
+  dataset: "GLBX.MDP3"              # XNAS.ITCH for equities, GLBX.MDP3 for futures
+  schema: "OHLCV_1D"                # Only OHLCV_1D for now
+  roll_type: "v"                    # Calendar = c, Open Interest = n, Volume = v
+  contract_type: "0"                # AKA Rank: 0 = front, 1 = second, 2 = third, etc.
+
+# E-mini symbols are fetched and stored as their Micro equivalents (MES.v.0, ...).
+symbol_remap:
+  ES: "MES"
+  RTY: "M2K"
+  NQ: "MNQ"
+  YM: "MYM"
+
+# Which asset type the back-adjustment (futures roll) algorithm runs for.
+back_adjustment:
+  applies_to: "FUTURE"
+
+# Database configuration. db_name selects the database (falls back to DB_NAME).
+database:
+  db_name: "new_algo_data"
+  target_schema: "futures_data"
+  raw_table: "ohlcv_1d_raw"
+  table: "ohlcv_1d"
+
+# The Airflow DAG ignores time_range: it pulls its run's bar date plus any gaps
+# in the 5 days before (application/close_pipeline.py). time_range drives
+# `python -m data_ngin.main` (Orchestrator.run) only.
+#
+# Time range for data fetching, YYYY-MM-DD. end_date is INCLUSIVE (the fetcher
+# translates it to Databento's exclusive end internally). Leave both blank:
+# start_date then defaults to the day after the latest row in database.table
+# and end_date to yesterday. Only hardcode dates for a one-off manual backfill
+# -- a fixed range left in place silently re-pulls the same window every day
+# instead of picking up new days.
+time_range:
+  start_date: ""
+  end_date: ""
+
+# Options to handle missing data
+missing_data:
+  forward_fill: "False"
+  backward_fill: "False"
+  interpolate: "False"
+  drop_nan: "False"
+  zero_fill: "True"
+  mean_fill: "False"
+  median_fill: "False"
+  custom_fill: "False"
+  custom_value: "0"
+
+# Logging options
+logging:
+  level: "INFO"
+
+batch_downloading:
+  batch: False
+  unit: "Daily"
+  max_units: 100

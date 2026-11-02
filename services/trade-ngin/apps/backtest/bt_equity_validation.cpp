@@ -36,6 +36,7 @@
 #include "trade_ngin/strategy/equity_strategy_builder.hpp"
 #include "trade_ngin/portfolio/portfolio_manager.hpp"
 #include "trade_ngin/strategy/mean_reversion.hpp"
+#include "trade_ngin/transaction_cost/netting.hpp"
 
 using namespace trade_ngin;
 using namespace trade_ngin::backtest;
@@ -91,9 +92,10 @@ static void check(const std::string& name, bool condition, const std::string& de
 
 static std::string ts_to_date_str(const Timestamp& ts) {
     auto time_t = std::chrono::system_clock::to_time_t(ts);
-    std::tm* tm = std::gmtime(&time_t);
+    std::tm tm{};
+    gmtime_r(&time_t, &tm);
     std::ostringstream oss;
-    oss << std::put_time(tm, "%Y-%m-%d");
+    oss << std::put_time(&tm, "%Y-%m-%d");
     return oss.str();
 }
 
@@ -263,7 +265,7 @@ int main() {
         std::cout << std::endl;
 
         // Register equity instruments. Pass the exchange JSON path so per-symbol
-        // exchanges populate correctly instead of defaulting to NYSE. Audit §1.2.
+        // exchanges populate correctly instead of defaulting to NYSE.
         auto equity_reg_result = registry.load_equity_instruments(
             symbols, "data/equity_exchanges.json");
         if (equity_reg_result.is_error()) {
@@ -538,11 +540,9 @@ int main() {
         std::cout << "  SECTION B: Strategy Calculation Validation" << std::endl;
         std::cout << "------------------------------------------------------\n" << std::endl;
 
-        // Run the actual backtest. mr_config was built from the config above (T2.6) --
-        // this block used to rebuild it from the same literals a second time, which is how a
-        // config-vs-literal divergence could have appeared in one half of the app and not
-        // the other. `use_stop_loss` and `allow_fractional_shares` were pinned true here
-        // regardless of what the config said; they now follow it.
+        // Run the actual backtest. mr_config was built from the config above and is not
+        // rebuilt here, so both halves of the app read the same values, `use_stop_loss`
+        // and `allow_fractional_shares` included.
 
         StrategyConfig strategy_config;
         strategy_config.asset_classes = {AssetClass::EQUITIES};
@@ -577,6 +577,9 @@ int main() {
         coord_config.use_optimization = false;
         coord_config.store_trade_details = true;
         coord_config.portfolio_id = "equity_validation";
+        // K of the equity statistics grid, the factor the calculator applies and the mirror in
+        // section D reads back from the results.
+        coord_config.statistics_sessions_per_year = app_config.statistics.equity_sessions_per_year;
 
         auto coordinator = std::make_unique<BacktestCoordinator>(db, &registry, coord_config);
         auto coord_init = coordinator->initialize();
@@ -595,8 +598,8 @@ int main() {
         // with who made it and when, and the PortfolioManager refuses an empty list.
         auto none_module = make_none_module(
             "Equity validation harness: measures the strategy alone, without a portfolio risk "
-            "layer (T-RISK-ARCH \u00a77 table)",
-            "HD (T-RISK-ARCH \u00a77, adopted STAGE3_PLAN \u00a728)", "2026-09-18");
+            "layer",
+            "HD", "2026-09-18");
         if (none_module.is_error()) {
             ERROR(std::string(none_module.error()->what()));
             return 1;
@@ -691,16 +694,11 @@ int main() {
             //    bar as "previous bars". close[N-1] does reach the strategy.
             //
             // The net effect is a pure one-day lag, so the SET of closes the strategy sees
-            // is every close in order. Verified against a live run (E2-F4): for AMZN --
+            // is every close in order. Verified against a live run: for AMZN --
             // chosen because it has no corporate action in the window, so raw == adjusted --
             // the strategy's final state matches the 20 bars ending on the LAST bar
             // (SMA 266.739500, StdDev 7.346419, vol 0.321135, z -0.042129) on all four
             // metrics to six decimals.
-            //
-            // The previous model here duplicated close[0] and stopped at close[N-2]. Its
-            // window therefore ended one bar early, and it compared its 2026-08-27 state
-            // against the strategy's 2026-08-28 state -- 12 false failures, 3 symbols x
-            // 4 metrics, while both sides' arithmetic was individually correct.
             std::vector<double> bod_closes = closes;
             std::vector<Timestamp> bod_timestamps = timestamps;
 
@@ -756,8 +754,8 @@ int main() {
                     }
                 }
                 // Sample std dev (n-1) to match MeanReversionStrategy::calculate_volatility.
-                // Previously used population (n) -- ~2.5% drift on 20-day windows caused
-                // spurious validation failures. Audit §1.19.
+                // Population (n) drifts ~2.5% on 20-day windows and would cause spurious
+                // validation failures.
                 if (log_returns.size() >= 2) {
                     double ret_mean = std::accumulate(log_returns.begin(), log_returns.end(), 0.0) / log_returns.size();
                     double ret_sq = 0;
@@ -872,7 +870,7 @@ int main() {
                         double qty = exec.filled_quantity.as_double();
                         if (exec.side == Side::SELL) qty = -qty;
                         positions[exec.symbol] += qty;
-                        day_txn_costs += exec.total_transaction_costs.as_double();
+                        day_txn_costs += transaction_cost::net_cost(exec).as_double();
                     }
                 }
 
@@ -954,7 +952,11 @@ int main() {
         std::cout << "------------------------------------------------------\n" << std::endl;
 
         {
-            const auto& equity_curve = backtest_results.equity_curve;
+            // One row per UTC date, the last one (matching calculate_all_metrics)
+            const auto equity_curve = core::last_row_per_utc_date(
+                backtest_results.equity_curve, [](const std::pair<Timestamp, double>& row) {
+                    return core::format_utc_date(row.first);
+                });
             int warmup_days = backtest_results.warmup_days;
 
             // Filter warmup (matching filter_warmup_period)
@@ -988,15 +990,24 @@ int main() {
             // Total return
             double manual_total_return = (filtered.back().second - filtered.front().second) / filtered.front().second;
 
-            // Volatility (matching calculate_volatility: E[r^2] - E[r]^2)
-            double mean_return = std::accumulate(returns.begin(), returns.end(), 0.0) / returns.size();
-            double sq_sum = std::inner_product(returns.begin(), returns.end(), returns.begin(), 0.0);
-            double variance = sq_sum / returns.size() - mean_return * mean_return;
-            double manual_vol = std::sqrt(variance) * std::sqrt(252.0);
+            // The equity run's statistics grid is its own rows (NYSE sessions), so the returns
+            // above are the grid's; K is the sessions a year the calculator applied.
+            const double sessions_per_year = backtest_results.statistics_sessions_per_year;
 
-            // Sharpe ratio (matching calculate_sharpe_ratio: annualize daily mean return by *252)
-            double ann_return = mean_return * 252.0;
-            double manual_sharpe = (manual_vol > 0.0) ? ann_return / manual_vol : 0.0;
+            // Volatility (matching calculate_volatility: the SAMPLE standard deviation, n - 1,
+            // x sqrt(K))
+            double mean_return = std::accumulate(returns.begin(), returns.end(), 0.0) / returns.size();
+            double dev_sq_sum = 0.0;
+            for (double r : returns) {
+                dev_sq_sum += (r - mean_return) * (r - mean_return);
+            }
+            double variance =
+                returns.size() > 1 ? dev_sq_sum / static_cast<double>(returns.size() - 1) : 0.0;
+            double manual_vol = std::sqrt(variance) * std::sqrt(sessions_per_year);
+
+            // Sharpe ratio (matching calculate_sharpe_ratio: the mean grid return x K)
+            double ann_return = mean_return * sessions_per_year;
+            double manual_sharpe = (manual_vol > 0.0) ? ann_return / manual_vol : kNoRatio;
 
             // Sortino ratio (matching calculate_downside_volatility + calculate_sortino_ratio)
             double downside_sum = 0.0;
@@ -1007,14 +1018,13 @@ int main() {
                     downside_count++;
                 }
             }
+            // averaged over every return of the series, as the calculator does
             double downside_vol = (downside_count > 0)
-                ? std::sqrt(downside_sum / downside_count) * std::sqrt(252.0) : 0.0;
-            double manual_sortino = 0.0;
-            if (downside_vol > 0.0) {
-                manual_sortino = ann_return / downside_vol;
-            } else {
-                manual_sortino = (ann_return >= 0) ? 999.0 : 0.0;
-            }
+                ? std::sqrt(downside_sum / static_cast<double>(returns.size())) *
+                      std::sqrt(sessions_per_year)
+                : 0.0;
+            // no downside: no value, as the calculator returns
+            double manual_sortino = (downside_vol > 0.0) ? ann_return / downside_vol : kNoRatio;
 
             // Max drawdown (matching calculate_drawdowns)
             double peak = filtered[0].second;
@@ -1025,9 +1035,15 @@ int main() {
                 manual_max_dd = std::max(manual_max_dd, dd);
             }
 
-            // Calmar ratio (matching calculate_calmar_ratio: annualized return / max drawdown)
-            double manual_calmar = (manual_max_dd > 0) ? ann_return / manual_max_dd
-                                                        : ((ann_return >= 0) ? 999.0 : 0.0);
+            // Calmar ratio (matching calculate_calmar_ratio: the CAGR, (1 + R)^(K / n) - 1 with
+            // n the returns above, over the max drawdown)
+            const double growth = filtered.back().second / filtered.front().second;
+            double manual_cagr =
+                growth > 0.0
+                    ? std::pow(growth, sessions_per_year / static_cast<double>(returns.size())) - 1.0
+                    : -1.0;
+            // no drawdown: no value, as the calculator returns
+            double manual_calmar = (manual_max_dd > 0) ? manual_cagr / manual_max_dd : kNoRatio;
 
             // Print comparison
             std::cout << "\n" << std::setw(20) << "Metric" << " | "
@@ -1037,7 +1053,8 @@ int main() {
             std::cout << std::string(62, '-') << std::endl;
 
             auto print_metric = [&](const std::string& name, double manual, double bt) {
-                bool match = approx_eq(manual, bt, 1e-3);
+                // a ratio with no value on both sides is a match
+                bool match = (!has_value(manual) && !has_value(bt)) || approx_eq(manual, bt, 1e-3);
                 std::cout << std::setw(20) << name << " | "
                           << std::fixed << std::setprecision(6)
                           << std::setw(14) << manual << " | "
@@ -1057,7 +1074,7 @@ int main() {
             std::cout << "  Total trades: " << backtest_results.total_trades << std::endl;
             std::cout << "  Win rate: " << std::fixed << std::setprecision(2)
                       << (backtest_results.win_rate * 100) << "%" << std::endl;
-            std::cout << "  Profit factor: " << std::setprecision(3) << backtest_results.profit_factor << std::endl;
+            std::cout << "  Profit factor: " << std::setprecision(3) << ratio_or_na(backtest_results.profit_factor) << std::endl;
             std::cout << std::endl;
         }
 

@@ -46,36 +46,53 @@ design of https://github.com/AlgoGators/trade-ngin/issues/191, to be event-drive
 https://github.com/AlgoGators/trade-ngin/issues/192. data-ngin pulls at 04:30 ET once the
 vendor's ~8 h delayed historical data has bar D (the UTC day that ended before the pull: on day T,
 bar T-1) and writes ops.data_ready (migration 028) around 04:35-05:00: one row per
-(dataset, bar_date) with its status. Each pass reads the newest row of QT_DATA_READY_DATASET
-(futures_ohlcv_1d) for bar date D and builds the books of T = the next trading day after D
+(dataset, bar_date) with its status. Each pass reads the newest row of each dataset of
+QT_DATA_READY_DATASET (futures_ohlcv_1d; a comma-separated list), plus the per-contract pull's
+futures_contract_ohlcv_1d for a portfolio whose portfolio.json turns per_contract_rolls on (rolls
+step 4: a late per-contract row delays the run like a late continuous row, with the same alert;
+combine_ready), for bar date D and builds the books of T = the next trading day after D
 (trading_days.py, the engine's holiday calendar: Friday's, Saturday's and Sunday's bars all build
 Monday, a holiday is skipped). Normally T is today, and today's model run is the primary run:
 
     today's model run (not before QT_CATCHUP_TODAY_NOT_BEFORE) waits for a usable row for the
     previous trading day: before QT_DATA_READY_ALERT_AT (06:00) it waits quietly (the pull may
-    still be running), from then on it alerts; a failed or stale row alerts at once
-    the data is usable when its status is complete, or partial with every missing symbol's last
-    bar within the engine's live.data_staleness_tolerance_days of T - 1 (the engine's own
-    FEED_HOLE guard decides again inside the run; a refusal is an alert, nothing is built);
-    failed, or a stale partial, is an alert and nothing is built
+    still be running), from then on it alerts; a row the rule below holds alerts at once
+    one rule for every row (HD 2026-10-24, ruling 21, an AND condition): the run is held, with the
+    data_stale alert and nothing built, only when more than N symbols have each had no bar for
+    more than X days as of T - 1, a failed pull included (every symbol the table knows is then
+    missing); otherwise the run goes and every missing symbol is alerted. The continuous row:
+    QT_DATA_READY_MAX_MISSING (N, 2) and X = the engine's live.data_staleness_tolerance_days (4),
+    each missing symbol held at its last price (data_partial; the engine's own FEED_HOLE guard
+    still refuses today's run when the book holds a symbol past the tolerance: an alert, nothing
+    is built). The per-contract row (rolls step 4): QT_CONTRACT_DATA_READY_MAX_MISSING (N, 2) and
+    QT_CONTRACT_DATA_READY_STALE_DAYS (X, the tolerance, 4), each missing root priced by the
+    vendor's bar or carried (contract_data_partial). Any other status is an alert
     when T is after today (data that reaches past today, e.g. Saturday's run after its 10:00
     fallback with Friday's or Sunday's bars in), the engine's day chain is every calendar day, so
     the days between today and T are built in order. On the desk portfolio (D-63, decision 6)
     every one of them waits like a weekday: the next day is built once today is published, and
     the chain stops at the first day after today that is not published; that day, once it is
     today, waits for the desk's approval or its own 10:00 fallback, with the alert, and the
-    chain goes on (ruling 29). So Monday's books are built on Sunday once Sunday is out. No day
-    is published ahead of its own day (system:fallback-nontrading is no longer written). The
-    twin's days are built ahead and published model-only when they become today
+    chain goes on (ruling 29). Each day built is reviewed at once (the review e-mail below),
+    and the desk may approve it at once (Dominick 2026-10-18: no reason to wait once the data
+    is in), which builds the next: Friday's bars give Saturday, Sunday and Monday as fast as the
+    desk approves them. Only the desk publishes a day ahead of its own day; the 10:00 fallback
+    acts on today (system:fallback-nontrading is no longer written). On Sunday from 18:00 the
+    next trading day's book not approved yet reminds the desk, the VP and the President, once.
+    The twin's days are built ahead and published model-only when they become today
     T is (re)built once per data_ready.finished_at: a re-pull rebuilds it, unless T is published
     (frozen: never rebuilt). A desk portfolio whose day has the desk's saved edits keeps them: the
     engine's model run then rewrites only the system book and keeps qt_proposal and qt (QT_SEED
     kept, qt::desk_edit_done); otherwise all three are rewritten
-    after a build of the desk portfolio's T, QT_REVIEW_RECIPIENTS get the review e-mail
+    after a build of a desk portfolio's day (T, or a day on the way to it), while it is
+    unpublished and before its 10:00, QT_REVIEW_RECIPIENTS get the review e-mail
     (review_mail.py), once per build
     from QT_DATA_READY_ALERT_AT (06:00), every day: no non-failed row for the previous trading
     day is one alert to the President
     09:30 send, 10:00 fallback and the approval rules are unchanged.
+
+After every pass, each desk action that finished since the last one (a command row) and each new
+settings version is e-mailed to the VP and the President (activity_mail.py), one e-mail each.
 
 Recommended host settings with it: QT_CATCHUP_TODAY_NOT_BEFORE=04:30, QT_CATCHUP_WINDOW=04:00-22:00,
 QT_CATCHUP_BUSY_WINDOW=04:30-10:30 (the code defaults stay 06:45 / 06:30-22:00 / 06:30-10:30, the
@@ -98,19 +115,19 @@ import logging
 import os
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (Any, Callable, Dict, Iterator, List, Optional, Protocol, Sequence, Tuple)
 
 from . import cutoff
-from .config import (CONNECT_TIMEOUT_S, CatchupSettings, CommandSettings, ConfigError, DbConfig,
-                     load_settings)
+from .config import (CONNECT_TIMEOUT_S, CONTRACT_DATA_READY_DATASET, CatchupSettings,
+                     CommandSettings, ConfigError, DbConfig, load_settings)
 from .jobs import Runner, RunResult, SubprocessRunner, tail
 from .override_mail import ApproverError, Sender, load_smtp, parse_approvers, send_smtp
 from .portfolios import portfolios_root
-from . import review_mail
-from .trading_days import (TradingCalendar, load_calendar, resolve_holidays_path,
-                           staleness_tolerance_days)
+from . import activity_mail, review_mail
+from .trading_days import (TradingCalendar, load_calendar, per_contract_rolls,
+                           resolve_holidays_path, staleness_tolerance_days)
 
 log = logging.getLogger("desk.catchup")
 
@@ -126,6 +143,14 @@ MAX_DAYS_PER_PASS = 62
 MISSED_SEND_ALERT_DAYS = 3
 # How far back the last bar of a symbol data-ngin reported missing is looked for.
 MISSING_LOOKBACK_DAYS = 60
+# Dominick 2026-10-18: on Sunday from 18:00 New York, the next trading day's book not approved
+# yet reminds the QT desk, the VP and the President, once.
+SUNDAY_REMINDER_AT = dt.time(18, 0)
+# The most desk actions (and settings versions) the log e-mails in one pass; the rest go next.
+ACTIVITY_BATCH = 50
+# The log reads only rows finished (or settings saved) at least this long ago: a transaction that
+# set finished_at = now() but commits later would otherwise land behind the log's mark.
+ACTIVITY_SETTLE = dt.timedelta(minutes=2)
 
 
 def _zone(name: str):
@@ -147,6 +172,56 @@ class DataReady:
     status: str                 # complete | partial | failed
     run_id: Optional[str]
     finished_at: dt.datetime
+    # Rolls step 4: the rows this one combines (combine_ready), each dataset's own; () on a row
+    # read from the table.
+    parts: Tuple["DataReady", ...] = ()
+
+
+STATUS_ORDER = ("complete", "partial")
+
+
+def combine_ready(rows: Sequence[DataReady]) -> DataReady:
+    """The data every dataset a run waits for has (rolls step 4, ROLLS_STEP1_PLAN section 5a): one
+    row standing for the newest row of each dataset. Its bar date is the OLDEST of theirs, so a
+    late dataset holds the run back as a late continuous row does; the rows on that date decide
+    the status (the worst: failed, any other, partial, complete), the counts, the missing symbols
+    and finished_at (the latest of theirs: the data was in once the last of them finished). A
+    dataset already on a later date is in for this one. One row is returned as it is."""
+    if len(rows) == 1:
+        return rows[0]
+    bar_date = min(r.bar_date for r in rows)
+    on = [r for r in rows if r.bar_date == bar_date]
+    worst = max(on, key=lambda r: (STATUS_ORDER.index(r.status) if r.status in STATUS_ORDER
+                                   else len(STATUS_ORDER) + (r.status == "failed")))
+    missing: List[str] = []
+    for r in on:
+        missing.extend(m for m in r.missing if m not in missing)
+    return DataReady("+".join(r.dataset for r in rows), bar_date,
+                     sum(r.expected for r in on), sum(r.loaded for r in on), tuple(missing),
+                     worst.status, ",".join(r.run_id or "-" for r in on),
+                     max(r.finished_at for r in on), tuple(on))
+
+
+@dataclass(frozen=True)
+class MissingRule:
+    """One dataset's side of the morning data rule (HD 2026-10-24, plan 11c ruling 21): its N and
+    X, its bars table and its words."""
+    noun: str                   # what the row's missing names: symbol | root
+    bar: str                    # bar | contract bar
+    max_missing: int            # N: more than this many stale symbols hold the run
+    max_missing_name: str       # N's setting
+    stale_days: int             # X: a symbol is stale after more than this many days with no bar
+    last_bars: Callable[[Sequence[str], dt.date], Dict[str, dt.date]]
+    every_last_bar: Callable[[dt.date], Dict[str, dt.date]]
+    reason: str                 # the alert of a run that goes with symbols missing
+    carried: str                # how that run carries them, for the alert (said before the run)
+
+
+@dataclass
+class MissingSymbols:
+    """What the morning data rule counted missing on a run that goes (the review e-mail's list)."""
+    last_bar: Dict[str, Optional[dt.date]] = field(default_factory=dict)   # the stalest first
+    unnamed: int = 0            # missing, named neither by the row nor by the table
 
 
 class DayStore(Protocol):
@@ -180,6 +255,19 @@ class DayStore(Protocol):
     def last_bar_dates(self, symbols: Sequence[str], since: dt.date) -> Dict[str, dt.date]:
         """The newest futures_data.ohlcv_1d bar date of each symbol, from `since` on."""
 
+    def every_symbol_last_bar(self, since: dt.date) -> Dict[str, dt.date]:
+        """The newest futures_data.ohlcv_1d bar date of every symbol with a bar from `since` on
+        (the symbols a continuous row misses without naming them, or a failed pull's)."""
+
+    def last_contract_bar_dates(self, roots: Sequence[str],
+                                since: dt.date) -> Dict[str, dt.date]:
+        """The newest futures_data.contract_ohlcv_1d bar date of each root (the per-contract
+        row's missing names roots), from `since` on."""
+
+    def every_contract_root_last_bar(self, since: dt.date) -> Dict[str, dt.date]:
+        """The newest futures_data.contract_ohlcv_1d bar date of every root with a bar from
+        `since` on (the roots a per-contract row misses without naming them)."""
+
     def desk_edited(self, portfolio_id: str, date: dt.date) -> bool:
         """The desk saved the day (a done save, or an approved override): what the engine's
         qt::desk_edit_done reads to keep qt_proposal and qt on a model re-run."""
@@ -197,6 +285,22 @@ class DayStore(Protocol):
                     before: dt.date) -> List[Tuple[dt.date, str]]:
         """(date, published_by) of each day in [since, before) that is published and was never
         e-mailed (sent_at NULL on all its rows), oldest first."""
+
+    # -- the VP and President's log of desk actions (activity_mail.py) --
+
+    def activity_mark(self) -> activity_mail.Mark:
+        """Where the log starts on a first start: the newest final command (finished_at, id)
+        and the newest settings version id now."""
+
+    def desk_commands_after(self, mark: activity_mail.Mark, before: dt.datetime,
+                            limit: int) -> List[Any]:
+        """Command rows (command_store.CommandRow) that reached a final status after the mark
+        and before `before`, in (finished_at, id) order."""
+
+    def settings_versions_after(self, after_id: int, before: dt.datetime,
+                                limit: int) -> List[activity_mail.SettingsVersion]:
+        """trading.strategy_config versions with an id above `after_id`, saved before `before`,
+        in id order, each with the overrides of the version before it."""
 
 
 class PostgresDayStore:
@@ -311,6 +415,31 @@ class PostgresDayStore:
             return {sym: d for sym, d in cur.fetchall() if d is not None}
         return self._run(q)
 
+    def every_symbol_last_bar(self, since):
+        def q(cur):
+            cur.execute("SELECT symbol, max(time)::date FROM futures_data.ohlcv_1d "
+                        "WHERE time >= %s GROUP BY symbol", (since,))
+            return {sym: d for sym, d in cur.fetchall() if d is not None}
+        return self._run(q)
+
+    def last_contract_bar_dates(self, roots, since):
+        if not roots:
+            return {}
+
+        def q(cur):
+            cur.execute("SELECT root, max(date) FROM futures_data.contract_ohlcv_1d "
+                        "WHERE root = ANY(%s) AND date >= %s GROUP BY root",
+                        (list(roots), since))
+            return {root: d for root, d in cur.fetchall() if d is not None}
+        return self._run(q)
+
+    def every_contract_root_last_bar(self, since):
+        def q(cur):
+            cur.execute("SELECT root, max(date) FROM futures_data.contract_ohlcv_1d "
+                        "WHERE date >= %s GROUP BY root", (since,))
+            return {root: d for root, d in cur.fetchall() if d is not None}
+        return self._run(q)
+
     def desk_edited(self, portfolio_id, date):
         return bool(self._one(
             "SELECT count(*) FROM trading.position_overrides WHERE portfolio_id = %s "
@@ -352,6 +481,48 @@ class PostgresDayStore:
                         "HAVING max(published_at) IS NOT NULL AND max(sent_at) IS NULL "
                         "ORDER BY date", (portfolio_id, since, before))
             return [(r[0], r[1]) for r in cur.fetchall()]
+        return self._run(q)
+
+    _FINAL_SQL = "status IN ('done', 'refused', 'failed') AND finished_at IS NOT NULL"
+
+    def activity_mark(self):
+        def q(cur):
+            cur.execute("SELECT finished_at, id FROM trading.position_overrides WHERE "
+                        f"{self._FINAL_SQL} ORDER BY finished_at DESC, id DESC LIMIT 1")
+            rec = cur.fetchone()
+            cur.execute("SELECT COALESCE(max(id), 0) FROM trading.strategy_config")
+            settings_id = cur.fetchone()[0]
+            return activity_mail.Mark(rec[0] if rec else None, rec[1] if rec else 0,
+                                      int(settings_id))
+        return self._run(q)
+
+    def desk_commands_after(self, mark, before, limit):
+        from .command_store import _SELECT, CommandRow
+
+        def q(cur):
+            if mark.command_at is None:
+                cur.execute(f"SELECT {_SELECT} FROM trading.position_overrides WHERE "
+                            f"{self._FINAL_SQL} AND finished_at < %s "
+                            "ORDER BY finished_at, id LIMIT %s", (before, limit))
+            else:
+                cur.execute(f"SELECT {_SELECT} FROM trading.position_overrides WHERE "
+                            f"{self._FINAL_SQL} AND finished_at < %s "
+                            "AND (finished_at, id) > (%s, %s) ORDER BY finished_at, id LIMIT %s",
+                            (before, mark.command_at, mark.command_id, limit))
+            return [CommandRow.from_record(r) for r in cur.fetchall()]
+        return self._run(q)
+
+    def settings_versions_after(self, after_id, before, limit):
+        def q(cur):
+            cur.execute("SELECT c.id, c.portfolio_id, c.version, c.reason, c.created_by, "
+                        "c.created_at, c.overrides, p.overrides "
+                        "FROM trading.strategy_config c LEFT JOIN trading.strategy_config p "
+                        "ON p.portfolio_id = c.portfolio_id AND p.version = c.version - 1 "
+                        "WHERE c.id > %s AND c.created_at < %s ORDER BY c.id LIMIT %s",
+                        (after_id, before, limit))
+            return [activity_mail.SettingsVersion(r[0], r[1], r[2], r[3], r[4], r[5],
+                                                  r[6] or {}, r[7] or {})
+                    for r in cur.fetchall()]
         return self._run(q)
 
 
@@ -453,8 +624,10 @@ class Alerter:
             log.error("cannot write the alert state", extra={"error": type(exc).__name__})
 
     def alert(self, portfolio_dir: str, portfolio_id: str, date: Optional[dt.date], reason: str,
-              message: str, subject: Optional[str] = None) -> bool:
-        """Returns True when this call raised the alert (False: already raised today)."""
+              message: str, subject: Optional[str] = None,
+              also_to: Sequence[str] = ()) -> bool:
+        """Returns True when this call raised the alert (False: already raised today).
+        `also_to`: addresses e-mailed with the president (a reminder to the desk)."""
         today = self._clock().astimezone(self._tz).date()
         key = f"{portfolio_id}|{date or '-'}|{reason}"
         state = self._load()
@@ -465,10 +638,11 @@ class Alerter:
         self._files.line(f"ALERT {portfolio_id} {date or '-'} {reason}: {message}")
         log.warning("catch-up alert", extra={"portfolio_id": portfolio_id, "date": str(date),
                                              "reason": reason, "error": message})
-        mailed, why = self._mail(portfolio_dir, portfolio_id, date, reason, message, subject)
+        mailed, why = self._mail(portfolio_dir, portfolio_id, date, reason, message, subject,
+                                 also_to)
         if mailed:
             self._files.line(f"ALERT {portfolio_id} {date or '-'} {reason}: e-mailed to the "
-                             "president")
+                             "president" + (f" and {', '.join(also_to)}" if also_to else ""))
         else:
             self._files.line(f"ALERT {portfolio_id} {date or '-'} {reason}: not e-mailed ({why})")
             if why.startswith("send failed"):
@@ -478,7 +652,7 @@ class Alerter:
         return True
 
     def _mail(self, portfolio_dir, portfolio_id, date, reason, message,
-              subject) -> Tuple[bool, str]:
+              subject, also_to=()) -> Tuple[bool, str]:
         if self._settings.email_disabled:
             return False, "QT_EMAIL_DISABLED=1"
         try:
@@ -499,8 +673,13 @@ class Alerter:
                 "/home/ubuntu/qt-engine/logs/qt-catchup.log and qt-engine-runs.log. This alert "
                 "is sent at most once a day per portfolio, date and reason.</p>"
                 "</body></html>")
+        to: List[str] = []
+        for address in [president, *also_to]:
+            address = address.strip()
+            if address and address.lower() not in {a.lower() for a in to}:
+                to.append(address)
         try:
-            self._sender(smtp, [president], subject, body)
+            self._sender(smtp, to, subject, body)
         except Exception as exc:
             return False, f"send failed: {type(exc).__name__}"
         return True, ""
@@ -591,6 +770,7 @@ class CatchupScheduler:
         self._calendar = calendar
         self._sender = sender
         self.reviews = review_mail.ReviewState(settings.log_dir)
+        self.activities = activity_mail.ActivityState(settings.log_dir)
 
     @property
     def calendar(self) -> TradingCalendar:
@@ -676,8 +856,19 @@ class CatchupScheduler:
                     log.error("the data-ready check failed", exc_info=True,
                               extra={"error": type(exc).__name__})
                     self.alerter.alert(self._catchup.portfolios[0],
-                                       self._catchup.data_ready_dataset, None, "scheduler_error",
+                                       self._catchup.data_ready_datasets[0], None,
+                                       "scheduler_error",
                                        f"the data-ready check failed: {type(exc).__name__}: {exc}")
+            try:
+                self._activity_mail()
+            except Exception as exc:
+                log.error("the desk-action log failed", exc_info=True,
+                          extra={"error": type(exc).__name__})
+                if self._catchup.portfolios:
+                    self.alerter.alert(self._catchup.portfolios[0], "qt", None,
+                                       "activity_mail_failed",
+                                       f"the VP and President's log of desk actions failed: "
+                                       f"{type(exc).__name__}: {exc}")
             self.files.line("pass done: " + ", ".join(
                 f"{p}={s.action}{'@' + str(s.date) if s.date else ''}" for p, s in outcomes))
             try:
@@ -711,6 +902,7 @@ class CatchupScheduler:
                 break
         self._model_book_check(info)
         self._missed_send_check(info)
+        self._sunday_reminder(info)
         self._report(info, step)
         return step
 
@@ -808,61 +1000,164 @@ class CatchupScheduler:
     # Interim: Postgres polling of ops.data_ready once a pass. #191 makes strategy runs
     # event-driven on declared inputs; #192 replaces this polling with NATS JetStream.
 
-    def _ready(self) -> Optional[DataReady]:
-        return self._store.latest_data_ready(self._catchup.data_ready_dataset)
+    def _datasets(self, portfolio_dir: str) -> Tuple[str, ...]:
+        """The ops.data_ready datasets the portfolio's run waits for: QT_DATA_READY_DATASET's, and
+        the per-contract pull's when its portfolio.json turns per_contract_rolls on (rolls step 4,
+        ROLLS_STEP1_PLAN section 5a: a late per-contract row delays the run like a late
+        continuous row)."""
+        out = tuple(self._catchup.data_ready_datasets)
+        if per_contract_rolls(self._settings.config_dir, portfolio_dir) \
+                and CONTRACT_DATA_READY_DATASET not in out:
+            out += (CONTRACT_DATA_READY_DATASET,)
+        return out
+
+    def _ready(self, info: PortfolioInfo) -> Optional[DataReady]:
+        """The newest data every dataset of the portfolio has (combine_ready); None while one of
+        them has no row at all."""
+        rows = [self._store.latest_data_ready(d) for d in self._datasets(info.dir)]
+        if any(r is None for r in rows):
+            return None
+        return combine_ready(rows)
 
     def _data_verdict(self, info: PortfolioInfo, ready: DataReady,
-                      target: dt.date) -> Tuple[Optional[Step], Dict[str, dt.date]]:
-        """(None, the missing symbols' last bar dates) when the row can build `target`'s books,
-        else (the alert, {}). Partial data is usable when every missing symbol's last bar is
-        within the engine's live.data_staleness_tolerance_days of the run's last bar date
-        (target - 1, the engine's end_date): the check the engine's freshness and FEED_HOLE
-        guards make, done here first so a stale feed builds nothing. The engine still decides
-        inside the run; its refusal is an alert like any refused run."""
-        if ready.status == "failed":
-            return Step(ALERT, target, "data_failed",
-                        f"data-ngin's {ready.dataset} pull for {ready.bar_date} failed (run "
-                        f"{ready.run_id or '-'}, {ready.loaded} of {ready.expected} loaded): the "
-                        f"books of {target} are not built"), {}
-        if ready.status not in ("complete", "partial"):
-            return Step(ALERT, target, "data_failed",
-                        f"ops.data_ready {ready.dataset} {ready.bar_date} has status "
-                        f"{ready.status!r}: the books of {target} are not built"), {}
-        if not ready.missing:
-            return None, {}
+                      target: dt.date) -> Tuple[Optional[Step], MissingSymbols]:
+        """(None, every symbol the rule counted missing) when the row can build `target`'s books,
+        else (the alert, nothing). One rule for every dataset (HD 2026-10-24, plan 11c
+        ruling 21, an AND condition; _missing_verdict): the run is held, with the data_stale alert,
+        only when MORE than N symbols of a row have EACH had no bar for more than X days as of the
+        run's last bar date (target - 1, the engine's end_date), a failed pull included. Otherwise
+        it goes, and every missing symbol is alerted once (data_partial, contract_data_partial).
+        A row with any other status is an alert. The engine still decides inside the run (its
+        FEED_HOLE refusal of a held symbol past live.data_staleness_tolerance_days on the host's
+        own date); its refusal is an alert like any refused run."""
+        parts = ready.parts or (ready,)
+        for part in parts:
+            if part.status not in ("complete", "partial", "failed"):
+                return Step(ALERT, target, "data_failed",
+                            f"ops.data_ready {part.dataset} {part.bar_date} has status "
+                            f"{part.status!r}: the books of {target} are not built"), MissingSymbols()
         tolerance = staleness_tolerance_days(self._settings.config_dir, info.dir)
         as_of = target - dt.timedelta(days=1)
-        last = self._store.last_bar_dates(
-            ready.missing, ready.bar_date - dt.timedelta(days=MISSING_LOOKBACK_DAYS))
-        stale = [f"{sym} (last bar {last.get(sym) or 'none'})" for sym in ready.missing
-                 if last.get(sym) is None or (as_of - last[sym]).days > tolerance]
-        if stale:
+        missing = MissingSymbols()
+        partial: List[Tuple[str, str]] = []
+        for part in parts:
+            held, alert = self._missing_verdict(part, target, as_of, self._rule(part, tolerance),
+                                                missing)
+            if held is not None:
+                return held, MissingSymbols()
+            if alert is not None:
+                partial.append(alert)
+        for reason, message in partial:   # only once no row holds the run
+            self.alerter.alert(info.dir, info.portfolio_id, target, reason, message)
+        return None, missing
+
+    def _rule(self, part: DataReady, tolerance: int) -> MissingRule:
+        """The row's N, X and table: the per-contract row's (rolls step 4) or the continuous
+        row's (X is the portfolio's live.data_staleness_tolerance_days, the engine's own)."""
+        if part.dataset == CONTRACT_DATA_READY_DATASET:
+            stale_days = self._catchup.contract_data_ready_stale_days
+            return MissingRule(
+                "root", "contract bar", self._catchup.contract_data_ready_max_missing,
+                "QT_CONTRACT_DATA_READY_MAX_MISSING",
+                tolerance if stale_days is None else stale_days,
+                self._store.last_contract_bar_dates, self._store.every_contract_root_last_bar,
+                "contract_data_partial",
+                "those roots carried: it reads their vendor bar, or carries their last close, with "
+                "a WARN in its log")
+        return MissingRule(
+            "symbol", "bar", self._catchup.data_ready_max_missing, "QT_DATA_READY_MAX_MISSING",
+            tolerance, self._store.last_bar_dates, self._store.every_symbol_last_bar,
+            "data_partial",
+            "each carried at its last price, with no order; if the book holds one past "
+            "live.data_staleness_tolerance_days on today's run, the engine refuses the run (a "
+            "separate alert)")
+
+    def _missing_verdict(self, part: DataReady, target: dt.date, as_of: dt.date,
+                         rule: MissingRule, missing: MissingSymbols
+                         ) -> Tuple[Optional[Step], Optional[Tuple[str, str]]]:
+        """One row under the morning data rule (HD 2026-10-24, plan 11c ruling 21, an AND
+        condition): (the data_stale alert, None) when MORE than N symbols have EACH had no bar for
+        more than X days as of the run's last bar date; else (None, the alert of a run that goes
+        with symbols missing, or None when none is). The missing symbols are the row's names; when
+        it names fewer than it misses (expected - loaded), the symbols whose newest bar is before
+        the row's bar date, the stalest first (Q1 fix round 1: the continuous row too, though such a
+        row breaks migration 028, whose partial row names its symbols); on a failed pull, every
+        symbol the table knows. A missing symbol the table cannot name counts as stale; a failed
+        pull with no symbol known at all holds. The run's missing symbols go into `missing`, the
+        stalest first."""
+        named = list(part.missing)
+        since = part.bar_date - dt.timedelta(days=MISSING_LOOKBACK_DAYS)
+        if part.status == "failed":
+            # A failed pull (R4B audit A, S1): every symbol the table knows is missing, whatever the
+            # row's expected says; a symbol it should have and the table cannot name counts as stale.
+            named += sorted(s for s in rule.every_last_bar(since) if s not in named)
+            unnamed = max(part.expected - len(named), 0)
+            if not named and unnamed == 0:
+                return Step(ALERT, target, "data_stale",
+                            f"{part.dataset} {part.bar_date} is failed ({part.loaded} of "
+                            f"{part.expected}) and the table has no {rule.bar} since {since}: no "
+                            f"{rule.noun} can be judged. The books of {target} are not built"), None
+        else:
+            unnamed = max(part.expected - part.loaded - len(named), 0)
+            if not named and unnamed == 0:
+                return None, None
+            if unnamed > 0:
+                # The symbols the row misses without naming them: the stalest first (R4B audit A, S2),
+                # so one with no bar that day for an ordinary reason cannot push out one that is stale.
+                every = rule.every_last_bar(since)
+                found = sorted((d, s) for s, d in every.items()
+                               if d < part.bar_date and s not in named)[:unnamed]
+                named += [s for _, s in found]
+                unnamed -= len(found)
+        last = rule.last_bars(named, since) if named else {}
+        # The alerts name them the stalest first (no bar at all first); a tie keeps the order above.
+        named.sort(key=lambda s: last.get(s) or dt.date.min)
+        described = [f"{s} (last bar {last.get(s) or 'none'})" for s in named]
+        stale = [d for s, d in zip(named, described)
+                 if last.get(s) is None or (as_of - last[s]).days > rule.stale_days]
+        stale_n = len(stale) + unnamed
+        if unnamed > 0:
+            described.append(f"{unnamed} {rule.noun}(s) not named, with no {rule.bar} in the table")
+            stale.append(described[-1])
+        if stale_n > rule.max_missing:
             return Step(ALERT, target, "data_stale",
-                        f"{ready.dataset} {ready.bar_date} is {ready.status} ({ready.loaded} of "
-                        f"{ready.expected}); {len(stale)} missing symbol(s) are past "
-                        f"live.data_staleness_tolerance_days={tolerance} as of {as_of}: "
-                        f"{', '.join(stale)}. The books of {target} are not built"), {}
-        return None, last
+                        f"{part.dataset} {part.bar_date} is {part.status} ({part.loaded} of "
+                        f"{part.expected}); {stale_n} {rule.noun}(s) have had no {rule.bar} for more "
+                        f"than {rule.stale_days} day(s) as of {as_of}, more than "
+                        f"{rule.max_missing_name}={rule.max_missing}: {', '.join(stale)}. The books "
+                        f"of {target} are not built"), None
+        missing.last_bar.update((s, last.get(s)) for s in named)
+        missing.unnamed += unnamed
+        return None, (rule.reason,
+                      f"{part.dataset} {part.bar_date} is {part.status} ({part.loaded} of "
+                      f"{part.expected}); missing: {', '.join(described)}. The run of {target} "
+                      f"goes ahead with {rule.carried}")
 
     def _morning_gate(self, info: PortfolioInfo, today: dt.date) -> Optional[Step]:
         """None when today's model run may go: data for the previous trading day is ready and
         usable. Not there yet: a wait until QT_DATA_READY_ALERT_AT (06:00; data-ngin's 04:30
-        pull may still be running), an alert from then on. A failed or stale row is final: an
-        alert at once. The next pass looks again either way."""
+        pull may still be running), an alert from then on. A row the data rule holds (more than N
+        symbols past X, _data_verdict) is final: an alert at once. The next pass looks again either
+        way."""
         prev = self.calendar.previous_trading_day(today)
-        ready = self._ready()
-        dataset = self._catchup.data_ready_dataset
-        if ready is None or ready.bar_date < prev:
+        datasets = self._datasets(info.dir)
+        rows = {d: self._store.latest_data_ready(d) for d in datasets}
+        late = [d for d in datasets if rows[d] is None or rows[d].bar_date < prev]
+        if late:
+            names = ", ".join(late)
             now_local = self.local_now()
             if now_local.time() < self._catchup.data_alert_at:
                 return Step(WAIT_TIME, today, "before_data",
-                            f"today's run waits for data-ngin's {dataset} row for {prev}")
-            newest = f"newest {ready.bar_date} ({ready.status})" if ready else "no row at all"
+                            f"today's run waits for data-ngin's {names} row for {prev}")
+            newest = "; ".join(
+                (f"{d}: " if len(late) > 1 else "")
+                + (f"newest {rows[d].bar_date} ({rows[d].status})" if rows[d] else "no row at all")
+                for d in late)
             return Step(ALERT, today, "data_not_ready",
-                        f"no book for {today}, and ops.data_ready has no {dataset} row for "
+                        f"no book for {today}, and ops.data_ready has no {names} row for "
                         f"{prev} at {now_local:%H:%M} New York ({newest}): today's model run "
                         "waits for the data")
-        bad, _ = self._data_verdict(info, ready, today)
+        bad, _ = self._data_verdict(info, combine_ready([rows[d] for d in datasets]), today)
         return bad
 
     def _evening_step(self, info: PortfolioInfo, now_local: dt.datetime,
@@ -871,12 +1166,19 @@ class CatchupScheduler:
         or the chain up to a later T), or None. Today has its book (last >= today)."""
         today = now_local.date()
         pid = info.portfolio_id
-        ready = self._ready()
+        ready = self._ready(info)
         if ready is None:
             return None
         target = self.calendar.next_trading_day(ready.bar_date)
         if target < today:
             return None   # old data: today's own flow and the data-ready check cover it
+        if info.desk_editable and last < target:
+            # Dominick 2026-10-18: a day built on the way to the target (Saturday and Sunday on
+            # the way to Monday) is reviewed as soon as it is built, and the desk may approve it
+            # at once; the next day is built once it is published.
+            due = self._review_due(info, now_local, last, ready)
+            if due is not None:
+                return due
         if info.desk_editable and target > today and self._store.published_at(pid, today) is None:
             return None   # ruling 29: today is approved (or falls back at 10:00) first
         if info.desk_editable and today < last < target \
@@ -911,26 +1213,39 @@ class CatchupScheduler:
                 RUN, target, "rebuild",
                 f"rebuild of {target}: ops.data_ready {ready.bar_date} finished at "
                 f"{ready.finished_at.isoformat()}, after its book ({built})", ready=ready)
-        if info.desk_editable and now_local < cutoff.cutoff_time(target) \
-                and not self.reviews.sent(pid, target, built):
-            return self._blocked(pid, target, REVIEW) or Step(REVIEW, target, "review",
-                                                              ready=ready)
+        if info.desk_editable:
+            return self._review_due(info, now_local, target, ready)
         return None
 
+    def _review_due(self, info: PortfolioInfo, now_local: dt.datetime, day: dt.date,
+                    ready: DataReady) -> Optional[Step]:
+        """The desk's review e-mail of `day`, when its book is built, unpublished, before its
+        10:00 cutoff and not yet reviewed in this build; else None."""
+        pid = info.portfolio_id
+        if self._store.published_at(pid, day) is not None:
+            return None
+        built = self._store.book_written_at(pid, day, "system")
+        if built is None or now_local >= cutoff.cutoff_time(day) \
+                or self.reviews.sent(pid, day, built):
+            return None
+        return self._blocked(pid, day, REVIEW) or Step(REVIEW, day, "review", ready=ready)
+
     def _review(self, info: PortfolioInfo, step: Step) -> Optional[Step]:
-        """The desk's review e-mail of the target day's build, once per build."""
+        """The desk's review e-mail of a day's build (the target or a day on the way to it),
+        once per build."""
         pid, target, ready = info.portfolio_id, step.date, step.ready
         built = self._store.book_written_at(pid, target, "system")
         if built is None or ready is None:
             return None
         held_date = self._store.last_published_before(pid, target)
         held = self._store.day_books(pid, held_date).get(info.book, {}) if held_date else {}
-        _, last_bars = self._data_verdict(info, ready, target)
+        _, counted = self._data_verdict(info, ready, target)
         review = review_mail.Review(
             portfolio_id=pid, target=target, bar_date=ready.bar_date, built_at=built,
             books=self._store.day_books(pid, target), held_date=held_date, held=held,
             desk_edits_kept=self._store.desk_edited(pid, target), data_status=ready.status,
-            missing=ready.missing, missing_last_bar=last_bars,
+            missing=tuple(counted.last_bar), missing_last_bar=counted.last_bar,
+            unnamed_missing=counted.unnamed,
             supersedes=self.reviews.earlier(pid, target), desk_url=self._catchup.desk_url)
         subject, body = review_mail.build(review)
         to = list(self._catchup.review_recipients)
@@ -971,16 +1286,22 @@ class CatchupScheduler:
             return
         today = now_local.date()
         expected = self.calendar.previous_trading_day(today)
-        ready = self._ready()
-        if ready is not None and ready.bar_date >= expected and ready.status != "failed":
-            return
-        what = (f"its row is {ready.status}" if ready is not None and ready.bar_date >= expected
-                else f"the newest row is for {ready.bar_date}" if ready is not None
-                else "the table has no row")
-        dataset = self._catchup.data_ready_dataset
-        self.alerter.alert(self._catchup.portfolios[0], dataset, expected, "data_not_ready",
-                           f"no ready {dataset} data for {expected} at {now_local:%H:%M} New "
-                           f"York ({what}): today's model run waits for the data")
+        # Every dataset any portfolio waits for (rolls step 4: the per-contract row too when a
+        # portfolio turns per_contract_rolls on), each with its own alert.
+        datasets: List[str] = []
+        for pdir in self._catchup.portfolios:
+            datasets.extend(d for d in self._datasets(pdir) if d not in datasets)
+        for dataset in datasets:
+            ready = self._store.latest_data_ready(dataset)
+            if ready is not None and ready.bar_date >= expected and ready.status != "failed":
+                continue
+            what = (f"its row is {ready.status}"
+                    if ready is not None and ready.bar_date >= expected
+                    else f"the newest row is for {ready.bar_date}" if ready is not None
+                    else "the table has no row")
+            self.alerter.alert(self._catchup.portfolios[0], dataset, expected, "data_not_ready",
+                               f"no ready {dataset} data for {expected} at {now_local:%H:%M} New "
+                               f"York ({what}): today's model run waits for the data")
 
     # -- the steps ------------------------------------------------------------------------------
 
@@ -1128,9 +1449,19 @@ class CatchupScheduler:
             text = (f"QT did not approve {pid} {day}; the model's book was published at "
                     f"{when:%H:%M}, but the e-mail could not be sent ({message}); the scheduler "
                     "retries the send")
+            refusal = self._settings_refusal(detail)
+            if refusal:  # D-77: name the saved setting that stops the send
+                text += f". A saved settings change cannot be applied: {refusal}"
         self.alerter.alert(info.dir, pid, day, "fallback", text + f" (publish row {audit_id})",
                            subject=text)
         return None
+
+    @staticmethod
+    def _settings_refusal(detail: str) -> str:
+        """D-77: the engine's STRATEGY_CONFIG refusal line (it names the portfolio and why the
+        saved settings change cannot be applied), or "" when the output holds none."""
+        return next((line.strip() for line in (detail or "").splitlines()
+                     if "STRATEGY_CONFIG refused" in line), "")
 
     def _send(self, info: PortfolioInfo, day: dt.date) -> Optional[Step]:
         argv = [self._settings.engine_binary, "--send", "--portfolio-config", info.dir,
@@ -1140,6 +1471,13 @@ class CatchupScheduler:
             self.files.line(f"{info.portfolio_id}: {day} e-mailed")
             return None
         self._failed(info.portfolio_id, day, SEND)
+        refusal = self._settings_refusal(detail)
+        if refusal:
+            # D-77: a bad saved setting stops every send until it is fixed; say which.
+            return Step(ALERT, day, "send_refused_settings",
+                        f"{day} is not e-mailed: a saved settings change cannot be applied. "
+                        f"Fix or revert it in the desk's settings; the scheduler retries the "
+                        f"send.\n{refusal}")
         why = (res.error and f"cannot start the engine: {res.error}") or (
             res.timed_out and "the send timed out") or (
             f"the send exited {res.rc}" + (" without recording sent_at" if res.rc == 0 else ""))
@@ -1162,6 +1500,92 @@ class CatchupScheduler:
                                f"{info.portfolio_id} {day} was published ({by or 'unknown'}) "
                                f"but its daily e-mail was never sent before the day passed: "
                                "it is not sent late; send it by hand if it is still wanted")
+
+    def _sunday_reminder(self, info: PortfolioInfo) -> None:
+        """Dominick 2026-10-18: Monday's book is built and approved as early as the data allows
+        (Saturday, from Friday's bars). On Sunday from 18:00 New York, the next trading day's
+        book not approved yet reminds the QT desk (QT_REVIEW_RECIPIENTS), the VP and the
+        President, once."""
+        if not info.desk_editable:
+            return
+        now_local = self.local_now()
+        if now_local.weekday() != 6 or now_local.time() < SUNDAY_REMINDER_AT:
+            return
+        pid = info.portfolio_id
+        day = self.calendar.next_trading_day(now_local.date())
+        if self._store.published_at(pid, day) is not None:
+            return
+        try:
+            vp = [parse_approvers(self._settings.approvers)["vp"]]
+        except ApproverError:
+            vp = []
+        built = self._store.book_written_at(pid, day, "system") is not None
+        state = ("is built and waits for the desk's approval" if built else
+                 "is not built yet: the days before it are approved first")
+        self.alerter.alert(info.dir, pid, day, "sunday_reminder",
+                           f"{pid} {day} {state}. Approve it before "
+                           f"{cutoff.SEND_AT:%H:%M} New York on {day}, or the model's book is "
+                           f"sent at {cutoff.CUTOFF_AT:%H:%M}.",
+                           subject=f"QT reminder: the {pid} book for {day} is not approved yet",
+                           also_to=list(self._catchup.review_recipients) + vp)
+
+    def _activity_mail(self) -> None:
+        """The VP and President's log (activity_mail.py): one e-mail per desk action and per
+        settings version since the last pass, oldest first."""
+        state = self.activities.load()
+        if state is None:
+            # First start: from now; history is not e-mailed.
+            if not self.activities.save(self._store.activity_mark()):
+                raise OSError(f"cannot write {activity_mail.STATE}")
+            return
+        try:
+            approvers = parse_approvers(self._settings.approvers)
+        except ApproverError as exc:
+            self.files.line(f"desk-action log: not e-mailed ({exc})")
+            return
+        to = [approvers["vp"], approvers["president"]]
+        before = self._clock() - ACTIVITY_SETTLE
+        mark = state
+        for row in self._store.desk_commands_after(mark, before, ACTIVITY_BATCH):
+            if activity_mail.is_desk_action(row.requested_by):
+                subject, body = activity_mail.build_command(row, self._tz)
+                if not self._activity_send(to, subject, body):
+                    return
+            mark = activity_mail.Mark(row.finished_at, row.id, mark.settings_id)
+            if not self.activities.save(mark):
+                raise OSError(f"cannot write {activity_mail.STATE}")
+        for version in self._store.settings_versions_after(mark.settings_id, before,
+                                                           ACTIVITY_BATCH):
+            if activity_mail.is_desk_action(version.created_by):
+                subject, body = activity_mail.build_settings(version, self._tz)
+                if not self._activity_send(to, subject, body):
+                    return
+            mark = activity_mail.Mark(mark.command_at, mark.command_id, version.id)
+            if not self.activities.save(mark):
+                raise OSError(f"cannot write {activity_mail.STATE}")
+
+    def _activity_send(self, to: List[str], subject: str, body: str) -> bool:
+        """True when the e-mail went (or e-mail is off and the body was logged); False: try
+        again on the next pass."""
+        if self._settings.email_disabled:
+            self.activities.log_body(self._clock(), to, subject, body)
+            self.files.line(f"desk-action log: {subject} (QT_EMAIL_DISABLED=1; body in "
+                            f"{activity_mail.BODY_LOG})")
+            return True
+        if not self._catchup.portfolios:
+            self.files.line("desk-action log: not sent (no portfolio's email.json); next pass")
+            return False
+        smtp, why = load_smtp(self._settings, self._catchup.portfolios[0])
+        if smtp is None:
+            self.files.line(f"desk-action log: not sent ({why}); next pass")
+            return False
+        try:
+            self._sender(smtp, to, subject, body)
+        except Exception as exc:  # smtplib errors can echo the server reply, never a password
+            self.files.line(f"desk-action log: send failed ({type(exc).__name__}); next pass")
+            return False
+        self.files.line(f"desk-action log: {subject} sent to {', '.join(to)}")
+        return True
 
     def _model_book_check(self, info: PortfolioInfo) -> None:
         """08:30: today has no model book yet -> alert the President."""

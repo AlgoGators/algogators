@@ -1,8 +1,10 @@
 // include/trade_ngin/live/run_metadata_marks.hpp
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -14,7 +16,7 @@ namespace trade_ngin {
 /**
  * @brief The portfolio-scope risk REFUSE of the last process_market_data call, if there was one.
  *
- * T-RISK-ARCH Q2 (ruled yes, HD 2026-09-19). A risk REFUSE is discovered inside
+ * A risk REFUSE is discovered inside
  * process_market_data, which the futures runners call AFTER they have written the day's
  * trading.live_run_metadata row. That row records a run that did happen, so it is not deleted;
  * it is MARKED: the runner writes the same row a second time with the refusal in its
@@ -27,7 +29,7 @@ namespace trade_ngin {
  *
  * A module that FAILED and so refused the scope (PortfolioManager::refuse_on_failed_gatekeeper,
  * or the portfolio risk step itself failing, module kRiskStepModuleId) is recorded with applied
- * REFUSE and its error (T-7a commit 5), so it is seen here and in risk_decisions_json()'s
+ * REFUSE and its error, so it is seen here and in risk_decisions_json()'s
  * "outcome". Its "reason" is the error, since the module returned no decision, and "error"
  * carries it too; the runner's exit path reads the same record through
  * portfolio_risk_module_failure (risk_module_failure.hpp).
@@ -71,10 +73,10 @@ inline nlohmann::json mark_risk_refusal(nlohmann::json portfolio_config,
 }
 
 /**
- * @brief The run's portfolio_config JSON with a failed STRICT assertion written into it (T-7b-1
- *        C7b R4, T-7a_CODE_REVIEW R4). The assertion runs after the day's live_run_metadata row
+ * @brief The run's portfolio_config JSON with a failed STRICT assertion written into it. The
+ *        assertion runs after the day's live_run_metadata row
  *        was written and before anything else is stored, so a fired assertion leaves a row for a
- *        run that stored no book. As with a risk refusal (T-RISK-ARCH Q2) the row records a run
+ *        run that stored no book. As with a risk refusal the row records a run
  *        that did happen, so it is marked, not deleted; the watchdog reads the mark. Every other
  *        key of the first upsert is kept verbatim.
  */
@@ -87,5 +89,36 @@ inline nlohmann::json mark_strict_assertion(nlohmann::json portfolio_config,
         {"unpriced_book_changes", unpriced_book_changes}};
     return portfolio_config;
 }
+
+/**
+ * @brief A run's trading.live_run_metadata write, built where the run's configuration is known
+ *        and written at the first point where the run stores anything else (T-8D-2 R48). A run
+ *        that refuses before that point never calls write_once(), so it leaves no row claiming a
+ *        run. write_once() writes on its first call only: the runner calls it on every path that
+ *        reaches a store, and the row is written once, before the first of them.
+ */
+class DeferredRunRecord {
+public:
+    /// Hold the write. The callable owns copies of what it writes (capture by value), so the
+    /// row is the one built at this point whatever the run changes afterwards.
+    void hold(std::function<void()> write) {
+        write_ = std::move(write);
+        written_ = false;
+    }
+    /// Run the held write, the first time only. Nothing held: nothing written.
+    void write_once() {
+        if (written_ || !write_)
+            return;
+        written_ = true;
+        write_();
+    }
+    bool written() const {
+        return written_;
+    }
+
+private:
+    std::function<void()> write_;
+    bool written_ = false;
+};
 
 }  // namespace trade_ngin

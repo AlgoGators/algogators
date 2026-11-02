@@ -35,6 +35,8 @@ struct LiveSettings {
  * - an active row: merged over the files (ConfigLoader::load with the overlay); a row that
  *   cannot be applied is refused, never dropped (ruling 24).
  * - the row's portfolio must be the files' portfolio.
+ * - an active row for a portfolio that is not desk-editable (portfolio.json qt.desk_editable) is
+ *   refused (rejoin R-6): such a book runs on its files, as its backtests do.
  *
  * Backtests never call this (ruling 4): they load their files with the two-argument
  * ConfigLoader::load and nothing else.
@@ -47,5 +49,19 @@ Result<LiveSettings> resolve_live_settings(
 /// The one log line a runner writes when resolve_live_settings refuses, so the watchdog and a
 /// reader of the log see the same words on every runner.
 std::string live_settings_refusal_line(const std::string& portfolio_id, const std::string& why);
+
+/**
+ * @brief HD D-17: whether a live run would accept `overrides` as the portfolio's desk settings,
+ *        checked before AlgoLens saves them, so a change the engine refuses is never saved.
+ *
+ * It runs the two checks a live runner runs on its settings at start-up, in the same order:
+ * resolve_live_settings with `overrides` as the active strategy_config row (the overlay rules
+ * and the full config parse, the risk modules' bounds included), then
+ * ConfigLoader::require_loop_keys on the merged config. The portfolio id comes from the files.
+ * The error text is the reason a run would give, without the version prefix.
+ */
+Result<void> check_live_settings_overlay(const std::filesystem::path& config_base_path,
+                                         const std::string& portfolio_name,
+                                         const nlohmann::json& overrides);
 
 }  // namespace trade_ngin

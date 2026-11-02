@@ -1,0 +1,366 @@
+<title>AlgoGators Issue Tracker</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one working surface. Sticky tab bar, dense priority-ordered rows that open in place to the full reading. */
+:root{
+  --bg:#f5f7f6; --surface:#ffffff; --sunk:#ecf0ee; --line:#d5dcd9; --line-soft:#e4e9e7;
+  --fg:#16211e; --muted:#586661; --faint:#7d8a85;
+  --accent:#0b6e5f; --accent-soft:#dcefeb; --on-accent:#ffffff;
+  --p0:#b3261e; --p0-bg:#fbe4e2; --p1:#9a5b00; --p1-bg:#fbecd0; --p2:#2f5d8a; --p2-bg:#e0eaf4; --p3:#5d6965; --p3-bg:#e6eae8;
+  --good:#1d6b3a; --good-bg:#dff1e5; --warn:#9a5b00; --warn-bg:#fbecd0; --bad:#b3261e; --bad-bg:#fbe4e2;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#101614; --surface:#18201d; --sunk:#131a18; --line:#2c3833; --line-soft:#222c28;
+  --fg:#e6ecea; --muted:#a3b0ab; --faint:#7f8c87;
+  --accent:#4fc3b0; --accent-soft:#17352f; --on-accent:#06211c;
+  --p0:#ff8a80; --p0-bg:#3d1a17; --p1:#f0b65a; --p1-bg:#3a2a0d; --p2:#8fb8e0; --p2-bg:#182a3b; --p3:#a3b0ab; --p3-bg:#232d29;
+  --good:#7fd19b; --good-bg:#16301f; --warn:#f0b65a; --warn-bg:#3a2a0d; --bad:#ff8a80; --bad-bg:#3d1a17;
+  color-scheme:dark } }
+:root[data-theme="dark"]{
+  --bg:#101614; --surface:#18201d; --sunk:#131a18; --line:#2c3833; --line-soft:#222c28;
+  --fg:#e6ecea; --muted:#a3b0ab; --faint:#7f8c87;
+  --accent:#4fc3b0; --accent-soft:#17352f; --on-accent:#06211c;
+  --p0:#ff8a80; --p0-bg:#3d1a17; --p1:#f0b65a; --p1-bg:#3a2a0d; --p2:#8fb8e0; --p2-bg:#182a3b; --p3:#a3b0ab; --p3-bg:#232d29;
+  --good:#7fd19b; --good-bg:#16301f; --warn:#f0b65a; --warn-bg:#3a2a0d; --bad:#ff8a80; --bad-bg:#3d1a17;
+  color-scheme:dark }
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--fg);font-family:var(--sans);font-size:14px;line-height:1.5}
+.wrap{max-width:1480px;margin:0 auto;padding-inline:20px;padding-block:20px 64px}
+a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
+h1{font-size:22px;font-weight:600;margin:0;letter-spacing:-0.01em;text-wrap:balance}
+h2{font-size:16px;font-weight:600;margin:0;text-wrap:balance}
+h3{font-size:12px;font-weight:600;margin:0;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+p{margin:0}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+.head{display:flex;flex-wrap:wrap;gap:8px 24px;align-items:baseline;justify-content:space-between}
+.sub{color:var(--muted);max-width:75ch;margin-top:6px}
+.stats{display:flex;flex-wrap:wrap;gap:6px 22px;margin-top:14px;color:var(--muted);font-size:13px}
+.stats b{color:var(--fg);font-weight:600;font-family:var(--mono)}
+.sync{font-size:12px;color:var(--faint)}
+.tabs{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);display:flex;gap:2px;overflow-x:auto;margin-top:18px;border-bottom:1px solid var(--line);padding-top:6px}
+.tab{appearance:none;background:none;border:0;border-bottom:2px solid transparent;color:var(--muted);font:inherit;font-weight:500;padding:8px 12px;cursor:pointer;white-space:nowrap}
+.tab:hover{color:var(--fg)} .tab[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+.tab .ct{font-family:var(--mono);font-size:12px;color:var(--faint);margin-left:5px}
+.panel{display:flex;flex-direction:column;gap:22px;padding-top:18px}
+.filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.filters select,.filters input[type=search]{font:inherit;font-size:13px;color:var(--fg);background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-width:0}
+.filters input[type=search]{flex:1 1 200px;max-width:320px}
+.filters label.chk{display:flex;gap:6px;align-items:center;font-size:13px;color:var(--muted)}
+.count{font-size:12px;color:var(--faint);margin-left:auto}
+.group{display:flex;flex-direction:column;gap:8px}
+.ghead{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}
+.ghead .n{font-family:var(--mono);font-size:12px;color:var(--faint)}
+.gnote{color:var(--muted);font-size:13px;max-width:90ch}
+.list{border:1px solid var(--line);border-radius:8px;background:var(--surface);overflow:hidden}
+.cols,.rowh{display:grid;grid-template-columns:42px 100px minmax(0,2.1fr) minmax(0,.85fr) minmax(0,.85fr) minmax(0,1.5fr) minmax(0,1.6fr) minmax(0,1.5fr) 20px;gap:12px;align-items:start}
+.list.pr .cols,.list.pr .rowh{grid-template-columns:104px minmax(0,2.2fr) minmax(0,.8fr) minmax(0,1.5fr) minmax(0,1.2fr) minmax(0,2fr) 20px}
+.cols{padding:8px 12px;background:var(--sunk);border-bottom:1px solid var(--line);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.row{border-bottom:1px solid var(--line-soft)} .row:last-child{border-bottom:0}
+.rowh{width:100%;text-align:left;appearance:none;background:none;border:0;color:inherit;font:inherit;padding:10px 12px;cursor:pointer}
+.rowh:hover{background:var(--sunk)}
+.row.open>.rowh{background:var(--sunk)}
+.cell{min-width:0;overflow-wrap:anywhere;font-size:13px}
+.cell .lab{display:none}
+.ttl{font-weight:500;font-size:13.5px} .what{color:var(--muted);margin-top:2px}
+.ref{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
+.pill{display:inline-block;font-family:var(--mono);font-size:11.5px;font-weight:500;padding:1px 6px;border-radius:4px;white-space:nowrap}
+.P0{color:var(--p0);background:var(--p0-bg)} .P1{color:var(--p1);background:var(--p1-bg)} .P2{color:var(--p2);background:var(--p2-bg)} .P3{color:var(--p3);background:var(--p3-bg)}
+.none{color:var(--bad);font-weight:500}
+.sp{display:inline-block;font-size:11.5px;font-weight:600;padding:2px 8px;border-radius:10px}
+.sp.go{color:var(--good);background:var(--good-bg)} .sp.rdy{color:var(--accent);background:var(--accent-soft)} .sp.blk{color:var(--warn);background:var(--warn-bg)} .sp.off{color:var(--p3);background:var(--p3-bg)} .sp.cls{color:var(--bad);background:var(--bad-bg)}
+.also{display:block;font-size:12px;color:var(--faint);margin-top:3px}
+.prop{display:block;color:var(--accent);font-size:12px;margin-top:2px}
+.chev{color:var(--faint);font-size:12px;transition:transform .15s;justify-self:end} .row.open .chev{transform:rotate(90deg)}
+.tag{display:inline-block;font-size:11px;padding:1px 6px;border-radius:10px;border:1px solid var(--line);color:var(--muted);margin:0 4px 3px 0;white-space:nowrap}
+.tag.close{color:var(--bad);border-color:var(--bad)} .tag.assign{color:var(--accent);border-color:var(--accent)} .tag.decide{color:var(--warn);border-color:var(--warn)}
+.rul{display:inline-block;font-size:11px;font-weight:600;padding:1px 7px;border-radius:10px;margin-top:4px}
+.rul.agree{color:var(--good);background:var(--good-bg)} .rul.change{color:var(--warn);background:var(--warn-bg)} .rul.close{color:var(--bad);background:var(--bad-bg)} .rul.hold{color:var(--p3);background:var(--p3-bg)}
+.detail{padding:14px 16px 18px;border-top:1px solid var(--line-soft);display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,340px);gap:20px 28px;background:var(--surface)}
+.long{display:flex;flex-direction:column;gap:14px;min-width:0}
+.fld{display:flex;flex-direction:column;gap:4px;min-width:0}
+.fld .body{max-width:92ch;font-size:13.5px;overflow-wrap:anywhere}
+.fld .body ul{margin:4px 0;padding-left:20px} .fld .body li{margin:2px 0} .fld .body p+p{margin-top:6px}
+.fld .body code,.gnote code,.what code{font-family:var(--mono);font-size:12px;background:var(--sunk);padding:0 4px;border-radius:3px}
+.tblwrap{overflow-x:auto;margin:6px 0} .tblwrap table{border-collapse:collapse;font-size:12.5px} .tblwrap td,.tblwrap th{border:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}
+.side{display:flex;flex-direction:column;gap:14px;min-width:0}
+.box{border:1px solid var(--line);border-radius:8px;padding:12px;background:var(--sunk);display:flex;flex-direction:column;gap:8px}
+.box select,.box textarea{font:inherit;font-size:13px;color:var(--fg);background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%}
+.box textarea{min-height:74px;resize:vertical}
+.box .st{font-size:11.5px;color:var(--faint);min-height:1em}
+.kv{display:flex;flex-direction:column;gap:2px;font-size:13px} .kv span:first-child{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);font-weight:600}
+.cards{display:flex;flex-direction:column;gap:12px}
+.card{border:1px solid var(--line);border-radius:8px;background:var(--surface);padding:14px 16px;display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,340px);gap:14px 28px}
+.card .num{font-family:var(--mono);color:var(--faint);margin-right:8px}
+.card .txt{display:flex;flex-direction:column;gap:8px;min-width:0;max-width:86ch}
+.rec{border-left:3px solid var(--accent);padding-left:10px}
+.plain{border:1px solid var(--line);border-radius:8px;background:var(--surface);overflow-x:auto}
+.plain table{border-collapse:collapse;width:100%;font-size:13px}
+.plain th{background:var(--sunk);font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+.plain td{padding:9px 12px;border-bottom:1px solid var(--line-soft);vertical-align:top} .plain tr:last-child td{border-bottom:0}
+.prose{max-width:80ch;display:flex;flex-direction:column;gap:8px} .prose ul,.prose ol{margin:0;padding-left:20px} .prose li{margin:3px 0}
+.empty{padding:22px;color:var(--muted);text-align:center}
+@media (max-width:1000px){
+  .cols{display:none}
+  .rowh,.list.pr .rowh{grid-template-columns:auto minmax(0,1fr) 20px;gap:6px 10px}
+  .rowh .c-main{grid-column:1/-1;order:3} .rowh .c-blk,.rowh .c-own,.rowh .c-x,.rowh .c-act,.rowh .c-st,.rowh .c-au{grid-column:1/-1;order:4}
+  .rowh .chev{order:2} .rowh .c-ref{order:1}
+  .cell .lab{display:inline;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-weight:600;margin-right:6px}
+  .detail,.card{grid-template-columns:minmax(0,1fr)}
+}
+@media (prefers-reduced-motion:reduce){.chev{transition:none}}
+</style>
+
+<div class="wrap">
+  <div class="head">
+    <h1>AlgoGators Issue Tracker</h1>
+    <span class="sync" id="sync" hidden></span>
+  </div>
+  <p class="sub">Every open issue and pull request across trade-ngin, the algogators mono repo (which now holds data-ngin), AlgoLens, algosystem and algogauge, in priority order. Open a row for the full description. <span id="upd"></span></p>
+  <div class="stats" id="stats"></div>
+
+  <div class="tabs" role="tablist" id="tabs"></div>
+
+  <div class="panel" id="p-issues" role="tabpanel">
+    <div class="filters">
+      <input type="search" id="f-q" placeholder="Search number, name or text" aria-label="Search issues">
+      <select id="f-view" aria-label="Group by"><option value="project">Group by project</option><option value="engine">Group by engine</option></select>
+      <select id="f-proj" aria-label="Project"><option value="">All projects</option></select>
+      <select id="f-repo" aria-label="Engine"><option value="">All engines</option></select>
+      <select id="f-prio" aria-label="Priority"><option value="">All priorities</option><option>P0</option><option>P1</option><option>P2</option><option>P3</option></select>
+      <select id="f-who" aria-label="Person"><option value="">Anyone</option></select>
+      <select id="f-tag" aria-label="Status"><option value="">Any status</option></select>
+      <span class="count" id="f-count"></span>
+    </div>
+    <div id="issue-groups" class="panel" style="padding-top:0"></div>
+  </div>
+
+  <div class="panel" id="p-qt" role="tabpanel" hidden></div>
+  <div class="panel" id="p-prs" role="tabpanel" hidden>
+    <div class="filters">
+      <input type="search" id="pf-q" placeholder="Search number, name or author" aria-label="Search pull requests">
+      <select id="pf-repo" aria-label="Repo"><option value="">All repos</option></select>
+      <select id="pf-who" aria-label="Author"><option value="">Any author</option></select>
+      <select id="pf-disp" aria-label="Disposition"><option value="">Any disposition</option></select>
+      <span class="count" id="pf-count"></span>
+    </div>
+    <div id="pr-groups" class="panel" style="padding-top:0"></div>
+  </div>
+  <div class="panel" id="p-ut" role="tabpanel" hidden></div>
+  <div class="panel" id="p-people" role="tabpanel" hidden></div>
+  <div class="panel" id="p-dep" role="tabpanel" hidden></div>
+</div>
+
+<script type="application/json" id="data">__DATA__</script>
+<script>
+(function(){
+const D=JSON.parse(document.getElementById('data').textContent);
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const PO={P0:0,P1:1,P2:2,P3:3};
+const REPOS=['trade-ngin','algogators','AlgoLens','algosystem','algogauge'];
+const SPC={'In progress':'go','PR open':'go','Draft PR open':'go','Fix written, no PR':'go','Ready to start':'rdy','Blocked':'blk','Parked':'off','Reference':'off','Proposed close':'cls','Closed':'off','Needs triage':'cls'};
+const sp=s=>'<span class="sp '+(SPC[s]||'off')+'">'+esc(s)+'</span>';
+
+/* ---------- small markdown renderer for the long fields ---------- */
+function inline(s){return esc(s).replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>');}
+function md(src){
+  const lines=String(src||'').split('\n'); let out='',stack=[],para=[],tbl=[];
+  const flushP=()=>{if(para.length){out+='<p>'+inline(para.join(' '))+'</p>';para=[];}};
+  const closeTo=n=>{while(stack.length>n){out+='</li></ul>';stack.pop();}};
+  const flushT=()=>{if(!tbl.length)return;const rows=tbl.filter(r=>!/^\s*\|?\s*:?-{2,}/.test(r)).map(r=>r.trim().replace(/^\||\|$/g,'').split('|'));
+    out+='<div class="tblwrap"><table>'+rows.map((r,i)=>'<tr>'+r.map(c=>(i?'<td>':'<th>')+inline(c.trim())+(i?'</td>':'</th>')).join('')+'</tr>').join('')+'</table></div>';tbl=[];};
+  for(const raw of lines){
+    if(/^\s*\|/.test(raw)){flushP();closeTo(0);tbl.push(raw);continue;} flushT();
+    const m=raw.match(/^(\s*)(?:[-*]|\d+\.)\s+(.*)$/);
+    if(m){flushP();const lvl=Math.floor(m[1].length/2)+1;
+      if(lvl>stack.length){while(stack.length<lvl){out+='<ul><li>';stack.push(1);} out+=inline(m[2]);}
+      else{closeTo(lvl);out+='</li><li>'+inline(m[2]);}
+      continue;}
+    if(!raw.trim()){flushP();closeTo(0);continue;}
+    if(stack.length){out+=' '+inline(raw.trim());} else para.push(raw.trim());
+  }
+  flushP();flushT();closeTo(0);return out;
+}
+
+/* ---------- issue rows ---------- */
+const FLD=[['description','What the work is, in full'],['size','Size and stages'],['blocked_by','Blocked by, in full'],['blocks','What waits on this'],['cross','Cross-engine, in full'],['decisions','Open decisions, in full']];
+function owners(i){const a=i.assignees.length?esc(i.assignees.join(', ')):'<span class="none">Unassigned</span>';return a+(i.proposed?'<span class="prop">Proposed: '+esc(i.proposed)+'</span>':'')+(i.order||[]).map(o=>'<span class="also">'+esc(o.name.split(' ')[0])+': no. '+o.n+' of '+o.of+'</span>').join('');}
+function issueRow(i,sec,withRepo){
+  const ref=(withRepo?i.repo+' ':'')+'#'+i.n;
+  return '<div class="row" data-row="'+sec+'-'+i.id+'">'+
+   '<button class="rowh" type="button" aria-expanded="false" data-toggle="'+i.id+'" data-sec="'+sec+'">'+
+   '<span class="cell c-pri"><span class="pill '+i.prio+'">'+i.prio+'</span></span>'+
+   '<span class="cell c-ref ref">'+esc(ref)+'</span>'+
+   '<span class="cell c-main"><span class="ttl">'+esc(i.title)+'</span><div class="what">'+inline(i.what)+'</div>'+(i.cross?'<span class="also">Other engines: '+esc(i.cross)+'</span>':'')+'<span data-chip="'+i.id+'">'+chip(i.id)+'</span></span>'+
+   '<span class="cell c-st"><span class="lab">Status</span>'+sp(i.status)+'</span>'+
+   '<span class="cell c-own"><span class="lab">Assignee</span>'+owners(i)+'</span>'+
+   '<span class="cell c-blk"><span class="lab">Waiting on</span>'+inline(i.waiting)+'</span>'+
+   '<span class="cell c-act"><span class="lab">Next step</span>'+inline(i.next)+'</span>'+
+   '<span class="cell c-x"><span class="lab">Notes</span>'+inline(i.notes||'')+(i.noteat?'<span class="also">'+esc(i.noteby)+', '+esc(i.noteat)+'</span>':'')+'</span>'+
+   '<span class="chev" aria-hidden="true">&#9654;</span></button><div class="slot"></div></div>';
+}
+function issueDetail(i,sec){
+  let h='<div class="detail"><div class="long">';
+  h+='<div class="fld"><h3>Status</h3><div class="body"><p>'+sp(i.status)+'</p></div></div>'+'<div class="fld"><h3>Waiting on</h3><div class="body"><p>'+inline(i.waiting)+'</p></div></div>'+'<div class="fld"><h3>Next step</h3><div class="body"><p>'+inline(i.next)+'</p></div></div>'+(i.notes?'<div class="fld"><h3>Notes</h3><div class="body"><p>'+inline(i.notes)+'</p></div></div>':'')+(i.cross?'<div class="fld"><h3>Other engines involved</h3><div class="body"><p>'+esc(i.cross)+'</p></div></div>':'');
+  for(const [k,l] of FLD){ if(i.long[k]) h+='<div class="fld"><h3>'+l+'</h3><div class="body">'+md(i.long[k])+'</div></div>'; }
+  h+='</div><div class="side">'+ruleBox(i.id,sec)+
+   '<div class="kv"><span>On GitHub</span><a href="'+i.url+'" target="_blank" rel="noopener">'+esc(i.repo)+' #'+i.n+'</a></div>'+
+   '<div class="kv"><span>Opened / last updated</span><span class="mono">'+i.created+' / '+i.updated+'</span></div>'+
+   (i.labels.length?'<div class="kv"><span>Labels</span><span>'+esc(i.labels.join(', '))+'</span></div>':'')+
+   '</div></div>';
+  return h;
+}
+const COLS='<div class="cols"><span>Pri</span><span>Issue</span><span>Name and description</span><span>Status</span><span>Assignee</span><span>Waiting on</span><span>Next step</span><span>Notes</span><span></span></div>';
+const byId={}; D.issues.forEach(i=>byId[i.id]=i); D.prs.forEach(p=>byId[p.id]=p);
+function sortI(a,b){return PO[a.prio]-PO[b.prio]||a.rank-b.rank||a.n-b.n;}
+function group(title,note,rows,sec,withRepo){
+  if(!rows.length) return '';
+  return '<div class="group"><div class="ghead"><h2>'+title+'</h2><span class="n">'+rows.length+'</span></div>'+(note?'<p class="gnote">'+note+'</p>':'')+
+    '<div class="list">'+COLS+rows.map(i=>issueRow(i,sec,withRepo)).join('')+'</div></div>';
+}
+function passI(i){
+  const q=$('f-q').value.trim().toLowerCase(), rp=$('f-repo').value, pr=$('f-prio').value, who=$('f-who').value, tg=$('f-tag').value, ru='';
+  if(rp&&i.repo!==rp) return false; if(pr&&i.prio!==pr) return false;
+  if(who){ if(who==='__none'){ if(i.assignees.length) return false; } else if(!i.assignees.includes(who)&&!(i.proposed||'').includes(who)) return false; }
+  if(tg&&i.status!==tg) return false;
+  if(q){const hay=(i.repo+' #'+i.n+' '+i.title+' '+i.what+' '+i.waiting+' '+i.next+' '+(i.notes||'')+' '+i.cross+' '+i.status+' '+i.assignees.join(' ')).toLowerCase(); if(!hay.includes(q)) return false;}
+  return true;
+}
+document.addEventListener('click',e=>{
+  const b=e.target.closest&&e.target.closest('[data-toggle]'); if(!b) return;
+  const row=b.parentElement, slot=row.querySelector('.slot'), it=byId[b.dataset.toggle], open=row.classList.toggle('open');
+  b.setAttribute('aria-expanded',open?'true':'false');
+  slot.innerHTML=open?(it.disp!==undefined?prDetail(it,b.dataset.sec):issueDetail(it,b.dataset.sec)):'';
+});
+
+/* ---------- pull requests ---------- */
+const PCOLS='<div class="cols"><span>PR</span><span>Name</span><span>Author</span><span>State today</span><span>Disposition</span><span>Why</span><span></span></div>';
+function prRow(p,sec){
+  const st=p.mergeable+'; CI '+p.ci+(p.approved.length?'; approved by '+p.approved.join(', '):'')+(p.draft?'; draft':'');
+  return '<div class="row"><button class="rowh" type="button" aria-expanded="false" data-toggle="'+p.id+'" data-sec="'+sec+'">'+
+   '<span class="cell c-ref ref">'+esc(p.repo)+' #'+p.n+'</span>'+
+   '<span class="cell c-main"><span class="ttl">'+esc(p.title)+'</span><span data-chip="'+p.id+'" style="display:block">'+chip(p.id)+'</span></span>'+
+   '<span class="cell c-au"><span class="lab">Author</span>'+esc(p.author)+'</span>'+
+   '<span class="cell c-st"><span class="lab">State</span>'+esc(st)+'</span>'+
+   '<span class="cell c-act"><span class="lab">Disposition</span><b style="font-weight:500">'+esc(p.disp)+'</b></span>'+
+   '<span class="cell c-x"><span class="lab">Why</span>'+inline(p.note)+'</span>'+
+   '<span class="chev" aria-hidden="true">&#9654;</span></button><div class="slot"></div></div>';
+}
+function prDetail(p,sec){
+  return '<div class="detail"><div class="long">'+
+   '<div class="fld"><h3>Disposition</h3><div class="body"><p><b>'+esc(p.disp)+'.</b> '+inline(p.note)+'</p></div></div>'+
+   '<div class="fld"><h3>Branch</h3><div class="body"><p><code>'+esc(p.head)+'</code> into <code>'+esc(p.base)+'</code></p></div></div>'+
+   '<div class="fld"><h3>Size</h3><div class="body"><p class="mono">'+esc(p.size)+'</p></div></div>'+
+   '<div class="fld"><h3>Checks</h3><div class="body"><p>'+esc(p.mergeable)+'. CI '+esc(p.ci)+'.'+(p.approved.length?' Approved by '+esc(p.approved.join(', '))+'.':' No human approval.')+'</p></div></div>'+
+   '</div><div class="side">'+ruleBox(p.id,sec)+
+   '<div class="kv"><span>On GitHub</span><a href="'+p.url+'" target="_blank" rel="noopener">'+esc(p.repo)+' #'+p.n+'</a></div>'+
+   '<div class="kv"><span>Opened / last updated</span><span class="mono">'+p.created+' / '+p.updated+'</span></div></div></div>';
+}
+function prList(rows,sec){return '<div class="list pr">'+PCOLS+rows.map(p=>prRow(p,sec)).join('')+'</div>';}
+function renderPRs(){
+  const q=$('pf-q').value.trim().toLowerCase(), rp=$('pf-repo').value, who=$('pf-who').value, dp=$('pf-disp').value, dep=false;
+  const rows=D.prs.filter(p=>{ if(!dep&&p.lane==='dep') return false; if(rp&&p.repo!==rp) return false; if(who&&p.author!==who) return false; if(dp&&p.disp!==dp) return false;
+    if(q&&!(p.repo+' #'+p.n+' '+p.title+' '+p.author+' '+p.note).toLowerCase().includes(q)) return false; return true;});
+  let h='';
+  for(const r of ['trade-ngin','algogators','AlgoLens','algosystem','algogauge']){
+    const rr=rows.filter(p=>p.repo===r).sort((a,b)=>(a.lane==='dep')-(b.lane==='dep')||a.n-b.n); if(!rr.length) continue;
+    const depAll=D.prs.filter(p=>p.repo===r&&p.lane==='dep').length;
+    h+='<div class="group"><div class="ghead"><h2>'+r+(r==='algogators'?' (monorepo)':'')+'</h2><span class="n">'+rr.length+' shown'+(depAll&&!dep?', '+depAll+' Dependabot hidden':'')+'</span></div>'+prList(rr,'p')+'</div>';
+  }
+  $('pr-groups').innerHTML=h||'<div class="list"><div class="empty">No pull request matches these filters.</div></div>';
+  $('pf-count').textContent=rows.length+' of '+D.prs.length+' pull requests';
+}
+
+const TABS=[['issues','Issues',D.issues.filter(i=>i.status!=='Closed').length],['qt','QT platform',''],['prs','Pull requests',D.prs.filter(p=>p.lane!=='dep').length],['dep','Dependabot',D.prs.filter(p=>p.lane==='dep').length],['ut','Unit testing',''],['people','People','']];
+function show(t){ if(!TABS.some(x=>x[0]===t)) t='issues';
+  TABS.forEach(x=>{$('p-'+x[0]).hidden=x[0]!==t; const b=$('t-'+x[0]); b.setAttribute('aria-selected',x[0]===t?'true':'false');});
+  try{history.replaceState(null,'','#'+t);}catch(e){} try{localStorage.setItem('algogators-tracker-tab',t);}catch(e){} }
+$('tabs').innerHTML=TABS.map(x=>'<button class="tab" role="tab" id="t-'+x[0]+'" data-tab="'+x[0]+'" type="button">'+x[1]+(x[2]!==''?'<span class="ct">'+x[2]+'</span>':'')+'</button>').join('');
+$('tabs').addEventListener('click',e=>{const b=e.target.closest('[data-tab]'); if(b) show(b.dataset.tab);});
+REPOS.forEach(r=>{$('f-repo').insertAdjacentHTML('beforeend','<option>'+r+'</option>');});
+['trade-ngin','algogators','AlgoLens','algosystem','algogauge'].forEach(r=>$('pf-repo').insertAdjacentHTML('beforeend','<option>'+r+'</option>'));
+[...new Set(D.issues.flatMap(i=>i.assignees))].sort().forEach(n=>$('f-who').insertAdjacentHTML('beforeend','<option>'+esc(n)+'</option>'));
+$('f-who').insertAdjacentHTML('beforeend','<option value="__none">Unassigned</option>');
+[...new Set(D.prs.map(p=>p.author))].sort().forEach(n=>$('pf-who').insertAdjacentHTML('beforeend','<option>'+esc(n)+'</option>'));
+[...new Set(D.prs.map(p=>p.disp))].sort().forEach(n=>$('pf-disp').insertAdjacentHTML('beforeend','<option>'+esc(n)+'</option>'));
+[...new Set(D.issues.map(i=>i.status))].forEach(n=>$('f-tag').insertAdjacentHTML('beforeend','<option>'+esc(n)+'</option>'));
+['f-q','f-repo','f-prio','f-who','f-tag'].forEach(id=>$(id).addEventListener('input',renderIssues));
+['pf-q','pf-repo','pf-who','pf-disp'].forEach(id=>$(id).addEventListener('input',renderPRs));
+
+
+function ruleBox(){return '';}
+function chip(){return '';}
+function updateStats(){
+  const open=D.issues.filter(i=>i.status!=='Closed'), un=open.filter(i=>!i.assignees.length).length, rdy=open.filter(i=>i.status==='Ready to start').length, blk=open.filter(i=>i.status==='Blocked').length;
+  $('stats').innerHTML='<span><b>'+open.length+'</b> open issues</span><span><b>'+rdy+'</b> ready to start</span><span><b>'+blk+'</b> blocked</span><span><b>'+un+'</b> unassigned</span><span><b>'+D.prs.filter(p=>p.lane!=='dep').length+'</b> open pull requests</span><span><b>'+D.prs.filter(p=>p.lane==='dep').length+'</b> Dependabot</span>';
+}
+function renderQT(){
+  const iss=D.issues.filter(i=>i.lane==='qtjr'&&i.status!=='Closed').sort(sortI), prs=D.prs.filter(p=>p.lane==='qtjr').sort((a,b)=>a.repo.localeCompare(b.repo)||a.n-b.n);
+  $('p-qt').innerHTML='<div class="prose"><h2>The QT platform is under thorough review by Dom</h2><p>Versions of it will start being released soon. The issues and pull requests below belong to that work and move with the review.</p></div>'+
+   '<div class="group"><div class="ghead"><h2>Issues</h2><span class="n">'+iss.length+'</span></div><div class="list">'+COLS+iss.map(i=>issueRow(i,'qt',true)).join('')+'</div></div>'+
+   '<div class="group"><div class="ghead"><h2>Pull requests</h2><span class="n">'+prs.length+'</span></div>'+prList(prs,'qt')+'</div>';
+}
+function renderUT(){
+  $('p-ut').innerHTML='<div class="prose"><h2>Unit testing rotation, trade-ngin #123</h2>'+
+   '<p>One person a week adds tests for one phase and hands off with a comment on the issue. Every phase adds new tests, so the test count and coverage rise each week. Baseline on main: 1,872 tests, 55.1% of source lines covered.</p>'+
+   '<p>Phase 0 goes first because every later phase uses its tooling. The other phases do not depend on each other, so the order below is by who is best placed for each. This order is proposed.</p></div>'+
+   '<div class="plain"><table><tr><th>Week</th><th>Person</th><th>Phase</th><th>What is delivered</th><th>Note</th></tr>'+
+   D.rotation.map(r=>'<tr><td class="mono">'+r.week+'</td><td><b style="font-weight:600">'+esc(r.person)+'</b></td><td>'+esc(r.phase)+'</td><td>'+esc(r.deliver)+'</td><td>'+esc(r.note)+'</td></tr>').join('')+'</table></div>'+
+   '<div class="prose"><h3>Rules</h3><ul><li>Tests only: changes go under <code>tests/</code>, and a pull request shows the test count rose by the number added.</li><li>A test must catch a regression: break the covered line by hand, see the test fail, restore it.</li><li>A bug a test finds is pinned first. It is fixed in the same phase only if the fix moves no stored number; otherwise it is reported to a lead.</li><li>Never point a test or a runner at the production database.</li></ul></div>';
+}
+function renderPeople(){
+  const byId={}; D.issues.forEach(i=>byId[i.id]=i);
+  let h='<div class="prose"><h2>What each person works on, in order</h2><p>Each list is in priority order, with work that can start now ahead of work that is waiting. The row marked "Start here" is the first one that can be worked on today. Unit testing (trade-ngin #123) is separate and follows its weekly schedule.</p></div>';
+  for(const name of Object.keys(D.queues)){
+    const q=D.queues[name]; if(!q.length) continue;
+    h+='<div class="group"><div class="ghead"><h2>'+esc(name)+'</h2><span class="n">'+q.length+' issues</span></div><div class="plain"><table><tr><th>No.</th><th>Pri</th><th>Issue</th><th>Name</th><th>Status</th><th>Waiting on</th><th>Next step</th></tr>'+
+      q.map((x,k)=>{const i=byId[x.id];return '<tr><td class="mono">'+(k+1)+'</td><td><span class="pill '+i.prio+'">'+i.prio+'</span></td><td class="mono" style="white-space:nowrap"><a href="'+i.url+'" target="_blank" rel="noopener">'+esc(i.repo)+' #'+i.n+'</a></td><td>'+esc(i.title)+(x.start?' <span class="sp go">Start here</span>':'')+(x.proposed?' <span class="also">Proposed owner; not yet assigned</span>':'')+'</td><td>'+sp(i.status)+'</td><td>'+inline(i.waiting)+'</td><td>'+inline(i.next)+'</td></tr>';}).join('')+'</table></div></div>';
+  }
+  $('p-people').innerHTML=h;
+}
+function renderDep(){
+  let h='<div class="prose"><h2>Dependabot pull requests</h2><p>Automated dependency updates, kept apart from the team\'s work and handled in batches per repo.</p></div>';
+  for(const r of ['trade-ngin','algogators','AlgoLens','algosystem','algogauge']){
+    const rr=D.prs.filter(p=>p.repo===r&&p.lane==='dep').sort((a,b)=>a.disp.localeCompare(b.disp)||a.n-b.n); if(!rr.length) continue;
+    const by={}; rr.forEach(p=>by[p.disp]=(by[p.disp]||0)+1);
+    h+='<div class="group"><div class="ghead"><h2>'+r+'</h2><span class="n">'+rr.length+' open: '+Object.keys(by).map(k=>by[k]+' '+k.toLowerCase()).join(', ')+'</span></div>'+
+       '<div class="plain"><table><tr><th>PR</th><th>Update</th><th>State today</th><th>What to do</th></tr>'+
+       rr.map(p=>'<tr><td class="mono"><a href="'+p.url+'" target="_blank" rel="noopener">#'+p.n+'</a></td><td>'+esc(p.title)+'</td><td>'+esc(p.mergeable+'; CI '+p.ci)+'</td><td>'+esc(p.disp)+'</td></tr>').join('')+'</table></div></div>';
+  }
+  $('p-dep').innerHTML=h;
+}
+
+function renderIssues(){
+  const pj=$('f-proj').value;
+  const all=D.issues.filter(passI).filter(i=>!pj||i.project===pj), live=all.filter(i=>i.status!=='Closed');
+  let h='';
+  if($('f-view').value==='engine'){
+    const main=live.filter(i=>i.lane==='main'), xorder=['algogators','trade-ngin','algosystem','algogauge','AlgoLens'];
+    h+=group('Cross-engine work','Work that spans engines, in priority order. Each row also appears in its own engine below.',main.filter(i=>i.cross).sort((a,b)=>PO[a.prio]-PO[b.prio]||a.rank-b.rank),'x',true);
+    for(const r of REPOS) h+=group(r,'',main.filter(i=>i.repo===r).sort(sortI),'e',false);
+    h+=group('QT platform','Under review by Dom. See the QT platform tab.',live.filter(i=>i.lane==='qtjr').sort(sortI),'q',true);
+  } else {
+    const ps=D.projects.map(p=>{const rows=live.filter(i=>i.project===p.key).sort((a,b)=>PO[a.prio]-PO[b.prio]||a.rank-b.rank);return {p,rows,top:rows.length?Math.min.apply(null,rows.map(i=>PO[i.prio])):9};}).filter(x=>x.rows.length);
+    ps.sort((a,b)=>a.top-b.top);
+    for(const x of ps){
+      const eng=[...new Set(x.rows.map(i=>i.repo))], who=[...new Set(x.rows.flatMap(i=>i.assignees))];
+      h+=group(esc(x.p.name),esc(x.p.desc)+' <span style="color:var(--faint)">Engines: '+esc(eng.join(', '))+'. People: '+esc(who.join(', ')||'none yet')+'.</span>',x.rows,'p-'+x.p.key,true);
+    }
+  }
+  h+=group('Recently closed','Closed on GitHub since 6 October 2026.',all.filter(i=>i.status==='Closed').sort((a,b)=>REPOS.indexOf(a.repo)-REPOS.indexOf(b.repo)||a.n-b.n),'c',true);
+  $('issue-groups').innerHTML=h||'<div class="list"><div class="empty">No issue matches these filters.</div></div>';
+  $('f-count').textContent=live.length+' open issues shown';
+}
+D.projects.forEach(p=>$('f-proj').insertAdjacentHTML('beforeend','<option value="'+p.key+'">'+esc(p.name)+'</option>'));
+['f-view','f-proj'].forEach(id=>$(id).addEventListener('input',renderIssues));
+
+if(D.updated&&$('upd')) $('upd').textContent='Updated from GitHub: '+D.updated+'.';
+updateStats(); renderIssues(); renderQT(); renderPRs(); renderDep(); renderUT(); renderPeople();
+let start=(location.hash||'').slice(1); if(!start){try{start=localStorage.getItem('algogators-tracker-tab')||'';}catch(e){}} show(start||'issues');
+
+})();
+</script>
+

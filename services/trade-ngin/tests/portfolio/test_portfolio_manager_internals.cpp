@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <thread>
 #include "../core/test_base.hpp"
 #include "../data/test_db_utils.hpp"
@@ -185,7 +186,7 @@ TEST_F(PortfolioManagerInternalsTest, CovarianceWithSufficientDataProducesPositi
     EXPECT_DOUBLE_EQ(cov[0][1], cov[1][0]);  // symmetric
 }
 
-// ===== C-20: calculate_covariance_matrix with an empty series (T-6 commit 2c) =====
+// ===== calculate_covariance_matrix with an empty series =====
 //
 // min_periods is the length of the SHORTEST NON-EMPTY series, so the only series that can
 // be shorter than min_periods is an empty one (a series of 1..min_periods-1 returns would
@@ -258,7 +259,7 @@ TEST_F(PortfolioManagerInternalsTest, CovarianceGuardsAClearedEmptySeries) {
     expect_guarded_and_bit_identical(cov, ref);
 }
 
-// ===== date_aligned_returns (private; T-7a INSERT S3) =====
+// ===== date_aligned_returns (private) =====
 //
 // The optimizer's covariance input, aligned by DATE: the returns of every symbol are taken between
 // consecutive dates of the INTERSECTION of the symbols' dates, so a date one symbol lacks is
@@ -305,7 +306,7 @@ TEST_F(PortfolioManagerInternalsTest, DateAlignedReturnsDropADateWithANonPositiv
     EXPECT_EQ(r.at("B"), (std::vector<double>{ret(50.0, 52.0), ret(52.0, 53.0)}));
 }
 
-// The empty-series and C-20 guards still work: a symbol with a single close gets an EMPTY series
+// The empty-series guards hold: a symbol with a single close gets an EMPTY series
 // and does not shrink the intersection, so the others' series are exactly what they are without
 // it, and the covariance built from them guards its column (0.01 variance, zero covariances) and
 // leaves every other entry bit-identical.
@@ -382,7 +383,7 @@ TEST_F(PortfolioManagerInternalsTest, UpdateHistoricalReturnsHandlesEmptyDataNoO
 }
 
 TEST_F(PortfolioManagerInternalsTest, UpdateHistoricalReturnsRunsThroughProcessWithoutError) {
-    // The PM keeps its own history from the bars it is fed (T-6c commit B), so a strategy
+    // The PM keeps its own history from the bars it is fed, so a strategy
     // that reports no history (MockStrategy relies on BaseStrategy's empty map) still leaves
     // the PM with returns for every symbol it was fed.
     auto a = make_strategy("UH", {"AAPL"});
@@ -403,10 +404,6 @@ TEST_F(PortfolioManagerInternalsTest, UpdateHistoricalReturnsTrimsToMaxHistoryLe
     ASSERT_EQ(manager_->historical_returns_.count("AAPL"), 1u);
     EXPECT_EQ(manager_->historical_returns_.at("AAPL").size(), 50u);
 }
-
-// The history merge tests (first-registered wins, PM_HISTORY_MERGE; T-6 commit 2d) were
-// removed with the merge rule itself in T-6c commit B: the PM no longer reads any strategy's
-// price history. Their replacements are in test_pm_own_price_history.cpp.
 
 // ===== get_positions_internal (private) =====
 
@@ -536,16 +533,12 @@ TEST_F(PortfolioManagerInternalsTest, GetRequiredChangesReturnsDeltaAfterProcess
 
 // ===== process_market_data WHEN strategy is_running=false =====
 
-// Retitled and re-pointed by on_data-swallowed-futures (stage 3, T-1).
-//
-// This used to assert that a stopped strategy left process_market_data returning
-// success, with the comment "production swallows per-strategy errors and
-// continues". Swallowing is what the ledger row set out to stop: after a failed
-// on_data the manager went on to read get_target_positions(), and an empty or
-// stale target map against a held book is a full-book liquidation.
+// A failed on_data is not swallowed: after it the manager would go on to read
+// get_target_positions(), and an empty or stale target map against a held book is
+// a full-book liquidation.
 //
 // But a STOPPED strategy is not an ingest failure, and treating it as one would
-// let a deliberately paused sleeve abort the whole portfolio. So the manager now
+// let a deliberately paused sleeve abort the whole portfolio. So the manager
 // distinguishes the two: a strategy that is not RUNNING is SKIPPED -- it takes
 // no part in the cycle and its targets are not read -- while a RUNNING strategy
 // whose on_data fails stops the cycle (covered by
@@ -588,7 +581,7 @@ TEST_F(PortfolioManagerInternalsTest, ProcessSkipsAStoppedStrategyWithoutFailing
     }
 }
 
-// Ledger row DA96324A-stopped-sleeve-map, the clearing half (T-7b-3 commit d). The skip above
+// The stopped sleeve's target map, the clearing half. The skip above
 // stops the stopped sleeve's targets from being READ, but the map the manager keeps for it
 // (info.target_positions) still holds what the previous rebalance left there, and everything
 // after the skip in the same call (the optimizer, the risk steps, the rounding, the book copy and
@@ -648,4 +641,39 @@ TEST_F(PortfolioManagerInternalsTest, AStoppedSleeveContributesAnEmptyTargetMap)
     }
     // The running sleeve is untouched by the clear.
     EXPECT_TRUE(manager_->strategies_.at(a.id).target_positions.count("AAPL"));
+}
+
+// The WARN line of the same skip. Saying only that the stopped sleeve's target positions "are not
+// read" is half of what happens: the targets the manager holds for the sleeve are emptied
+// (the test above). The line an operator reads must say that. Executes the skip and reads the
+// line it logs.
+TEST_F(PortfolioManagerInternalsTest, TheStoppedSleeveWarningSaysItsTargetsAreCleared) {
+    auto a = make_strategy("STOPPED_WARN", {"AAPL"});
+    ASSERT_TRUE(manager_->add_strategy(a.strat, 0.3).is_ok());
+    const auto t0 = std::chrono::system_clock::now() - std::chrono::hours(24 * 300);
+    ASSERT_TRUE(manager_->process_market_data(bars("AAPL", 300, t0)).is_ok());
+    ASSERT_TRUE(a.strat->stop().is_ok());
+
+    LoggerConfig lc;
+    lc.destination = LogDestination::CONSOLE;
+    lc.min_level = LogLevel::WARNING;
+    lc.include_timestamp = false;
+    Logger::instance().initialize(lc);
+    ::testing::internal::CaptureStdout();
+    const bool ok =
+        manager_->process_market_data(bars("AAPL", 5, t0 + std::chrono::hours(24 * 300))).is_ok();
+    const std::string out = ::testing::internal::GetCapturedStdout();
+    ASSERT_TRUE(ok) << out;
+
+    std::string line;
+    std::istringstream lines(out);
+    for (std::string l; std::getline(lines, l);) {
+        if (l.find("Strategy " + a.id + " is not RUNNING") != std::string::npos) line = l;
+    }
+    ASSERT_FALSE(line.empty()) << "the skip logged no line naming the stopped sleeve:\n" << out;
+    EXPECT_NE(line.find("[WARN"), std::string::npos) << line;
+    EXPECT_EQ(line.find("not read"), std::string::npos)
+        << "the line still claims the targets are only not read: " << line;
+    EXPECT_NE(line.find("cleared"), std::string::npos)
+        << "the line does not say the sleeve's targets are cleared: " << line;
 }

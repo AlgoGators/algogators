@@ -1,4 +1,5 @@
 // src/portfolio/portfolio_manager.cpp
+#include "trade_ngin/data/listing_dates.hpp"
 #include "trade_ngin/optimization/one_pass_record.hpp"
 #include "trade_ngin/data/roll_series.hpp"
 #include "trade_ngin/portfolio/portfolio_manager.hpp"
@@ -25,7 +26,7 @@ PortfolioManager::PortfolioManager(PortfolioConfig config, std::string id,
       instance_id_(id_),
       cost_manager_() {
     Logger::register_component("PortfolioManager");
-    sizing_capital_ = config_.total_capital;  // T-7b-2 9c: until set_sizing_capital is called
+    sizing_capital_ = config_.total_capital;  // until set_sizing_capital is called
 
     // The covariance history cap (portfolio.json "covariance_history_prices"). The loader
     // refuses a value below 2; a PortfolioConfig built in code is held to the same rule,
@@ -57,10 +58,7 @@ PortfolioManager::PortfolioManager(PortfolioConfig config, std::string id,
     // The Carver module builds its RiskManager (which registers "RiskManager") here, at
     // the point the manager was always built, so the initialized line below keeps its
     // [RiskManager] tag.
-    // A module that cannot be BUILT is not a reason to run ungated. The catch here used to
-    // log one ERROR and clear the list, eight lines below the comment explaining that an empty
-    // list throws precisely so a forgotten line cannot leave a book unprotected: the same
-    // failure, reached a different way, failed OPEN (T-6a ADVERSARIAL D-1). It rethrows now, as
+    // A module that cannot be BUILT is not a reason to run ungated. The catch rethrows, as
     // the empty-list check does, so a book whose gate could not be built does not start.
     std::vector<RiskModulePtr> built_portfolio;
     if (!no_risk_layer) {
@@ -89,17 +87,21 @@ PortfolioManager::PortfolioManager(PortfolioConfig config, std::string id,
     } else {
         INFO("Risk management is disabled in the configuration");
         // Who ruled that this book runs no risk layer, and when, once per PortfolioManager (one
-        // per run on every runner). The generic line above names neither, while the stored
-        // risk_scale keeps printing the reporter's value beside a book nothing cut (T-6b INTERIM
-        // ADVERSARIAL D-1), so an operator reading the log could not tell a ruling from an
-        // accident. The loader has already required all three fields of a `none` module.
+        // per run on every runner). The generic line above names neither, so an operator
+        // reading the log could not tell a ruling from an accident. The line also says what the
+        // day's row stores: a live equity run, the one book
+        // configured `none`, stores risk_scale 1.0 (kRiskScaleNoOverlay), and the snapshot
+        // reporter's reading is logged on RISK_SCALE_REPORT only. The loader has already
+        // required all three fields of a `none` module.
         const RiskModuleConfig& none = config_.risk_modules.front();
         const auto* ruling = std::get_if<NoneModuleConfig>(&none.params);
         INFO("RISK_NONE pm=" + id_ + " module=" + none.id +
              " ruled_by=" + (ruling ? ruling->ruled_by : std::string("-")) +
              " ruled_on=" + (ruling ? ruling->ruled_on : std::string("-")) +
-             ": this book runs no risk module; risk_scale in live_results is the reporter's "
-             "reading, not a cut");
+             ": this book runs no risk module, so nothing cuts it for portfolio risk; a live "
+             "equity run stores risk_scale 1.0 on the day's live_results row (no portfolio-risk "
+             "overlay ran this run), and the reporter's reading is on the RISK_SCALE_REPORT "
+             "line, not in that column");
     }
 
     // Sleeve-scope modules. The loader checks every key against portfolio.json's `strategies`,
@@ -249,8 +251,7 @@ Result<void> PortfolioManager::add_strategy(std::shared_ptr<StrategyInterface> s
 namespace {
 
 // The close of `symbol`'s latest-dated bar in `data`, 0.0 when it has none. Among bars of the same
-// timestamp the first one wins, which is what the old first-match lookup returned whenever a call
-// carried one date per symbol (every backtest cycle before T-7b-1 7a).
+// timestamp the first one wins.
 double latest_close_of(const std::vector<Bar>& data, const std::string& symbol) {
     const Bar* latest = nullptr;
     for (const auto& bar : data) {
@@ -333,14 +334,14 @@ Result<void> PortfolioManager::process_market_data(const std::vector<Bar>& data,
                     // too, which is the half that matters, because its target map
                     // is whatever it held when it stopped.
                     if (info.strategy->get_state() != StrategyState::RUNNING) {
-                        WARN("Strategy " + id + " is not RUNNING; it takes no part in this "
-                             "cycle and its target positions are not read");
+                        WARN("Strategy " + id +
+                             " is not RUNNING; it takes no part in this "
+                             "cycle and the target positions held for it are cleared");
                         // Not reading the targets is not enough: the map this manager keeps for
                         // the sleeve still holds the previous rebalance's targets, and everything
                         // after this loop in the same call reads it (the optimizer, the risk
                         // steps, the rounding, the book copy and execution generation). Empty it,
-                        // so the stopped sleeve contributes no target (ledger row
-                        // DA96324A-stopped-sleeve-map). Unreachable in every runner today: each
+                        // so the stopped sleeve contributes no target. Unreachable in every runner: each
                         // starts its strategies before the first call and stops them after the
                         // last.
                         info.target_positions.clear();
@@ -350,8 +351,8 @@ Result<void> PortfolioManager::process_market_data(const std::vector<Bar>& data,
                     // Process market data through strategy
                     auto result = info.strategy->on_data(data);
                     if (result.is_error()) {
-                        // on_data-swallowed-futures. This used to log the error
-                        // and carry straight on to get_target_positions() below.
+                        // The error is returned, never logged and carried on to
+                        // get_target_positions() below.
                         //
                         // Reached only for a RUNNING strategy that failed to
                         // ingest the bars -- a genuine data failure, not the
@@ -363,18 +364,14 @@ Result<void> PortfolioManager::process_market_data(const std::vector<Bar>& data,
                         // empty instrument data, ZERO for every symbol. Zero
                         // targets against a held book is not "no change": it is
                         // a full-book liquidation, generated by a strategy that
-                        // never saw a price, and it would have been shipped with
+                        // never saw a price, and it would be shipped with
                         // an ERROR line in the log and an exit code of 0.
                         //
-                        // BA-17 / E2-F43 put an assertion around this on the
-                        // equity runner (live_equity_mean_reversion.cpp, the
-                        // FEED ASSERTION block) after the same reasoning. The
-                        // futures runners had no equivalent, and this is the
-                        // shared site both go through, so the refusal belongs
-                        // here where it covers every caller.
-                        //
-                        // On a clean run on_data does not fail, so no run that
-                        // completes today is affected.
+                        // The equity runner also asserts this
+                        // (live_equity_mean_reversion.cpp, the FEED ASSERTION
+                        // block); this is the shared site every runner goes
+                        // through, so the refusal belongs here where it covers
+                        // every caller. On a clean run on_data does not fail.
                         ERROR("Error processing data for strategy " + id + ": " +
                               result.error()->what());
                         std::cerr << "Error processing data for strategy " << id << ": "
@@ -405,12 +402,10 @@ Result<void> PortfolioManager::process_market_data(const std::vector<Bar>& data,
                 }
             }
 
-            // PM-price-history. The history is updated AFTER every strategy has seen this
-            // call's bars, from this call's bars, so the optimiser's newest bar is the bar
-            // the strategy signals from. The futures runners' prewarm, which used to fill
-            // the history before this call, is gone with it. Ruled class C (STAGE3_PLAN
-            // §25a.2, §28b.3) and measured (T-4e). The PM keeps its own history from the
-            // bars (T-6c commit B); no strategy's get_price_history() is read.
+            // The history is updated AFTER every strategy has seen this call's bars, from
+            // this call's bars, so the optimiser's newest bar is the bar the strategy
+            // signals from. The PM keeps its own history from the bars; no strategy's
+            // get_price_history() is read.
             update_historical_returns(data);
         }
 
@@ -427,13 +422,13 @@ Result<void> PortfolioManager::process_market_data(const std::vector<Bar>& data,
             delivered_cut_ = DeliveredCut{};
             delivered_npc_.clear();
         }
-        // T-7b-2 CGW (the E-7 mechanism in the risk gate): the symbols the book can hold this
+        // The symbols the book can hold this
         // rebalance, which the Carver gate's window intersects its dates over. A symbol some strategy
         // lists and signals (StrategyInterface::is_signalling: a trend sleeve does not while the
         // symbol's price history is shorter than its longest EMA window), or one any strategy targets
         // or holds non-zero, so every book a lap can form maps into the window: the optimizer admits
-        // only signalled symbols (E-7) and keeps every other symbol at its strategy's own target. A
-        // symbol outside the set cannot be held today, so its missing dates no longer cut the dates
+        // only signalled symbols and keeps every other symbol at its strategy's own target. A
+        // symbol outside the set cannot be held today, so its missing dates do not cut the dates
         // of every symbol that can.
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -493,8 +488,8 @@ Result<void> PortfolioManager::process_market_data(const std::vector<Bar>& data,
             if (sleeve_result.is_error()) return sleeve_result;
         }
 
-        // A book that names an overlay sleeve is rebalanced by the one pass (LOOP_SPEC sections 4
-        // to 6): the overlay once on the capped target, one search from the held book, one
+        // A book that names an overlay sleeve is rebalanced by the one pass: the overlay once
+        // on the capped target, one search from the held book, one
         // rounding, the trim, the fills. Nothing below this block changes its book.
         const bool one_pass = one_pass_book();
         if (!one_pass) {
@@ -561,8 +556,8 @@ Result<void> PortfolioManager::process_market_data(const std::vector<Bar>& data,
             }
 
             if (!risk_modules_.empty()) {
-                // A portfolio-scope risk step that cannot answer REFUSES the scope (HD 2026-09-21,
-                // option b): every strategy is held at its previous book and no order is sent. A
+                // A portfolio-scope risk step that cannot answer REFUSES the scope: every
+                // strategy is held at its previous book and no order is sent. A
                 // module whose evaluate fails is refused inside apply_risk_management
                 // (refuse_on_failed_gatekeeper); what fails the step itself (a module's on_bars
                 // throwing, an exception after evaluate) is refused here, recorded as a REFUSE
@@ -704,7 +699,7 @@ Result<void> PortfolioManager::process_market_data(const std::vector<Bar>& data,
                 bool should_generate_portfolio_establishment_execs =
                     is_first_post_warmup_day_portfolio;
 
-                // K3 (T-7b-2 8b): where each sleeve's reports of THIS bar start, so the netting
+                // Where each sleeve's reports of THIS bar start, so the netting
                 // below sees this bar's rows only and never re-nets an earlier bar's (backtest only,
                 // see below).
                 std::unordered_map<std::string, size_t> netting_bar_start;
@@ -722,7 +717,7 @@ Result<void> PortfolioManager::process_market_data(const std::vector<Bar>& data,
                     if (one_pass) break;
                     auto& strategy_execs = strategy_executions_[strategy_id];
                     // Start counter from current size to ensure unique IDs across all periods.
-                    // T-ROLLX: the ROLL legs (RL-<sid>-<n>, inserted ahead of a bar's fills) are
+                    // The ROLL legs (RL-<sid>-<n>, inserted ahead of a bar's fills) are
                     // not counted, so the EX-<sid>-<n> sequence of the STRATEGY fills is unchanged.
                     int exec_counter = static_cast<int>(std::count_if(
                         strategy_execs.begin(), strategy_execs.end(), [](const ExecutionReport& e) {
@@ -773,7 +768,7 @@ Result<void> PortfolioManager::process_market_data(const std::vector<Bar>& data,
                                              : (data.empty() ? std::chrono::system_clock::now()
                                                              : data[0].timestamp);
                         // Calculate transaction costs using TransactionCostManager.
-                        // E2-F29: pass the SIGNED trade so the sell-side-only SEC/TAF gate
+                        // Pass the SIGNED trade so the sell-side-only SEC/TAF gate
                         // (`quantity < 0`) is reachable; every other term takes |qty|.
                         auto cost_result =
                             cost_manager_.calculate_costs(symbol, trade_size, latest_price);
@@ -809,9 +804,7 @@ Result<void> PortfolioManager::process_market_data(const std::vector<Bar>& data,
                         // current_qty == 0 and needs no special case.
                         if (std::abs(trade_size) > 1e-6) {
                             // The symbol's LATEST-dated bar in this call (the signal group's
-                            // close). T-7b-1 7a: on a release cycle the backtest feeds a withheld
-                            // JUNK bar ahead of the symbol's new bar, so the first bar is not the
-                            // latest; the first of equal dates is kept, as before.
+                            // close); the first of equal dates is kept.
                             const double latest_price = latest_close_of(data, symbol);
 
                             if (latest_price == 0.0) {
@@ -826,13 +819,13 @@ Result<void> PortfolioManager::process_market_data(const std::vector<Bar>& data,
                          std::to_string(strategy_execs.size()));
                 }
 
-                // K3, the netting adjustment (T-7b-2 8b; HD 2026-09-25 item 23): this bar's
+                // The netting adjustment: this bar's
                 // sleeve reports of one symbol are one account order, the signed sum Q; each
                 // report keeps its own cost and gets its pro-rata share of sum C(q_i) - C(Q),
                 // priced by this manager's cost model at the bar's price (C(0) = 0). A symbol one
-                // sleeve trades gets 0. The equity curve still charges the reports' own costs.
+                // sleeve trades gets 0. The equity curve charges each report's cost after netting.
                 // Only in a backtest (set_backtest_mode, set by BacktestCoordinator::run_portfolio),
-                // where these reports are the fills that get stored (T-7b-2 C8b4). A live runner's
+                // where these reports are the fills that get stored. A live runner's
                 // pass is a fresh process whose filled ledger is empty, so its reports are each
                 // sleeve's whole held book: no order, never stored; the runners net the rows they
                 // store themselves, after PHASE 4.
@@ -910,7 +903,7 @@ Result<void> PortfolioManager::process_market_data(const std::vector<Bar>& data,
                                              : (data.empty() ? std::chrono::system_clock::now()
                                                              : data[0].timestamp);
                         // Calculate transaction costs using TransactionCostManager.
-                        // E2-F29: pass the SIGNED trade so the sell-side-only SEC/TAF gate
+                        // Pass the SIGNED trade so the sell-side-only SEC/TAF gate
                         // (`quantity < 0`) is reachable; every other term takes |qty|.
                         auto cost_result =
                             cost_manager_.calculate_costs(symbol, trade_size, latest_price);
@@ -927,7 +920,7 @@ Result<void> PortfolioManager::process_market_data(const std::vector<Bar>& data,
             }  // End of if (!skip_execution_generation) block
         }
 
-        // T-7b-2 C9a (T-VOL C4): the delivered cut, measured once the book the runner stores is
+        // The delivered cut, measured once the book the runner stores is
         // final (current_positions, after the backtest's session hold above). Both books are
         // valued here, at one notional per contract per symbol. Log only: the runners print it.
         {
@@ -1015,19 +1008,17 @@ void PortfolioManager::update_historical_returns(const std::vector<Bar>& data) {
     if (data.empty())
         return;
 
-    // Record this call's closes (T-6c commit B; T-BASE_ADVERSARIAL finding 4, option 4). The
-    // PM keeps its own price history from the bars it is fed -- the same bars every strategy
-    // receives in the loop above -- instead of borrowing the strategies' histories. It used to
-    // copy each strategy's get_price_history() and, when two strategies offered different
-    // series for one symbol, keep the first-registered one; the series then depended on which
-    // sleeve was registered first and on what each sleeve chose to keep (a mean-reversion
-    // sleeve trims to 40 prices, a fast trend sleeve never clears). Now no sleeve is read.
+    // Record this call's closes. The PM keeps its own price history from the bars it is fed
+    // -- the same bars every strategy receives in the loop above -- instead of borrowing the
+    // strategies' histories, so the series does not depend on which sleeve was registered
+    // first or on what each sleeve chooses to keep (a mean-reversion sleeve trims to 40
+    // prices, a fast trend sleeve never clears).
     //
     // Rules:
     //  * one close per symbol per DATE (the bar's UTC calendar day): a repeated date
     //    overwrites the earlier close, so a duplicate bar cannot lengthen a series. This is
     //    the second line of defence: the futures loader already returns one bar per symbol
-    //    per date (T-6c commit B0), so an overwrite should never happen. When it does -- the
+    //    per date, so an overwrite should never happen. When it does -- the
     //    same date twice in ONE call, or a later call bringing a DIFFERENT close for a stored
     //    date -- it is logged as PM_HISTORY_REPEATED_DATE. A later call re-feeding a stored
     //    date with the same close (the BASE and equity runners' bar replay followed by their
@@ -1036,10 +1027,10 @@ void PortfolioManager::update_historical_returns(const std::vector<Bar>& data) {
     //    first (756 by default, the trend sleeve's own cap);
     //  * a symbol that leaves the feed keeps its series, which simply stops growing; its
     //    returns are still computed below.
-    // The returns below are computed from the kept closes in date order exactly as before (the
-    // 2,520-return cap); they decide which symbols have enough history for the optimizer. The
-    // covariance itself is built from the closes aligned by DATE (date_aligned_returns, T-7a
-    // INSERT S3): a symbol that has left the feed ends the dates every symbol shares.
+    // The returns below are computed from the kept closes in date order (the 2,520-return
+    // cap); they decide which symbols have enough history for the optimizer. The covariance
+    // itself is built from the closes aligned by DATE (date_aligned_returns): a symbol that
+    // has left the feed ends the dates every symbol shares.
     const size_t max_prices = config_.covariance_history_prices;
     std::set<std::string> touched;
     std::set<std::pair<std::string, int64_t>> seen_this_call;
@@ -1065,14 +1056,21 @@ void PortfolioManager::update_historical_returns(const std::vector<Bar>& data) {
                  ": a stored date's close was overwritten");
         }
         series[day] = close;
-        ids_by_date_[bar.symbol][day] = bar.instrument_id;  // T-ROLLX: the kept bar's contract id
+        ids_by_date_[bar.symbol][day] = bar.instrument_id;  // the kept bar's contract id
+        if (bar.roll_from) {
+            roll_from_by_date_[bar.symbol][day] = *bar.roll_from;  // the bar's roll field
+        } else if (auto rf = roll_from_by_date_.find(bar.symbol); rf != roll_from_by_date_.end()) {
+            rf->second.erase(day);
+        }
         touched.insert(bar.symbol);
     }
     for (const auto& symbol : touched) {
         auto& series = closes_by_date_.at(symbol);
         auto& ids = ids_by_date_[symbol];
+        auto rf = roll_from_by_date_.find(symbol);
         while (series.size() > max_prices) {
             ids.erase(series.begin()->first);
+            if (rf != roll_from_by_date_.end()) rf->second.erase(series.begin()->first);
             series.erase(series.begin());
         }
     }
@@ -1084,19 +1082,15 @@ void PortfolioManager::update_historical_returns(const std::vector<Bar>& data) {
         for (const auto& [day, close] : series) {
             prices.push_back(close);
         }
-        // T-ROLLX (LOOP_SPEC v6.1 section 2.3): a bar whose contract id differs from the previous
+        // A bar whose contract id differs from the previous
         // stored bar's is a change bar; its return is 0 (the splice step is not a return).
         std::vector<std::string> ids;
-        ids.reserve(series.size());
-        if (auto id_series = ids_by_date_.find(symbol); id_series != ids_by_date_.end()) {
-            for (const auto& [day, close] : series) {
-                auto id = id_series->second.find(day);
-                ids.push_back(id == id_series->second.end() ? std::string() : id->second);
-            }
-        } else {
-            ids.assign(series.size(), std::string());
-        }
-        const roll_series::ChangeFlags flags = roll_series::classify_instrument_changes(ids);
+        roll_series::RollFields roll_from;
+        stored_ids_of(symbol, series, ids, roll_from);
+        const roll_series::ChangeFlags flags =
+            roll_series::classify_instrument_changes(ids, roll_from);
+        // The bar after a confirmed vendor switch moves from the target's close.
+        const std::vector<double> bases = roll_series::return_bases(prices, flags);
 
         // Clear previous returns for this symbol BEFORE the two-price guard, so a symbol
         // whose history dropped below two prices loses its stale returns instead of keeping
@@ -1117,13 +1111,16 @@ void PortfolioManager::update_historical_returns(const std::vector<Bar>& data) {
 
         // Calculate returns - use all available history
         for (size_t i = 1; i < prices.size(); ++i) {
-            double prev_price = prices[i - 1];
-            double curr_price = prices[i];
+            double prev_price = bases[i - 1];
+            // a per-contract roll bar's return is the old contract's own
+            double curr_price = flags.old_close[i] ? *flags.old_close[i] : prices[i];
 
             if (prev_price <= 0.0)
                 continue;
 
-            double ret = flags.change[i] ? 0.0 : (curr_price - prev_price) / prev_price;
+            double ret = flags.change[i] && !flags.old_close[i] && !flags.base_close[i - 1]
+                             ? 0.0
+                             : (curr_price - prev_price) / prev_price;
 
             if (std::isfinite(ret)) {
                 historical_returns_[symbol].push_back(ret);
@@ -1164,8 +1161,8 @@ std::string covariance_day_label(int64_t day) {
     return buf;
 }
 
-// The returns calculate_covariance_matrix needs before it falls back to the 0.01 diagonal; T-7b-1
-// 7d applies the same number to the date intersection (date_aligned_returns' floor).
+// The returns calculate_covariance_matrix needs before it falls back to the 0.01 diagonal; the
+// same number applies to the date intersection (date_aligned_returns' floor).
 constexpr size_t kCovarianceMinReturns = 20;
 
 // max |rho| over the pairs (i < j) of `symbols` in `cov` whose two legs are both in `held` (every
@@ -1208,7 +1205,7 @@ std::unordered_map<std::string, std::vector<double>> PortfolioManager::date_alig
 
 std::unordered_map<std::string, std::map<int64_t, double>> PortfolioManager::adjusted_closes_by_symbol(
     const std::unordered_map<std::string, std::map<int64_t, double>>& closes_by_symbol) const {
-    // T-ROLLX (LOOP_SPEC v6.1 section 2.3): the adjusted level of each stored close, from the closes
+    // The adjusted level of each stored close, from the closes
     // and the contract ids recorded together in update_historical_returns, in date order, anchored
     // on the symbol's latest stored close. A symbol with no recorded ids reads its raw closes.
     std::unordered_map<std::string, std::map<int64_t, double>> out;
@@ -1217,32 +1214,77 @@ std::unordered_map<std::string, std::map<int64_t, double>> PortfolioManager::adj
         if (id_series == ids_by_date_.end() || closes.empty()) continue;
         std::vector<int64_t> days;
         std::vector<double> raw;
-        std::vector<std::string> ids;
         days.reserve(closes.size());
         raw.reserve(closes.size());
-        ids.reserve(closes.size());
         for (const auto& [day, close] : closes) {
             days.push_back(day);
             raw.push_back(close);
-            auto id = id_series->second.find(day);
-            ids.push_back(id == id_series->second.end() ? std::string() : id->second);
         }
-        const roll_series::ChangeFlags flags = roll_series::classify_instrument_changes(ids);
-        const std::vector<double> adjusted = roll_series::adjusted_levels(raw, flags.change);
+        std::vector<std::string> ids;
+        roll_series::RollFields roll_from;
+        stored_ids_of(symbol, closes, ids, roll_from);
+        const roll_series::ChangeFlags flags =
+            roll_series::classify_instrument_changes(ids, roll_from);
+        const std::vector<double> adjusted = roll_series::adjusted_levels(raw, flags);
         auto& levels = out[symbol];
         for (size_t i = 0; i < days.size(); ++i) levels[days[i]] = adjusted[i];
     }
     return out;
 }
 
+std::unordered_map<std::string, std::map<int64_t, double>>
+PortfolioManager::base_closes_by_symbol(
+    const std::unordered_map<std::string, std::map<int64_t, double>>& closes_by_symbol) const {
+    std::unordered_map<std::string, std::map<int64_t, double>> out = closes_by_symbol;
+    for (auto& [symbol, closes] : out) {
+        auto rf = roll_from_by_date_.find(symbol);
+        if (rf == roll_from_by_date_.end() || rf->second.empty() || closes.empty()) continue;
+        std::vector<std::string> ids;
+        roll_series::RollFields roll_from;
+        stored_ids_of(symbol, closes, ids, roll_from);
+        const roll_series::ChangeFlags flags =
+            roll_series::classify_instrument_changes(ids, roll_from);
+        size_t i = 0;
+        for (auto& [day, close] : closes) {
+            if (flags.base_close[i]) close = *flags.base_close[i];
+            ++i;
+        }
+    }
+    return out;
+}
+
+void PortfolioManager::stored_ids_of(const std::string& symbol,
+                                     const std::map<int64_t, double>& closes,
+                                     std::vector<std::string>& ids,
+                                     roll_series::RollFields& roll_from) const {
+    ids.clear();
+    roll_from.clear();
+    ids.reserve(closes.size());
+    auto id_series = ids_by_date_.find(symbol);
+    for (const auto& [day, close] : closes) {
+        if (id_series == ids_by_date_.end()) {
+            ids.emplace_back();
+            continue;
+        }
+        auto id = id_series->second.find(day);
+        ids.push_back(id == id_series->second.end() ? std::string() : id->second);
+    }
+    // The roll fields only when the symbol has one stored: no field is today's path, bit for bit.
+    auto rf = roll_from_by_date_.find(symbol);
+    if (rf == roll_from_by_date_.end() || rf->second.empty()) return;
+    roll_from.reserve(closes.size());
+    for (const auto& [day, close] : closes) {
+        auto f = rf->second.find(day);
+        roll_from.push_back(f == rf->second.end() ? std::optional<RollFrom>() : f->second);
+    }
+}
+
 std::unordered_map<std::string, std::vector<double>> PortfolioManager::date_aligned_returns(
     const std::unordered_map<std::string, std::map<int64_t, double>>& closes_by_symbol,
     const std::unordered_map<std::string, std::map<int64_t, double>>& adjusted_by_symbol) const {
-    // T-7a INSERT S3 (ledger PM-covariance-count-aligned). The covariance used to pair each
-    // symbol's k-th-last return with every other symbol's k-th-last return: by COUNT. A symbol
-    // whose date set differs (a feed gap, a Sunday-stamped bar, MBT's weekend bars from
-    // 2026-06-13) was then paired with other days. Measured on 2026-05-01: 475 of the 480 MBT/MES
-    // rows paired different dates. The series are now aligned by DATE:
+    // The series are aligned by DATE, not by COUNT (pairing each symbol's k-th-last return with
+    // every other symbol's k-th-last return would pair different days whenever the date sets
+    // differ: a feed gap, a Sunday-stamped bar, MBT's weekend bars from 2026-06-13):
     //
     //  * a symbol's usable dates are those whose close is finite and above zero;
     //  * D is the INTERSECTION of the usable dates of every symbol that has at least two of them
@@ -1254,32 +1296,31 @@ std::unordered_map<std::string, std::vector<double>> PortfolioManager::date_alig
     //    without the extra bar. It is the Carver gate's F5 rule (carver_risk_module.cpp: a date
     //    survives only if every symbol printed on it, returns between consecutive survivors);
     //  * a symbol with fewer than two usable closes gets an EMPTY series and does not shrink D;
-    //    calculate_covariance_matrix's empty-series and C-20 guards handle it as before.
+    //    calculate_covariance_matrix's empty-series and short-series guards handle it.
     //
     // Every returned non-empty series has the same length, |D| - 1, so the count alignment in
     // calculate_covariance_matrix is the identity on them and its min_periods is |D| - 1. The
     // 756-price cap is applied when the closes are recorded (update_historical_returns), before
-    // this. When every symbol has the same dates this returns exactly the series the count
-    // alignment used, bit for bit.
+    // this. When every symbol has the same dates this returns exactly the series a count
+    // alignment gives, bit for bit.
     //
-    // T-7b-1 7d (the S3 follow-up; T-7a_S1_S3_CODE_REVIEW S3-1, S3-2) narrows the participants in
-    // two steps before the intersection is taken, and says so with a WARN per symbol left out:
+    // The participants are narrowed in two steps before the intersection is taken, with a WARN
+    // per symbol left out:
     //
     //  * STALE: U is the union of the participants' usable dates. A participant whose last usable
     //    date has more than k dates of U after it (k = config_.covariance_stale_dates, portfolio.json
-    //    "covariance_stale_dates", absent means 5) is left out: one symbol whose feed stopped used to
-    //    end D for every symbol. At exactly k it stays. A calendar gap nobody printed is not a date of
+    //    "covariance_stale_dates", absent means 5) is left out, so one symbol whose feed stopped does
+    //    not end D for every symbol. At exactly k it stays. A calendar gap nobody printed is not a date of
     //    U; a date only one participant printed is. Decided once, on the union of all participants.
     //  * FLOOR: while D gives fewer than kCovarianceMinReturns (20) returns, the participant with
     //    the fewest usable dates is left out (ties: the later first usable date, then the smaller
     //    symbol name); a participant with as many dates as the most-dated one never is, and if
-    //    leaving out the shorter ones cannot reach 20 returns nobody is left out. Before this, a D
-    //    under 20 returns sent the WHOLE matrix to calculate_covariance_matrix's 0.01 diagonal.
+    //    leaving out the shorter ones cannot reach 20 returns nobody is left out (a D under 20
+    //    returns sends the WHOLE matrix to calculate_covariance_matrix's 0.01 diagonal).
     //
     // A participant left out gets an EMPTY series, so calculate_covariance_matrix gives it the
-    // guarded column (the C-20 path: 0.01 variance, zero covariances) and every other entry is what
-    // it is without that symbol. With nobody left out this is S3's rule exactly, and the
-    // COVARIANCE_DATE_ALIGNED line is byte-identical to S3's.
+    // guarded column (the short-series path: 0.01 variance, zero covariances) and every other entry is what
+    // it is without that symbol.
     std::unordered_map<std::string, std::vector<double>> out;
     std::vector<std::string> participants;
     std::unordered_map<std::string, std::vector<int64_t>> usable_dates;  // ascending
@@ -1348,8 +1389,8 @@ std::unordered_map<std::string, std::vector<double>> PortfolioManager::date_alig
     // participant with FEWER usable dates than the most-dated participant can be left out (the
     // floor is there to stop a short participant shrinking everyone's window; leaving out a
     // most-dated one cannot lengthen the others'), and nobody is left out unless that reaches
-    // the floor: when it cannot, every participant stays and the matrix takes the 0.01 diagonal
-    // exactly as under S3, rather than a symbol's data being thrown away for nothing.
+    // the floor: when it cannot, every participant stays and the matrix takes the 0.01 diagonal,
+    // rather than a symbol's data being thrown away for nothing.
     if (participants.size() > 1 && dates.size() < kCovarianceMinReturns + 1) {
         size_t most_dates = 0;
         for (const auto& symbol : participants) {
@@ -1409,9 +1450,9 @@ std::unordered_map<std::string, std::vector<double>> PortfolioManager::date_alig
     if (dates.size() >= 2) {
         for (const auto& symbol : participants) {
             const auto& closes = closes_by_symbol.at(symbol);
-            // T-ROLLX: the numerator reads the ADJUSTED level (the raw close plus the later
+            // The numerator reads the ADJUSTED level (the raw close plus the later
             // contract-switch steps) so a switch between two intersection dates is not a return;
-            // the denominator stays the RAW previous close (LOOP_SPEC v6.1 section 2.4).
+            // the denominator stays the RAW previous close.
             auto adjusted = adjusted_by_symbol.find(symbol);
             const std::map<int64_t, double>* levels =
                 adjusted != adjusted_by_symbol.end() ? &adjusted->second : &closes;
@@ -1501,16 +1542,15 @@ std::vector<std::vector<double>> PortfolioManager::calculate_covariance_matrix(
     std::vector<std::vector<double>> aligned_returns(min_periods,
                                                      std::vector<double>(num_assets, 0.0));
 
-    // T-4/C2f: the columns the C-20 guard below skipped, so their diagonal can be
-    // restored after the covariance is built (SEQUENCE §2.7). Empty whenever the
-    // guard does not fire, which is every run measured so far (T4_COVGUARD = 0).
+    // The columns the short-series guard below skipped, so their diagonal can be
+    // restored after the covariance is built. Empty whenever the guard does not fire.
     std::vector<size_t> covguard_rows;
 
     for (size_t i = 0; i < num_assets; ++i) {
         const auto& symbol = ordered_symbols[i];
         const auto& returns = returns_by_symbol.at(symbol);
 
-        // C-20: a symbol whose return series is shorter than min_periods was
+        // A symbol whose return series is shorter than min_periods was
         // skipped by the scan above (the empty case `continue`s there)
         // but is still in ordered_symbols, so the unsigned subtraction below
         // wraps and the copy reads far outside `returns`. Leave its column at
@@ -1561,16 +1601,15 @@ std::vector<std::vector<double>> PortfolioManager::calculate_covariance_matrix(
         }
     }
 
-    // T-4/C2f -- SEQUENCE §2.7's other correction. A symbol the C-20 guard skipped
+    // A symbol the short-series guard skipped
     // keeps the all-zero column aligned_returns was built with, so its VARIANCE is
     // zero too: the greedy's s^2 * Sigma_ii / 2 penalty vanishes and the name looks
-    // like free risk (dynamic_optimizer.cpp:157-169), and correlation_multiplier's
+    // like free risk (DynamicOptimizer's greedy search), and correlation_multiplier's
     // `var_i <= 0.0` test would silently skip it. Give the guarded column the same
     // default variance the insufficient-data branch above uses. Scoped to the rows
     // the guard actually skipped -- NOT a blanket sweep over every diagonal -- so
-    // that with T4_COVGUARD never firing this loop is provably a no-op and cannot
-    // perturb a legitimate symbol's variance; that is what makes the futures-arm
-    // identity check against C2 a clean test of the window fix alone.
+    // that when the guard does not fire this loop is a no-op and cannot
+    // perturb a legitimate symbol's variance.
     for (size_t i : covguard_rows) {
         if (covariance[i][i] <= 0.0) {
             covariance[i][i] = 0.01;  // same default as the min_periods < 20 branch
@@ -1655,7 +1694,7 @@ SleeveDistribution distribute_optimizer_contracts(double optimizer_contracts,
     std::vector<SleeveQuota> quotas;
     quotas.reserve(sleeves.size());
 
-    // T-7b-2 8b: opposed sleeves. Split only the optimizer's deviation from the net target,
+    // Opposed sleeves. Split only the optimizer's deviation from the net target,
     // weighted by each sleeve's |target|, so nothing is amplified and a cancelling total keeps
     // both sleeves' books (see allocation_split.hpp).
     if (any_long && any_short) {
@@ -1682,8 +1721,8 @@ SleeveDistribution distribute_optimizer_contracts(double optimizer_contracts,
     }
 
     for (const auto& s : sleeves) {
-        // D9 (LOOP_SPEC v6.1 section 5.4, T-ROLLX): a sleeve's share is computed on any non-zero
-        // total; the test that zeroed a single-sign negative total (and so every short) is removed.
+        // A sleeve's share is computed on any non-zero total, negative included, so a short book
+        // is split as a long one is.
         const double share = std::abs(total) > 1e-8 ? s.contribution / total : 0.0;
         // A sleeve with no share has a quota of 0.
         const double quota = share == 0.0 ? 0.0 : optimizer_contracts * share;
@@ -1707,7 +1746,7 @@ Result<void> PortfolioManager::optimize_positions() {
         std::vector<double> target_weights;
         std::vector<double> weights_per_contract;
         std::vector<double> costs;
-        // The date-keyed closes of the symbols in the matrix (T-7a INSERT S3): the covariance
+        // The date-keyed closes of the symbols in the matrix: the covariance
         // is built from them aligned by DATE, not from the per-symbol return vectors by count.
         std::unordered_map<std::string, std::map<int64_t, double>> closes_by_symbol;
 
@@ -1741,19 +1780,15 @@ Result<void> PortfolioManager::optimize_positions() {
 
             int min_history_length = 20;  // Minimum history length for covariance calculation
 
-            // T-OPT E-7 (ledger OPT-new-symbol-collapses-min-periods): a symbol enters the
-            // optimizer only when at least one optimizing strategy that lists it SIGNALS it
-            // (StrategyInterface::is_signalling; a trend sleeve does not while the symbol's price
-            // history is shorter than its longest EMA window, so the target it lists is not a
-            // forecast of its own). Before this a contract still warming up entered on the PM's own
-            // 20 returns and date_aligned_returns' intersection over every participant became ITS
-            // dates for every symbol (on the frozen backtest, the roots without Sunday bars set the
-            // window of the symbols already signalled on every rebalance before they were signalled
-            // themselves); 7d's floor catches that only below 20 returns. A symbol left
-            // out keeps the strategy's own target (zero while it warms up) exactly as a symbol
-            // with too little history does below; the PM still records its closes, so it enters
-            // with its full history the day it is signalled. The Carver gate's window applies the
-            // same test to its own intersection (T-7b-2 CGW, gate_participants_ in
+            // A symbol enters the optimizer only when at least one optimizing strategy that lists
+            // it SIGNALS it (StrategyInterface::is_signalling; a trend sleeve does not while the
+            // symbol's price history is shorter than its longest EMA window, so the target it
+            // lists is not a forecast of its own). Otherwise a contract still warming up would
+            // make date_aligned_returns' intersection over every participant ITS dates for every
+            // symbol. A symbol left out keeps the strategy's own target (zero while it warms up)
+            // exactly as a symbol with too little history does below; the PM still records its
+            // closes, so it enters with its full history the day it is signalled. The Carver
+            // gate's window applies the same test to its own intersection (gate_participants_ in
             // process_market_data).
             std::vector<std::string> not_signalling;
             size_t not_signalling_nonzero = 0;
@@ -1788,7 +1823,7 @@ Result<void> PortfolioManager::optimize_positions() {
                     // Copy the data under lock. historical_returns_[symbol] is computed from
                     // closes_by_date_[symbol], so the entry exists whenever the returns do; a
                     // symbol without one enters with no closes and is handled as an empty
-                    // series (the C-20 guard in calculate_covariance_matrix).
+                    // series (the short-series guard in calculate_covariance_matrix).
                     auto closes = closes_by_date_.find(symbol);
                     closes_by_symbol[symbol] = closes != closes_by_date_.end()
                                                    ? closes->second
@@ -1848,7 +1883,7 @@ Result<void> PortfolioManager::optimize_positions() {
             for (size_t i = 0; i < symbols.size(); ++i) {
                 const std::string& symbol = symbols[i];
 
-                // Aggregate across strategies, in account weight (ledger N2): a sleeve sizes its
+                // Aggregate across strategies, in account weight: a sleeve sizes its
                 // contracts on its own capital slice (capital x allocation), so each of its
                 // contracts is one contract of the account's book and weighs w; the account
                 // holds the sum of the sleeves' contracts, which is the book apply_risk_management
@@ -1887,8 +1922,9 @@ Result<void> PortfolioManager::optimize_positions() {
             DEBUG("Using cached covariance matrix for convergence iteration");
         } else {
             // Compute covariance matrix (first iteration or symbols changed)
-            covariance = calculate_covariance_matrix(date_aligned_returns(
-                closes_by_symbol, adjusted_closes_by_symbol(closes_by_symbol)));
+            covariance = calculate_covariance_matrix(
+                date_aligned_returns(base_closes_by_symbol(closes_by_symbol),
+                                     adjusted_closes_by_symbol(closes_by_symbol)));
             // Cache for subsequent iterations
             cached_symbols_ = symbols;
             cached_covariance_ = covariance;
@@ -1928,7 +1964,7 @@ Result<void> PortfolioManager::optimize_positions() {
             for (size_t i = 0; i < symbols.size(); ++i) {
                 const auto& symbol = symbols[i];
 
-                // The optimizer's answer in account contracts, UNROUNDED (ledger N2: the
+                // The optimizer's answer in account contracts, UNROUNDED (the
                 // aggregate is the sum of the sleeves' contracts, the account's book).
                 double raw_contracts = optimized_positions[i] / weights_per_contract[i];
 
@@ -1980,8 +2016,8 @@ Result<void> PortfolioManager::optimize_positions() {
                 double original_position = 0.0;
                 double optimized_position = 0.0;
 
-                // Sum up positions across all strategies: the account's contracts (ledger N2;
-                // a sleeve's contracts already carry its allocation)
+                // Sum up positions across all strategies: the account's contracts
+                // (a sleeve's contracts already carry its allocation)
                 for (const auto& [_, info] : strategies_) {
                     if (info.target_positions.count(symbol) > 0) {
                         optimized_position +=
@@ -2052,7 +2088,7 @@ PortfolioManager::OnePassBuild PortfolioManager::build_one_pass_inputs(
             return q == book->second.end() ? 0.0 : static_cast<double>(q->second.quantity);
         };
 
-        // The symbols: everything a sleeve lists or holds (section 5.1: no silent default). One the
+        // The symbols: everything a sleeve lists or holds (no silent default). One the
         // first sleeve has no series, close or multiplier for cannot be weighed: with no position
         // it is named and left alone; with a held position it enters the pass as a FIXED row at
         // its last usable close. One it weighs but the cost model cannot price is held (below).
@@ -2221,6 +2257,8 @@ PortfolioManager::OnePassBuild PortfolioManager::build_one_pass_inputs(
         in.has_bar.assign(n, 0);
         in.ever_signalled.assign(n, 0);
         in.jump_sigma_daily.assign(n, 0.0);
+        in.overlay_carver = config_.overlay_carver;
+        in.sizing_sigma.assign(n, 0.0);
         std::unordered_set<std::string> fed;
         for (const auto& bar : data) fed.insert(bar.symbol);
         // Each sleeve's unrounded contribution N*_s and held quantity, per symbol.
@@ -2237,6 +2275,7 @@ PortfolioManager::OnePassBuild PortfolioManager::build_one_pass_inputs(
             in.first_forecast[i] = own[i].forecast;
             in.first_signalling[i] = own[i].signalling;
             in.jump_sigma_daily[i] = own[i].jump_sigma_daily;
+            in.sizing_sigma[i] = own[i].sizing_sigma;
             slow_zeroed[i] = own[i].slow_rule_zeroed;
             in.has_bar[i] = fed.count(symbol) > 0;
             // Section 6.1: the hold applies on sized days only (in warm-up the book follows the
@@ -2251,7 +2290,7 @@ PortfolioManager::OnePassBuild PortfolioManager::build_one_pass_inputs(
                 in.held[i] += sleeve_held[s][i];
                 if (pinned_scopes_.count(sids[s])) sleeve_pinned = true;
                 // A sleeve that is not RUNNING signals nothing: its held rows close on the next
-                // SESSION bar (D33) through the split below.
+                // SESSION bar through the split below.
                 if (!info.strategy || info.strategy->get_state() != StrategyState::RUNNING) continue;
                 StrategyInterface::OverlaySeries sleeve;
                 if (!info.strategy->overlay_series(symbol, &sleeve) || !sleeve.signalling) continue;
@@ -2406,9 +2445,10 @@ Result<void> PortfolioManager::rebalance_book(
         const std::vector<std::string>& unweighed_lines = built.unweighed_lines;
         const std::string& scope_refusal = built.scope_refusal;
         const bool sleeve_pinned = built.sleeve_pinned;
-        const one_pass::DayInputs& in = built.in;
+        // Not const: the listing switch below moves the held book before the pass.
+        one_pass::DayInputs& in = built.in;
         const std::vector<std::vector<double>>& contribution = built.contribution;
-        const std::vector<std::vector<double>>& sleeve_held = built.sleeve_held;
+        std::vector<std::vector<double>>& sleeve_held = built.sleeve_held;
         const one_pass::Mask& slow_zeroed = built.slow_zeroed;
         const size_t n = symbols.size();
         auto held_of = [&](const std::string& sid, const std::string& symbol) {
@@ -2423,6 +2463,263 @@ Result<void> PortfolioManager::rebalance_book(
             const auto q = book->second.find(symbol);
             return q == book->second.end() ? 0.0 : static_cast<double>(q->second.quantity);
         };
+        // Listing dates (nothing is ever due without portfolio.json's listing_dates, and rule
+        // close_reenter leaves the switch to the close-out and the pass below). Once per pair, on
+        // the first sized rebalance whose signal feed holds the listed contract's bar dated on or
+        // after its listing date with both contracts free to trade (a non-session bar or a pending
+        // roll holds both: they read one series) and the listed contract signalling: the held
+        // predecessor is closed and the listed contract's held quantity is set by the rule, BEFORE
+        // the pass, which then starts from that held book (the block sits after the pass's inputs are
+        // built and before the pass: nothing between reads the held book). Each move is a fill at the signal close,
+        // priced by this manager's cost model on its own contract's terms (ids LC- and LO-). A pair
+        // whose predecessor never signalled on a sized rebalance of this run (the run starts
+        // trading after the listing date) has no switch: the listed contract is an ordinary symbol.
+        if (is_backtest_ && !is_warmup && scope_refusal.empty() && ListingDates::instance().enabled()) {
+            for (size_t i = 0; i < n; ++i) {
+                // signalling on a bar fed today: a stale answer on a day its bar is withheld is not one
+                if (in.signalling[i] && in.has_bar[i] &&
+                    ListingDates::instance().is_predecessor(symbols[i])) {
+                    listing_predecessor_traded_.insert(symbols[i]);
+                }
+            }
+        }
+        // The switch's fills and ledger entries are PENDING until the pass has run: a pass that is
+        // refused sends no order, so a refused day undoes the switch and it is made on a later pass.
+        struct PendingListingSwitch {
+            std::string sid, from, to;
+            double new_to;
+            std::vector<ExecutionReport> legs;
+            std::vector<std::string> lines;
+        };
+        std::vector<PendingListingSwitch> pending_switches;
+        std::vector<std::string> switched_this_pass;
+        std::vector<double> held_before_switch;
+        std::vector<std::vector<double>> sleeve_held_before_switch;
+        if (is_backtest_ && !is_warmup && scope_refusal.empty() && !sleeve_pinned &&
+            ListingDates::instance().enabled() &&
+            ListingDates::instance().switch_rule() != ListingSwitchRule::kCloseReenter) {
+            held_before_switch = in.held;
+            sleeve_held_before_switch = sleeve_held;
+            // The pairs whose switch is made on this pass, with the band read on the book before any
+            // of them is switched.
+            struct DueSwitch {
+                ListingConversion c;
+                size_t i_from, i_to;
+                bool in_band;
+            };
+            std::vector<DueSwitch> due;
+            auto wait = [&](size_t i_from, size_t i_to) {
+                // waits for the next rebalance on which both can trade; a held predecessor is HELD
+                // meanwhile, never closed by the close-out, and the listed contract is not opened
+                // beside it by the pass
+                if (in.held[i_from] != 0.0) {
+                    in.hold[i_from] = 1;
+                    in.hold[i_to] = 1;
+                }
+            };
+            for (const auto& c : ListingDates::instance().conversions_due(data)) {
+                if (listing_switched_.count(c.to)) continue;
+                const auto at_from = std::find(symbols.begin(), symbols.end(), c.from);
+                const auto at_to = std::find(symbols.begin(), symbols.end(), c.to);
+                if (at_from == symbols.end()) continue;
+                const size_t i_from = static_cast<size_t>(at_from - symbols.begin());
+                if (at_to == symbols.end()) {
+                    if (in.held[i_from] != 0.0) in.hold[i_from] = 1;  // held, never closed out, while it waits
+                    continue;
+                }
+                const size_t i_to = static_cast<size_t>(at_to - symbols.begin());
+                if (!listing_predecessor_traded_.count(c.from) && in.held[i_from] == 0.0) {
+                    listing_switched_.insert(c.to);
+                    INFO("LISTING_SWITCH " + c.from + " -> " + c.to +
+                         ": none, the predecessor never traded in this run");
+                    continue;
+                }
+                if (in.hold[i_from] || in.hold[i_to] || !in.has_bar[i_from] || !in.has_bar[i_to] ||
+                    !in.signalling[i_to] || !std::isfinite(in.target[i_to])) {
+                    wait(i_from, i_to);
+                    continue;
+                }
+                // the deferral band on the predecessor's holding: the listed
+                // contract's first-sleeve forecast is weaker than the band and against the holding
+                const bool in_band = in.first_signalling[i_to] &&
+                                     in.held[i_from] * in.first_forecast[i_to] < 0.0 &&
+                                     std::abs(in.first_forecast[i_to]) < in.sign_band;
+                due.push_back({c, i_from, i_to, in_band});
+            }
+            // The target the listed contract is entered at is the pass's own SCALED target, the
+            // capped target times the overlay's scalar m, so that on a day the overlay
+            // cuts the book the switch lands on the cut target and nothing is left to trim. m is a
+            // reading of the target book with every due predecessor exited (a free row enters at
+            // its target whatever is held), so it is taken from the pass itself, run once on that
+            // book: the same m, cap and target the pass below computes.
+            std::vector<double> scaled_target(n, 0.0);
+            const ListingSwitchRule rule = ListingDates::instance().switch_rule();
+            const bool target_rule =
+                rule == ListingSwitchRule::kOpenAtTarget || rule == ListingSwitchRule::kCarryToTarget;
+            if (target_rule && std::any_of(due.begin(), due.end(),
+                                           [](const DueSwitch& d) { return !d.in_band; })) {
+                // A pair the dry run sends to wait stays held in the real pass, so the pass is
+                // run again without it: the pairs that switch read the m of the very book the
+                // real pass below is given.
+                for (bool settled = false; !settled && !due.empty();) {
+                    one_pass::DayInputs probe = in;
+                    for (const auto& d : due) {
+                        if (d.in_band) probe.held[d.i_to] += d.c.ratio * probe.held[d.i_from];
+                        probe.held[d.i_from] = 0.0;
+                    }
+                    one_pass::DayResult dry;
+                    std::string dry_refusal;
+                    try {
+                        dry = one_pass::rebalance(probe);
+                        dry_refusal = dry.refusal;
+                    } catch (const std::exception& e) {
+                        dry_refusal = e.what();
+                    }
+                    settled = true;
+                    std::vector<DueSwitch> kept;
+                    for (const auto& d : due) {
+                        // a pass that cannot be run, or a listed contract the pass would not treat
+                        // as a free row, makes no switch today
+                        if (!dry_refusal.empty() || (!d.in_band && !dry.free[d.i_to])) {
+                            wait(d.i_from, d.i_to);
+                            settled = false;
+                            continue;
+                        }
+                        scaled_target[d.i_to] = dry.scaled_target[d.i_to];
+                        kept.push_back(d);
+                    }
+                    due = std::move(kept);
+                }
+            }
+            for (const auto& d : due) {
+                const ListingConversion& c = d.c;
+                const size_t i_from = d.i_from;
+                const size_t i_to = d.i_to;
+                const bool in_band = d.in_band;
+                const double u_to = in.multiplier[i_to] * in.close[i_to] / in.capital;
+                // The BOOK's move (one pass on the portfolio book): the book's net
+                // predecessor holding is exited and the listed contract entered at the book's
+                // scaled target, whole contracts for the book.
+                const double book_from = in.held[i_from];
+                const double book_to = in.held[i_to];
+                const ListingSwitch book = plan_listing_switch(
+                    rule, c.ratio, book_from, book_to, scaled_target[i_to],
+                    u_to > 0.0 ? in.cap / u_to : 0.0, in_band);
+                listing_switched_.insert(c.to);
+                switched_this_pass.push_back(c.to);
+                const bool carried = rule == ListingSwitchRule::kConvert ||
+                                     (target_rule && in_band && book_from != 0.0);
+                // carry_to_target on a pair the book holds none of leaves the listed contract to
+                // the pass. Sleeves that hold opposed legs of the predecessor on a flat book still
+                // close them against each other (a full cross, no order and no cost).
+                const bool left_to_pass =
+                    rule == ListingSwitchRule::kCarryToTarget && book_from == 0.0 && !carried;
+                if (left_to_pass) {
+                    bool any_leg = false;
+                    for (size_t s = 0; s < sids.size(); ++s) any_leg |= sleeve_held[s][i_from] != 0.0;
+                    if (!any_leg) continue;
+                }
+                // The split to the sleeves, by the book's own rule: a carried holding is each
+                // sleeve's own leg, ratio for one; otherwise the book's whole number is split in
+                // proportion to the sleeves' unrounded contributions by largest remainder
+                // (distribute_optimizer_contracts, the function the pass's own split calls), and
+                // a row no sleeve contributes to that the book takes to flat leaves every sleeve
+                // flat. Every sleeve's predecessor leg goes to flat.
+                std::vector<double> sleeve_to(sids.size(), 0.0);
+                if (carried) {
+                    for (size_t s = 0; s < sids.size(); ++s) {
+                        sleeve_to[s] = sleeve_held[s][i_to] + c.ratio * sleeve_held[s][i_from];
+                    }
+                } else if (left_to_pass) {
+                    for (size_t s = 0; s < sids.size(); ++s) sleeve_to[s] = sleeve_held[s][i_to];
+                } else {
+                    double total_contribution = 0.0;
+                    for (size_t s = 0; s < sids.size(); ++s) total_contribution += contribution[s][i_to];
+                    const bool any_contribution = std::abs(total_contribution) > 1e-8;
+                    if (any_contribution || book.new_to != 0.0) {
+                        std::vector<SleeveContribution> parts;
+                        for (size_t s = 0; s < sids.size(); ++s) {
+                            parts.push_back({sids[s], any_contribution ? contribution[s][i_to]
+                                                                       : sleeve_held[s][i_to]});
+                        }
+                        const SleeveDistribution split = distribute_optimizer_contracts(book.new_to, parts);
+                        for (size_t s = 0; s < sids.size(); ++s) {
+                            sleeve_to[s] = static_cast<double>(split.stored[s]);
+                        }
+                    }
+                }
+                // The rows as stored: one per sleeve and contract, each priced as if that sleeve
+                // traded alone (ids LC- the predecessor's leg to flat, LO- the listed contract's
+                // move), then netted as every bar's rows are (transaction_cost/netting.hpp): the
+                // account sends ONE order per symbol, the signed sum of the sleeves' rows, and
+                // each row's netting_adjustment is its share of what the account did not pay.
+                const size_t first_pending = pending_switches.size();
+                for (size_t s = 0; s < sids.size(); ++s) {
+                    ListingSwitch plan;
+                    plan.close_from = -sleeve_held[s][i_from];
+                    plan.trade_to = sleeve_to[s] - sleeve_held[s][i_to];
+                    plan.new_to = sleeve_to[s];
+                    if (plan.close_from == 0.0 && plan.trade_to == 0.0) continue;
+                    const std::string& sid = sids[s];
+                    size_t seq = listing_leg_seq_[sid];
+                    for (const auto& p : pending_switches) seq += p.sid == sid ? 1 : 0;
+                    ListingConversion priced = c;
+                    priced.from_close = in.close[i_from];
+                    priced.to_close = in.close[i_to];
+                    PendingListingSwitch pending{sid, c.from, c.to, plan.new_to, {}, {}};
+                    pending.legs = make_listing_switch_fills(
+                        priced, plan, as_of ? *as_of : data[0].timestamp,
+                        "LC-" + sid + "-" + std::to_string(seq), "LO-" + sid + "-" + std::to_string(seq),
+                        [this](const std::string& sym, double q, double px) {
+                            const auto cost = cost_manager_.calculate_costs(sym, q, px);
+                            return ListingLegCost{cost.commissions_fees, cost.implicit_price_impact,
+                                                  cost.slippage_market_impact,
+                                                  cost.total_transaction_costs};
+                        });
+                    for (const auto& leg : pending.legs) {
+                        pending.lines.push_back(
+                            "LISTING_LEG " + sid + " " + leg.symbol + " " +
+                            (leg.side == Side::BUY ? "BUY" : "SELL") + " qty=" +
+                            std::to_string(static_cast<double>(leg.filled_quantity)) + " px=" +
+                            std::to_string(static_cast<double>(leg.fill_price)) + " cost=" +
+                            std::to_string(static_cast<double>(leg.total_transaction_costs)) +
+                            " id=" + leg.exec_id + " rule=" + to_string(rule) +
+                            (in_band ? " (deferral band: carried)" : "") + " target=" +
+                            std::to_string(in.target[i_to]) + " scaled=" +
+                            std::to_string(scaled_target[i_to]) + " book " + c.from + " " +
+                            std::to_string(book_from) + " -> 0, " + c.to + " " +
+                            std::to_string(book_to) + " -> " + std::to_string(book.new_to) +
+                            " (sleeve " + c.from + " " + std::to_string(sleeve_held[s][i_from]) +
+                            " -> 0; " + c.to + " " + std::to_string(sleeve_held[s][i_to]) + " -> " +
+                            std::to_string(plan.new_to) + ")");
+                    }
+                    pending_switches.push_back(std::move(pending));
+                }
+                {
+                    std::vector<transaction_cost::SleeveExecution> rows;
+                    for (size_t k = first_pending; k < pending_switches.size(); ++k) {
+                        for (auto& leg : pending_switches[k].legs) rows.push_back({pending_switches[k].sid, &leg});
+                    }
+                    const auto netting = transaction_cost::apply_netting_adjustments(
+                        rows, [this](const std::string& sym, double q, double px) {
+                            return cost_manager_.calculate_costs(sym, q, px).total_transaction_costs;
+                        });
+                    if (first_pending < pending_switches.size()) {
+                        for (const auto& line : netting.info_lines) {
+                            pending_switches[first_pending].lines.push_back(line);
+                        }
+                    }
+                    for (const auto& line : netting.warn_lines) WARN(line);
+                }
+                in.held[i_from] = 0.0;
+                in.held[i_to] = 0.0;
+                for (size_t s = 0; s < sids.size(); ++s) {
+                    sleeve_held[s][i_from] = 0.0;
+                    sleeve_held[s][i_to] = sleeve_to[s];
+                    in.held[i_to] += sleeve_to[s];
+                }
+            }
+        }
 
         // The pass. A sleeve its own risk module refused cannot be held apart from one search on
         // the summed book, so its refusal refuses the book; anything the arithmetic throws does too.
@@ -2457,6 +2754,26 @@ Result<void> PortfolioManager::rebalance_book(
             } catch (const std::exception& e) {
                 result = held_book(std::string("the one pass failed: ") + e.what());
             }
+        }
+        if (!result.refusal.empty() && !switched_this_pass.empty()) {
+            // a refused pass sends no order: the switch is undone and waits for a later pass
+            const bool on_reread = result.refusal_on_reread;
+            const std::string why = result.refusal;
+            in.held = held_before_switch;
+            sleeve_held = sleeve_held_before_switch;
+            for (const auto& to : switched_this_pass) listing_switched_.erase(to);
+            pending_switches.clear();
+            result = held_book(why);
+            result.refusal_on_reread = on_reread;
+            WARN("LISTING_SWITCH undone: the pass was refused (" + why + "); no switch fill is written");
+        }
+        for (auto& pending : pending_switches) {
+            ++listing_leg_seq_[pending.sid];
+            for (auto& leg : pending.legs) strategy_executions_[pending.sid].push_back(std::move(leg));
+            for (const auto& line : pending.lines) INFO(line);
+            auto& ledger = filled_positions_[pending.sid];
+            ledger[pending.from] = 0.0;
+            ledger[pending.to] = pending.new_to;
         }
         const bool refused = !result.refusal.empty();
         // QT plan E5 (ruling 10): per symbol, what the desk asked, what the pass gives back and
@@ -2511,11 +2828,11 @@ Result<void> PortfolioManager::rebalance_book(
         }
         one_pass::append_one_pass_record(id_, signal_date, day, is_warmup, symbols, in, result);
 
-        // The log lines (section 7.7).
+        // The log lines.
         Logger::register_component("RiskManager");
         INFO(one_pass::overlay_line(symbols, in, result));
         if (!refused && result.window.blind()) {
-            // Section 4 (D27): a BLIND window is warned. The three covariance multipliers are 1 and
+            // A BLIND window is warned. The three covariance multipliers are 1 and
             // only the leverage term can cut.
             WARN("OVERLAY_BLIND complete_dates=" + std::to_string(result.window.complete_dates) +
                  " of " + std::to_string(result.window.window_dates) +
@@ -2533,8 +2850,8 @@ Result<void> PortfolioManager::rebalance_book(
             const one_pass::KeptLines kept = one_pass::kept_lines(symbols, in, result);
             for (const auto& line : kept.info) INFO(line);
             for (const auto& line : kept.warn) WARN(line);
-            // The marks of section 6.4 are the risk layer's lines, and the risk layer's tag is the
-            // one the rebalance leaves registered, as it always was: every line a caller logs after
+            // The trim's marks are the risk layer's lines, and the risk layer's tag is the
+            // one the rebalance leaves registered: every line a caller logs after
             // this call keeps the tag it had.
             Logger::register_component("RiskManager");
             if (!is_warmup && !result.over_limit.empty()) {
@@ -2633,6 +2950,17 @@ Result<void> PortfolioManager::rebalance_book(
                 one_pass_weights_.emplace_back(symbols[i], result.u[i]);
             }
             one_pass_target_gross_ = result.target_gross;
+            // The overlay's readings of the pass's stored book, copied for the overlay columns,
+            // and what a reading of another book on the same window needs.
+            record.covariance_readings = result.stored_readings.covariance_readings;
+            record.overlay_risk = result.stored_readings.risk;
+            record.overlay_risk_jump = result.stored_readings.jump;
+            record.overlay_risk_shock = result.stored_readings.shock;
+            record.overlay_gross_leverage = result.stored_readings.gross;
+            record.overlay_net_leverage = result.stored_readings.net;
+            record.window_bars_per_year = result.window.bars_per_year;
+            one_pass_window_ = result.window;
+            one_pass_sigma_jump_ = result.sigma_jump;
             decision.blind = record.overlay_blind;
             if (result.multiplier.m < 1.0) {
                 decision.action = RiskAction::SCALE;
@@ -2651,7 +2979,7 @@ Result<void> PortfolioManager::rebalance_book(
             delivered_has_lap1_ = true;
         }
 
-        // The split back to the sleeves (section 5.4) and each sleeve's new book. A row the pass
+        // The split back to the sleeves and each sleeve's new book. A row the pass
         // did not move (a held row, a refused day, an unpriced symbol) keeps every sleeve's held
         // quantity; a moved row is split in proportion to the sleeves' unrounded contributions by
         // largest remainder.
@@ -2714,8 +3042,8 @@ Result<void> PortfolioManager::rebalance_book(
             auto& info = strategies_.at(sids[s]);
             const auto prev_book = prev_positions.find(sids[s]);
             std::unordered_map<std::string, Position> book;
-            // The row is the sleeve's own row of today (its mark and its fields, as the book always
-            // carried them) with the pass's quantity; a symbol the sleeve no longer lists keeps the
+            // The row is the sleeve's own row of today (its mark and its fields) with the pass's
+            // quantity; a symbol the sleeve no longer lists keeps the
             // row it was held with.
             auto row = [&](const std::string& symbol, double quantity) {
                 Position pos;
@@ -2745,7 +3073,7 @@ Result<void> PortfolioManager::rebalance_book(
             if (refused && !exact) pinned_scopes_.insert(sids[s]);
         }
 
-        // The fills (section 6.3), on a rebalance that trades: per sleeve and symbol, the
+        // The fills, on a rebalance that trades: per sleeve and symbol, the
         // forecast-sign close to flat and then the move to the new book, each at the signal close
         // and priced by this manager's cost model. The sign closes of one symbol are netted among
         // the sleeves, and the other fills among themselves; ROLL legs are never in either set.
@@ -2905,7 +3233,7 @@ Result<void> PortfolioManager::validate_risk_modules(
         }
         const int composition = check_scope(sleeve_modules.at(sid), "sleeve " + sid, why);
         if (composition < 0) return invalid(why);
-        // C-2, here as well as in the loader (T-6b INTERIM ADVERSARIAL C-2): the Carver module
+        // Here as well as in the loader: the Carver module
         // divides by the PORTFOLIO's capital and ignores RiskContext::capital, so at sleeve scope
         // its leverage limits would be read against the whole book's money. The loader refuses it
         // in a risk.json; this refuses it on the constructor and set_risk_modules paths too.
@@ -2997,6 +3325,34 @@ double PortfolioManager::delivered_scale_for_book(
     return stored_gross / one_pass_target_gross_;
 }
 
+StoredBookReadings PortfolioManager::overlay_readings_for_book(
+    const std::map<std::string, double>& stored_book) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    StoredBookReadings out;
+    for (const auto& [symbol, quantity] : stored_book) {
+        (void)symbol;
+        if (quantity != 0.0) ++out.contracts_held;
+    }
+    const std::size_t k = one_pass_weights_.size();
+    if (k == 0 || one_pass_sigma_jump_.size() != k) {
+        return out;  // no answered pass to read the book on
+    }
+    // The pass's own weights, in its order, so the pass's stored book reads the pass's figures
+    // to the bit: a participant the book does not hold weighs 0.
+    std::vector<double> weights(k, 0.0);
+    for (std::size_t a = 0; a < k; ++a) {
+        const auto row = stored_book.find(one_pass_weights_[a].first);
+        const double quantity = row == stored_book.end() ? 0.0 : row->second;
+        weights[a] = quantity * one_pass_weights_[a].second;
+        // A blind window has no covariance and names no participant in it.
+        if (quantity != 0.0 && a < one_pass_window_.in_r.size() && one_pass_window_.in_r[a]) {
+            ++out.contracts_in_risk;
+        }
+    }
+    out.readings = overlay::readings(weights, one_pass_window_, one_pass_sigma_jump_);
+    return out;
+}
+
 std::map<std::string, double> PortfolioManager::delivered_notional_per_contract(
     const std::set<std::string>& symbols) const {
     std::map<std::string, double> out;
@@ -3076,8 +3432,7 @@ nlohmann::json PortfolioManager::risk_decisions_json() const {
 
 namespace {
 
-// HD's ruling of 2026-09-18: "the applied risk scale is logged per lap beside the reporter's
-// value now" (STAGE3_PLAN line 839; T-6a ADVERSARIAL E-1 found no line did it). One line per
+// The applied risk scale, logged per lap beside the reporter's value. One line per
 // scope per lap.
 //
 //   requested   what the winning module ASKED for (1 when nothing asked)
@@ -3085,10 +3440,8 @@ namespace {
 //               -- 1 when nothing was multiplied, which is the value the WARN above never showed
 //   cumulative  the product of those factors for this scope so far this rebalance
 //
-// The first four fields keep T4_APPLIED's spelling and order on purpose, so t4_parse.py,
-// c6a_gatecheck.py and overlev*.py need a token rename rather than a new regex. %.17g, never
-// to_string: six decimals already nearly published a false finding once
-// (feedback_measure_definitions_change_meaning), and this is the number a cut is judged by.
+// %.17g, never to_string: six decimals can hide a difference, and this is the number a cut
+// is judged by.
 std::string risk_applied_line(int lap, double requested, double applied, double cumulative,
                               RiskAction action, const std::string& module_id, RiskScope scope,
                               const std::string& scope_id, double invariant, double leverage) {
@@ -3097,7 +3450,7 @@ std::string risk_applied_line(int lap, double requested, double applied, double 
     // an absolute request; leverage = the MAGNITUDE reading charged as a per-lap rate. They are
     // the two halves of `requested`, and the pair is what makes a level-cut arm checkable: with
     // only the combined number there is no way to tell a declined invariant request from a
-    // leverage request that was honoured (T-4f ARM 1; t4_validate.py reads this line).
+    // leverage request that was honoured.
     std::snprintf(buf, sizeof(buf),
                   "RISK_APPLIED lap=%d requested=%.17g applied=%.17g cumulative=%.17g action=%s"
                   " module=%s scope=%s scope_id=%s invariant=%.17g leverage=%.17g",
@@ -3219,9 +3572,8 @@ std::vector<RiskDecision> PortfolioManager::evaluate_scope_modules(
                 decision.module_id = modules[k]->id();
             }
         } catch (const std::exception& e) {
-            // A THROWING module is the same failure reached a different way. It used to escape
-            // to the catch around the whole apply, which returned OK and threw away every
-            // decision the healthy modules had already returned.
+            // A THROWING module is the same failure reached a different way. It is caught here,
+            // so the decisions the healthy modules already returned are kept.
             failure = e.what();
         }
         if (!failure.empty()) {
@@ -3244,19 +3596,18 @@ bool PortfolioManager::refuse_on_failed_gatekeeper(const std::vector<RiskModuleP
     for (size_t k = 0; k < modules.size() && k < errors.size(); ++k) {
         if (errors[k].empty()) continue;
         if (portfolio_scope) {
-            // HD 2026-09-21, option (b): a PORTFOLIO-scope module of ANY capability that cannot
-            // answer refuses the scope. The shipped futures books run one Carver module
-            // ({SCALE, WARN}); its failure used to contribute NONE and ship the book uncut.
+            // A PORTFOLIO-scope module of ANY capability that cannot answer refuses the scope.
+            // The shipped futures books run one Carver module ({SCALE, WARN}); its failure must
+            // not ship the book uncut.
             ERROR("Risk module " + modules[k]->id() + " failed on " + risk_scope_name(ctx.scope) +
                   " " + ctx.scope_id + " " + risk_location(ctx) + ": " + errors[k] +
                   "; a portfolio-scope module that cannot answer refuses the scope: every "
                   "strategy is held at its previous book and no orders are sent");
         } else {
-            // T-7b-2 C10b (HD 2026-09-24 ruling 18): a SLEEVE-scope module of ANY capability that
+            // A SLEEVE-scope module of ANY capability that
             // cannot answer refuses its sleeve, as the portfolio rule does for the book: the
             // sleeve is held at its previous (seeded) book and sends no orders, the other sleeves
-            // go on. Until C10b only a REFUSE-capable module refused here, and a failed
-            // SCALE-only sleeve module left its sleeve uncut.
+            // go on.
             ERROR("Risk module " + modules[k]->id() + " failed on " + risk_scope_name(ctx.scope) +
                   " " + ctx.scope_id + " " + risk_location(ctx) + ": " + errors[k] +
                   "; a sleeve-scope module that cannot answer refuses its sleeve: the sleeve is "
@@ -3374,7 +3725,7 @@ Result<void> PortfolioManager::apply_risk_management(const std::vector<Bar>& dat
             std::vector<RiskDecision> decisions =
                 evaluate_scope_modules(risk_modules_, portfolio_positions, lap_ctx, errors);
 
-            // T-7b-1 7d: the optimizer's and the risk gate's max |rho| side by side, once per
+            // The optimizer's and the risk gate's max |rho| side by side, once per
             // rebalance. Lap 1 is the one lap every rebalance with a book has; both numbers are
             // then read on the same book (the optimizer's answer, before any cut), the optimizer's
             // matrix is the one it built this rebalance (cached for the later laps), and the gate's
@@ -3488,7 +3839,7 @@ Result<void> PortfolioManager::apply_risk_management(const std::vector<Bar>& dat
 
                 // Scale positions in all strategies under lock. A pinned strategy is
                 // skipped, so the book the modules measured is cut by less than `scale`; the
-                // count travels to on_applied so a module keeping a level can say so (A-5).
+                // count travels to on_applied so a module keeping a level can say so.
                 {
                     std::lock_guard<std::mutex> lock(mutex_);
                     for (auto& [id, info] : strategies_) {
@@ -3506,8 +3857,7 @@ Result<void> PortfolioManager::apply_risk_management(const std::vector<Bar>& dat
             } else {
                 // A module whose gate read the book over its limits but asked for nothing more
                 // (the level cut declines a lap already cut to this level or deeper) must not be
-                // reported as "not exceeded" directly under "risk_exceeded=1" (T-6b INTERIM
-                // ADVERSARIAL B-4; T-4 ADVERSARIAL finding 12 was this class of false line).
+                // reported as "not exceeded" directly under "risk_exceeded=1".
                 bool gate_exceeded = false;
                 for (const auto& d : decisions) {
                     if (d.metrics.has_value() && d.metrics->risk_exceeded) gate_exceeded = true;
@@ -3554,8 +3904,8 @@ Result<void> PortfolioManager::apply_risk_management(const std::vector<Bar>& dat
                                        lap_ctx.scope_id, logged_invariant, logged_leverage));
             }
         } catch (const std::exception& e) {
-            // Fail closed: the loop refuses the portfolio scope on this error (HD 2026-09-21).
-            // This used to return OK, which shipped whatever the book was at the throw.
+            // Fail closed: the loop refuses the portfolio scope on this error, so whatever the
+            // book was at the throw is never shipped.
             ERROR("Exception during risk management: " + std::string(e.what()));
             return make_error<void>(ErrorCode::UNKNOWN_ERROR,
                                     std::string("Exception during risk management: ") + e.what(),
@@ -3615,8 +3965,8 @@ Result<void> PortfolioManager::apply_sleeve_risk(
                 continue;
             }
 
-            // Fail CLOSED, as the portfolio scope: the sleeve is no longer left untouched
-            // because one of its modules failed, which discarded any REFUSE the others returned.
+            // Fail CLOSED, as the portfolio scope: a failed module does not leave the sleeve
+            // untouched or discard any REFUSE the others returned.
             std::vector<std::string> errors;
             std::vector<RiskDecision> decisions =
                 evaluate_scope_modules(modules, book, ctx, errors);
@@ -3699,10 +4049,10 @@ Result<void> PortfolioManager::apply_sleeve_risk(
                                        verdict.action, logged_winner, ctx.scope, sid, 1.0, 1.0));
             }
         } catch (const std::exception& e) {
-            // T-7b-2 C10b: the sleeve's risk step could not answer (a module's on_bars threw, or
+            // The sleeve's risk step could not answer (a module's on_bars threw, or
             // an exception after evaluate), so the sleeve is refused as a failed module refuses
             // it, recorded as a REFUSE row of kRiskStepModuleId carrying the error (the runners'
-            // flag reads it). It used to log this line and leave the sleeve uncut.
+            // flag reads it).
             const std::string failure = e.what();
             ERROR("Exception during sleeve risk management for " + sid + ": " + failure +
                   "; the sleeve risk step could not answer, so the sleeve is refused: it is held "
@@ -3948,7 +4298,7 @@ void PortfolioManager::clear_all_executions() {
     recent_executions_.clear();
     strategy_executions_.clear();
     // Keep the filled-position ledger in lockstep with strategy_executions_.
-    // E2-P3-a: the filled-position ledger MUST be cleared with the executions it mirrors.
+    // The filled-position ledger MUST be cleared with the executions it mirrors.
     //
     // filled_positions_ records what this manager has actually traded into, and order sizing
     // is `target - filled`. Clearing the execution history without clearing the ledger would
@@ -3956,7 +4306,7 @@ void PortfolioManager::clear_all_executions() {
     // under-trade by exactly the discarded quantity.
     //
     // This is the ONLY reset. BacktestCoordinator::reset() does not touch PortfolioManager at
-    // all, so a coordinator reset does not clear this -- safe today because run_portfolio has
+    // all, so a coordinator reset does not clear this -- safe because run_portfolio has
     // a single period loop and each process builds a fresh PortfolioManager, but it means a
     // second backtest period against a reused manager would size against stale fills. If a
     // period loop is ever added, reset the manager here too rather than assuming this covers
@@ -3968,7 +4318,7 @@ int PortfolioManager::register_equity_cost_configs(
     const std::vector<std::string>& symbols,
     const std::unordered_map<std::string, std::vector<Bar>>& bars_by_symbol,
     int adv_lookback_days) {
-    // E2-C9 -- see the header for why both cost managers must be registered.
+    // See the header for why both cost managers must be registered.
     return cost_manager_.register_equity_costs_from_bars(symbols, bars_by_symbol,
                                                          adv_lookback_days);
 }
@@ -4037,7 +4387,7 @@ Result<void> PortfolioManager::update_strategy_position(const std::string& strat
     // This call IS the seeding of the previous book: the backtest coordinator makes it every
     // day and the two futures live runners make it once from load_positions_by_date. A REFUSE
     // pins the scope to current_positions, so recording who was seeded is what lets the PM
-    // tell "ship yesterday's book" apart from "ship nothing" (T-6a ADVERSARIAL A-2).
+    // tell "ship yesterday's book" apart from "ship nothing".
     seeded_scopes_.insert(strategy_id);
     // The portfolio scope's book is the sum of its sleeves', so seeding any sleeve seeds it.
     seeded_scopes_.insert(id_);
@@ -4098,16 +4448,12 @@ double PortfolioManager::get_portfolio_value(
 
             // Only recompute unrealized if the position has a non-zero value stored.
             //
-            // E2-P3-b: the original comment asserted "For REALIZED_ONLY accounting (futures),
-            // unrealized_pnl is always 0" as though it were a system-wide invariant. It is
-            // not. It held for the STRATEGY's own positions_ -- which is what
-            // get_positions_internal() returns here, and which TrendFollowingStrategy never
-            // populates -- but the backtest coordinator wrote a NON-zero unrealized onto
-            // futures rows until E2-F2 fixed it. The invariant this guard leans on was false
-            // for two commits and nobody noticed, because this function has no production
-            // caller (tests only).
+            // "For REALIZED_ONLY accounting (futures), unrealized_pnl is always 0" holds for the
+            // STRATEGY's own positions_ -- which is what get_positions_internal() returns here,
+            // and which TrendFollowingStrategy never populates -- not as a system-wide
+            // invariant. This function has no production caller (tests only).
             //
-            // The guard itself is fine: it skips the recompute unless something is stored. But
+            // The guard skips the recompute unless something is stored. But
             // if this function ever gains a caller, check where its positions came from first
             // -- the expression below omits point_value and is therefore valid for equities
             // only.

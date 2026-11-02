@@ -1,0 +1,33 @@
+# Normalize line endings. Contributors are on Windows, macOS and Linux, and CI
+# runs on all three — without this, a Windows checkout rewrites every file and
+# the path-filter diffs in CI light up every service on every PR.
+* text=auto eol=lf
+
+# Scripts must stay LF or they break when executed on Linux runners.
+*.sh        text eol=lf
+*.bash      text eol=lf
+justfile    text eol=lf
+Makefile    text eol=lf
+
+# Windows-only files keep CRLF.
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+
+# Binary — never diff, never normalize.
+*.png       binary
+*.jpg       binary
+*.pdf       binary
+*.pptx      binary
+*.parquet   binary
+*.pem       binary
+
+# Lockfiles: keep them out of PR diffs by default. They are still reviewed when
+# it matters (`git diff -- uv.lock`), but a 4000-line resolution churn should not
+# bury a 3-line source change.
+uv.lock         linguist-generated=true -diff
+pnpm-lock.yaml  linguist-generated=true -diff
+package-lock.json linguist-generated=true -diff
+
+# Generated contract bindings: mark as generated so review focuses on the schema.
+platform/contracts/codegen/generated/** linguist-generated=true

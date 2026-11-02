@@ -1,0 +1,228 @@
+name: quality / cpp
+
+# Reusable. Called by every C++ member's `<kind>-<name>.quality.yml`.
+#
+# Unlike the Python and Node reusables this one does not go through `just` —
+# CMake presets already are the abstraction, and duplicating them in a justfile
+# would give two places to change a compiler flag. The presets live in the root
+# CMakePresets.json.
+
+on:
+  workflow_call:
+    inputs:
+      path:
+        description: Repo-relative path to the member, e.g. services/trade-ngin
+        type: string
+        required: true
+      builds:
+        description: >
+          JSON array of {preset, os} objects. Explicit pairing rather than a
+          cross-product: ci-msvc only makes sense on windows, ci-gcc13 only on
+          ubuntu, and a cross-product would schedule six jobs to run three.
+        type: string
+        default: '[{"preset":"ci-gcc13","os":"ubuntu-24.04"}]'
+      sanitizers:
+        description: JSON array of sanitizer preset names, e.g. ["ci-asan","ci-ubsan"]. Empty to skip.
+        type: string
+        default: '[]'
+      run-clang-tidy:
+        type: boolean
+        default: true
+      run-clang-format:
+        description: >
+          Off only for imported code that predates the style; reformatting it
+          in one shot would conflict with every in-flight feature branch.
+        type: boolean
+        default: true
+      timeout-minutes:
+        type: number
+        default: 60
+
+permissions:
+  contents: read
+
+jobs:
+  format:
+    name: clang-format
+    if: ${{ inputs.run-clang-format }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check formatting
+        run: |
+          find "${{ inputs.path }}" \
+            \( -path '*/build/*' -o -path '*/third_party/*' \) -prune -o \
+            -type f \( -name '*.cpp' -o -name '*.cc' -o -name '*.hpp' -o -name '*.h' \) -print0 \
+            | xargs -0 --no-run-if-empty clang-format --dry-run --Werror --style=file
+
+  build:
+    name: ${{ matrix.build.preset }}
+    runs-on: ${{ matrix.build.os }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        build: ${{ fromJSON(inputs.builds) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # vcpkg's compiled dependencies (Arrow, abseil, gtest...) as files in the Actions cache.
+      # Its x-gha backend stopped hitting after GitHub's cache API change, and every configure
+      # rebuilt them from source (21 of the build's 49 minutes). The key is the manifest:
+      # vcpkg's own ABI hash still decides which cached package fits, so a partial restore is safe.
+      - name: Cache directories
+        shell: bash
+        run: |
+          {
+            echo "VCPKG_BINARY_SOURCES=clear;files,$RUNNER_TEMP/vcpkg-bincache,readwrite"
+            echo "CCACHE_DIR=$RUNNER_TEMP/ccache"
+          } >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/vcpkg-bincache" "$RUNNER_TEMP/ccache"
+
+      - name: Restore vcpkg packages
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-bincache
+          key: vcpkg-${{ matrix.build.os }}-${{ matrix.build.preset }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: vcpkg-${{ matrix.build.os }}-${{ matrix.build.preset }}-
+
+      # ccache: a build recompiles only what changed since the last cached build of this preset
+      # (main's cache is visible to every PR). Linux only; the MSVC build runs without it.
+      - name: Restore ccache
+        if: runner.os == 'Linux'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-${{ matrix.build.os }}-${{ inputs.path }}-${{ matrix.build.preset }}-${{ github.sha }}
+          restore-keys: ccache-${{ matrix.build.os }}-${{ inputs.path }}-${{ matrix.build.preset }}-
+
+      - name: Pin vcpkg to the manifest baseline
+        # The repo manifest pins builtin-baseline; the runner image's vcpkg
+        # tool and registry lag it unpredictably, so use a checkout at exactly
+        # that commit. blob:none keeps the clone small; bootstrap downloads a
+        # prebuilt tool binary.
+        shell: bash
+        run: |
+          BASELINE=$(python3 -c "import json;print(json.load(open('vcpkg.json'))['builtin-baseline'])")
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg "$RUNNER_TEMP/vcpkg"
+          git -C "$RUNNER_TEMP/vcpkg" checkout -q "$BASELINE"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          else
+            "$RUNNER_TEMP/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          fi
+          echo "VCPKG_ROOT=$RUNNER_TEMP/vcpkg" >> "$GITHUB_ENV"
+
+      - name: Install Ninja, ccache and mold
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build ccache mold
+
+      - name: Configure
+        shell: bash
+        working-directory: ${{ inputs.path }}
+        env:
+          # Precompiled headers are rebuilt each run, so ccache must not reject them by mtime.
+          CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
+        run: |
+          extra=()
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # On the command line, not in the environment: vcpkg's own port builds keep their
+            # defaults. mold links trade_ngin_tests in seconds instead of minutes.
+            extra=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+                   -DCMAKE_LINKER_TYPE=MOLD)
+          fi
+          cmake --preset ${{ matrix.build.preset }} "${extra[@]}"
+
+      # Right after configure, so the dependencies are kept even when the build or tests fail.
+      - name: Save vcpkg packages
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-bincache
+          key: vcpkg-${{ matrix.build.os }}-${{ matrix.build.preset }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+
+      - name: Build
+        working-directory: ${{ inputs.path }}
+        shell: bash
+        env:
+          CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
+          CCACHE_MAXSIZE: 1500M
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then ccache --zero-stats; fi
+          cmake --build --preset ${{ matrix.build.preset }}
+          if [ "$RUNNER_OS" = "Linux" ]; then ccache --show-stats; fi
+
+      # Saved even when the tests fail: the objects are still good.
+      - name: Save ccache
+        if: ${{ always() && !cancelled() && runner.os == 'Linux' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-${{ matrix.build.os }}-${{ inputs.path }}-${{ matrix.build.preset }}-${{ github.sha }}
+
+      - name: Test
+        run: ctest --preset ${{ matrix.build.preset }}
+        working-directory: ${{ inputs.path }}
+
+      - name: clang-tidy
+        # Runs off the compile database the configure step just produced, so it
+        # sees exactly the flags the real build used.
+        if: ${{ inputs.run-clang-tidy && runner.os == 'Linux' }}
+        working-directory: ${{ inputs.path }}
+        run: |
+          run-clang-tidy -p "build/${{ matrix.build.preset }}" -quiet \
+            $(git diff --name-only origin/${{ github.base_ref || 'main' }}...HEAD -- '*.cpp' '*.cc' || true)
+
+      - name: Slug
+        id: slug
+        if: always()
+        shell: bash
+        run: echo "value=$(echo '${{ inputs.path }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctest-${{ steps.slug.outputs.value }}-${{ matrix.build.preset }}
+          path: ${{ inputs.path }}/build/${{ matrix.build.preset }}/Testing/**/*.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  sanitize:
+    name: ${{ matrix.preset }}
+    if: ${{ inputs.sanitizers != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: ${{ fromJSON(inputs.sanitizers) }}
+    env:
+      VCPKG_BINARY_SOURCES: 'clear;x-gha,readwrite'
+      # Sanitizer findings must fail the job, not scroll past in the log.
+      ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:halt_on_error=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+      - shell: bash
+        run: echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+      - run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - run: cmake --preset ${{ matrix.preset }}
+        working-directory: ${{ inputs.path }}
+      - run: cmake --build --preset ${{ matrix.preset }}
+        working-directory: ${{ inputs.path }}
+      - run: ctest --preset ${{ matrix.preset }}
+        working-directory: ${{ inputs.path }}
