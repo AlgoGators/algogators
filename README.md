@@ -12,9 +12,12 @@ Imported members and their source repositories:
 | `services/research-api` | `AlgoGators/algolens` — `algolens-api`, package renamed `research_api` |
 | `apps/algolens-web` | `AlgoGators/algolens` — `algolens-frontend` |
 | `apps/website` | `AlgoGators/AlgoGatorsWebsite` (static site) |
+| `services/trade-ngin` | `AlgoGators/trade-ngin` (main, history rebuilt one commit per PR; #90) |
 
-Still placeholders: `libs/research-core`, `apps/algoterminal`,
-`services/trade-ngin`.
+Still placeholders: `libs/research-core`, `apps/algoterminal`.
+
+New here, or an agent? Start with [`docs/knowledge-base/`](docs/knowledge-base/README.md): decisions,
+production, where things live, people and known traps.
 
 ## Layout
 

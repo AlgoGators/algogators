@@ -8,4 +8,8 @@ service-specific: architecture, onboarding, runbooks, the trading-system
 overview, and the nav that stitches everything together.
 
 Built and published by `.github/workflows/security.yml`'s sibling docs job on
-pushes to `main`. Nothing here yet.
+pushes to `main`.
+
+- [`knowledge-base/`](knowledge-base/README.md): decisions, operations, where things live, people
+  and gotchas, for people and agents new to the repository.
+- [`runbooks/`](runbooks/): step-by-step procedures.
