@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace trade_ngin {
 namespace core {
@@ -57,7 +58,7 @@ inline std::tm* safe_gmtime(const std::time_t* time, std::tm* result) {
 /**
  * @brief Format a system_clock time_point as a UTC `YYYY-MM-DD` calendar date.
  *
- * Phase 5 §5c -- the data layer's timezone contract is UTC end-to-end. This
+ * The data layer's timezone contract is UTC end-to-end. This
  * helper is the one true way to produce a date-string key from a Timestamp
  * for use in date-keyed lookups against provider tables. Callers MUST NOT
  * call `std::gmtime` or `std::put_time` directly -- both are non-thread-safe
@@ -82,16 +83,16 @@ inline std::string format_utc_date(std::chrono::system_clock::time_point tp) {
 /**
  * @brief Format a time_point as a UTC `YYYY-MM-DD HH:MM:SS` timestamp string.
  *
- * Phase 6 §6c -- companion to format_utc_date for sites that need a full
+ * Companion to format_utc_date for sites that need a full
  * timestamp (e.g. SQL INSERT values with second resolution). Same
  * thread-safety guarantees: routes through safe_gmtime.
  */
 /**
- * E2-F22 -- parse a "YYYY-MM-DD HH:MM:SS[.frac][+00]" string that is KNOWN to be UTC
+ * Parse a "YYYY-MM-DD HH:MM:SS[.frac][+00]" string that is KNOWN to be UTC
  * (a timestamptz read back from a UTC session) into a time_point, without letting
  * the host timezone in. std::mktime interprets the broken-down time as LOCAL, which on
- * a New York host shifted every loaded position timestamp +5 h and made each T-1
- * rewrite migrate the row across midnight after four rewrites. Returns false on a
+ * a New York host shifts every loaded position timestamp +5 h, so repeated T-1
+ * rewrites would move the row across midnight. Returns false on a
  * malformed string.
  */
 inline bool parse_utc_datetime(const std::string& text,
@@ -124,8 +125,8 @@ inline bool parse_utc_datetime(const std::string& text,
  * back through gmtime (format_utc_date), so on a host at a positive UTC offset
  * the value lands on the PREVIOUS day and the whole run shifts with it -- the
  * date key written to trading.positions, the T-1 lookup, the dedup comparison.
- * A New York host hides this (local midnight is 05:00 UTC, same calendar day),
- * which is why it survived: the defect only shows east of Greenwich.
+ * A New York host hides this (local midnight is 05:00 UTC, same calendar day):
+ * the shift only shows east of Greenwich.
  *
  * Leading/trailing text is rejected rather than ignored, so a timestamp string
  * cannot be silently truncated to its date here -- use parse_utc_datetime for
@@ -184,6 +185,33 @@ inline std::string get_formatted_time(const char* format, bool use_local_time = 
     char buffer[128];
     std::strftime(buffer, sizeof(buffer), format, &result);
     return std::string(buffer);
+}
+
+/**
+ * @brief One row per UTC date: of consecutive rows that share a date, the LAST one is kept.
+ *
+ * For a series read in time order (an equity curve), so that no statistic counts a date twice.
+ * `date_of(row)` gives the row's UTC date as any equality-comparable key (a `YYYY-MM-DD` string,
+ * format_utc_date of its timestamp). Rows of distinct dates pass through untouched and in order,
+ * so a series that repeats no date comes back equal to its input. `removed`, when given,
+ * receives the number of rows dropped.
+ */
+template <typename Row, typename DateOf>
+std::vector<Row> last_row_per_utc_date(const std::vector<Row>& rows, DateOf date_of,
+                                       size_t* removed = nullptr) {
+    std::vector<Row> kept;
+    kept.reserve(rows.size());
+    for (const auto& row : rows) {
+        if (!kept.empty() && date_of(kept.back()) == date_of(row)) {
+            kept.back() = row;
+        } else {
+            kept.push_back(row);
+        }
+    }
+    if (removed != nullptr) {
+        *removed = rows.size() - kept.size();
+    }
+    return kept;
 }
 
 }  // namespace core

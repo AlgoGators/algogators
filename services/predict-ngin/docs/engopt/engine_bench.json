@@ -1,0 +1,10 @@
+{
+ "prints": 1000239,
+ "tickers": 3000,
+ "fused_numba_s": 0.03325919999042526,
+ "mkgap_numba_3calls_s": 0.048903500006417744,
+ "python_ref_s_on_10pct": 0.4414958000124898,
+ "python_ref_s_extrapolated": 3.9287324849754253,
+ "fills_fused": 758435,
+ "fills_mkgap": 758435
+}

@@ -1,0 +1,37 @@
+services:
+  frontend:
+    build:
+      context: ../../apps/algolens-web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:5001}
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    build:
+      # The image installs the workspace libs, so the context is the repository root.
+      context: ../..
+      dockerfile: services/research-api/Dockerfile
+    ports:
+      - "5001:5000"
+    env_file:
+      - ../../services/research-api/.env
+    volumes:
+      - backend-logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      # Runs INSIDE the backend container, where gunicorn listens on 5000. The
+      # "5001:5000" mapping above is host-side only, so the internal check must
+      # target 5000 (it was hitting 5001 and always failing).
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  backend-logs:

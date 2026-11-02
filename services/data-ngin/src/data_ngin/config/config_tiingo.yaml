@@ -1,0 +1,60 @@
+# Tiingo equities pipeline (tiingo_data_dag) -> new_algo_data.equities_data.
+
+loader:
+  class: "CSVLoader"
+  module: "loader.csv_loader"
+  file_path: "contract_tiingo.csv"
+
+inserter:
+  class: "OhlcvRepository"
+  module: "repository.ohlcv_repository"
+
+fetcher:
+  class: "TiingoFetcher"
+  module: "fetcher.tiingo_fetcher"
+
+cleaner:
+  class: "TiingoCleaner"
+  module: "cleaner.tiingo_cleaner"
+
+provider:
+  name: "tiingo"
+  asset: "EQUITY"
+
+# Equities live in new_algo_data alongside corporate_action / the Sharadar
+# tables. Table names follow the cross-repo contract
+# {asset_class}_data.ohlcv_{freq}[_raw]. The tables are created out-of-band.
+database:
+  db_name: "new_algo_data"
+  target_schema: "equities_data"
+  raw_table: "ohlcv_1d_raw"
+  table: "ohlcv_1d"
+
+# Tiingo's endDate is INCLUSIVE. Blank start_date -> only the days after the
+# latest row in equities_data.ohlcv_1d; blank end_date -> yesterday.
+# seed_start_date is used only on the very first run, when the table is empty.
+time_range:
+  start_date: ""
+  end_date: ""
+  seed_start_date: "2026-01-01"
+
+# Options to handle missing data
+missing_data:
+  forward_fill: "False"
+  backward_fill: "False"
+  interpolate: "False"
+  drop_nan: "True"
+  zero_fill: "False"
+  mean_fill: "False"
+  median_fill: "False"
+  custom_fill: "False"
+  custom_value: "0"
+
+# Logging options
+logging:
+  level: "INFO"
+
+batch_downloading:
+  batch: False
+  unit: "Daily"
+  max_units: 30

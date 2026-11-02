@@ -1,7 +1,7 @@
 // tests/live/test_sleeve_risk_module_failure.cpp
 //
-// T-7b-2 C10b (HD 2026-09-24 ruling 18): a SLEEVE-scope risk module that cannot answer refuses
-// its sleeve, as the portfolio rule (T-7a C5, HD 2026-09-21 option b) does for the book. The
+// A SLEEVE-scope risk module that cannot answer refuses its sleeve, as the portfolio rule does
+// for the book. The
 // PortfolioManager holds that sleeve at its seeded T-1 book (no order for it) while the other
 // sleeves trade; the live futures runners see it through sleeve_risk_module_failure(), log an
 // ERROR, mark today's live_run_metadata row (risk_refusal, scope "sleeve") unless a portfolio
@@ -29,7 +29,6 @@
 #include "../core/test_base.hpp"
 #include "../data/test_db_utils.hpp"
 #include "../risk/risk_module_test_helpers.hpp"
-#include "trade_ngin/core/email_sender.hpp"
 #include "trade_ngin/core/logger.hpp"
 #include "trade_ngin/live/risk_module_failure.hpp"
 #include "trade_ngin/live/run_metadata_marks.hpp"
@@ -212,7 +211,7 @@ protected:
 
     /// BASE's shape: two sleeves, the module on TF only. Day 1 healthy (TF 2 lots, FAST 1), day 2
     /// the module throws while TF asks 5 and FAST asks 3. Both sleeves seeded as the runners seed
-    /// them (T-7a C3). Returns day 2's stdout.
+    /// them. Returns day 2's stdout.
     std::string run_two_days() {
         static int n = 0;
         pm_ = std::make_unique<PortfolioManager>(base_config(), "PM_SRMF_" + std::to_string(++n));
@@ -310,14 +309,8 @@ TEST_F(SleeveRiskModuleFailureTest, TheEmailFlagNamesTheSleeveAndSaysTheOthersTr
     run_two_days();
     const auto failure = sleeve_risk_module_failure(pm_->last_risk_decisions());
     ASSERT_TRUE(failure.has_value());
-    EmailSender sender{EmailSenderConfig{}};
-    const std::string body = sender.generate_trading_report_body(
-        StrategyPositionsMap{}, std::unordered_map<std::string, Position>{}, std::nullopt, {},
-        StrategyExecutionsMap{}, "2026-05-01", "BASE_PORTFOLIO");
-    const std::string flagged = flag_email_body_for_risk_module_failure(body, *failure);
-    EXPECT_EQ(risk_module_failure_email_subject("Daily Trading Report - 2026-05-01"),
-              "[RISK MODULE FAILED - BOOK HELD] Daily Trading Report - 2026-05-01");
-    EXPECT_NE(flagged.find(std::string("the sleeve risk module sleeve_cutter could not evaluate "
+    const std::string flagged = risk_module_failure_text(*failure);
+    EXPECT_NE(flagged.find(std::string("The sleeve risk module sleeve_cutter could not evaluate "
                                        "sleeve TF's book (") +
                            kInjected +
                            "). That sleeve is held at the previous day's positions and sent no "
@@ -346,7 +339,7 @@ TEST(SleeveRiskModuleFailureSource, BothTwinsFlagMarkAndExitOnASleeveFailure) {
         EXPECT_LT(sleeve_detect, error_check)
             << "read before the error check, so an unseeded sleeve's failure (exit 1) is logged";
         const std::string block =
-            between(src, "            // T-7b-2 C10b (HD 2026-09-24 ruling 18)",
+            between(src, "            // SLEEVE RISK MODULE FAILURE",
                     "            if (port_process_result.is_error())");
         ASSERT_FALSE(block.empty());
         EXPECT_NE(block.find("if (!risk_module_failure) {"), npos);
@@ -357,9 +350,11 @@ TEST(SleeveRiskModuleFailureSource, BothTwinsFlagMarkAndExitOnASleeveFailure) {
         EXPECT_NE(block.find("mark_risk_refusal(portfolio_config_json, *risk_module_failure,"),
                   npos);
         // The exit code and the email flag are the portfolio rule's, driven by the same variable.
-        EXPECT_NE(src.find("return live_run_exit_code(risk_module_failure);"), npos);
-        EXPECT_NE(src.find("subject = risk_module_failure_email_subject(subject);"), npos);
+        EXPECT_NE(src.find("return live::futures_run_exit_code(risk_module_failure, email_failed);"),
+                  npos);
+        EXPECT_NE(src.find("mail.alert = risk_module_failure_text(*risk_module_failure);"), npos)
+            << "the failure is handed to the report module as its alert";
         blocks[i++] = block;
     }
-    EXPECT_EQ(blocks[0], blocks[1]) << "the twins' C10b blocks differ";
+    EXPECT_EQ(blocks[0], blocks[1]) << "the twins' blocks differ";
 }

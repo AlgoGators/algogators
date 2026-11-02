@@ -1,9 +1,9 @@
-// T-7b-2 C9a (T-VOL C4): the DELIVERED cut beside the requested one.
+// The DELIVERED cut beside the requested one.
 //
 // RISK_SCALE_REPORT prints the gate's request (applied_cumulative, the product of the factors the
 // loop multiplied the book by). What reaches the stored book is not that: lap 2's buffer can
-// refuse a cut contract back and the rounding moves whole contracts (T-VOL section 3.2: 0.747 of
-// the lap-1 book in notional on cut days against a 0.870 request). RISK_DELIVERED puts, beside
+// refuse a cut contract back and the rounding moves whole contracts (a book can keep 0.747 of the
+// lap-1 book in notional on cut days against a 0.870 request). RISK_DELIVERED puts, beside
 // the request, the stored book's gross notional over the lap-1 optimizer book's, both valued at
 // one notional per contract per symbol. These tests pin: the line's text and its `na` cases
 // (pure functions), the PortfolioManager's measurement on real rebalances (a cut, a refusal that
@@ -315,11 +315,11 @@ TEST_F(DeliveredCutPmTest, TheNotionalIsTheTrendStrategysOwnElseTheManagersClose
     EXPECT_EQ(npc.count("ZZD"), 0u) << "no price anywhere: unpriced";
 }
 
-// ---- T-7b-2 C9a3: final_gross measures the book the runner STORES (after its BOOK_GATE hold) -------
+// ---- final_gross measures the book the runner STORES (after its BOOK_GATE hold) ----------------------
 //
 // The live futures runners hold a symbol whose T-1 verdict is not SESSION at its stored T-1 quantity AFTER
 // process_market_data returns (hold_non_session_symbols), so the PM's own final book is not what they store on
-// a feed-hole day (futchain 2026-04-24: the PM ships MYM 2, the runner stores MYM 1). The runners now pass the
+// a feed-hole day (2026-04-24: the PM ships MYM 2, the runner stores MYM 1). The runners pass the
 // account book they store; the lap-1 book and the notionals stay the PM's measurement of the same rebalance.
 
 // The account book of per-strategy books: per symbol, the sum of every sleeve's contracts.
@@ -360,6 +360,22 @@ TEST_F(DeliveredCutPmTest, FinalGrossMeasuresTheStoredBookAfterTheRunnersHold) {
     const DeliveredCut same = pm_->delivered_cut_for_book({{"ZZA", 5.0}});
     EXPECT_EQ(same.final_gross, pm_->last_delivered_cut().final_gross);
     EXPECT_EQ(same.lap1_gross, pm_->last_delivered_cut().lap1_gross);
+}
+
+// A runner that stores one sleeve as a flat list of rows (the equity runner) hands those
+// rows over the same way. The PM's final book is 5 lots (495); the runner stores 7 and a closed row.
+TEST_F(DeliveredCutPmTest, AFlatListOfStoredRowsIsMeasuredAsTheStoredBook) {
+    make_pm({{{"ZZA", make_pos("ZZA", 10.0, 100.0)}}},
+            {std::make_shared<ConstantScaleRiskModule>("cut", 0.5)});
+    ASSERT_TRUE(pm_->process_market_data({make_bar("ZZA", 1, 100.0), make_bar("ZZA", 2, 102.0),
+                                          make_bar("ZZA", 3, 99.0), make_bar("ZZB", 3, 20.0)})
+                    .is_ok());
+    const std::vector<Position> stored = {make_pos("ZZA", 7.0, 100.0), make_pos("ZZB", 0.0, 0.0)};
+    const DeliveredCut d = pm_->delivered_cut_for_book(account_book_of_rows(stored));
+    EXPECT_EQ(d.lap1_gross, 990.0);
+    EXPECT_EQ(d.final_gross, 693.0) << "the stored rows, not the PM's own final book (495)";
+    EXPECT_EQ(d.unpriced, 0);
+    EXPECT_NE(d.final_gross, pm_->last_delivered_cut().final_gross);
 }
 
 // No measurement (no process_market_data call reached its end): the stored book changes nothing, every figure na.

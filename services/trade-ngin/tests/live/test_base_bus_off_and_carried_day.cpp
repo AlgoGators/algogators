@@ -1,17 +1,17 @@
 // tests/live/test_base_bus_off_and_carried_day.cpp
 //
-// T-7a commit 3b (T-BASE B1, HD 2026-09-18 §28c item 3 and the Sunday positions CSV).
+// The BASE runner's bus-off bar load, and the positions file of a day with no session.
 //
-// 1. The BASE runner (apps/strategies/live_portfolio.cpp) loaded its 730-day bar window with the
-//    MarketDataBus ON. PostgresDatabase::get_market_data publishes every row it reads as a BAR
+// 1. The BASE runner (apps/strategies/live_portfolio.cpp) loads its 730-day bar window with the
+//    MarketDataBus OFF. PostgresDatabase::get_market_data publishes every row it reads as a BAR
 //    event and the PortfolioManager subscribes to BAR with a full process_market_data per event,
-//    so each BASE run day was ~21,000 one-bar optimise-and-risk rebalances (execution generation
-//    on, Sundays included) before the runner's own call (T-BASE §3.1). The CONSERVATIVE twin has
-//    always disabled the bus around the load and around its direct call; BASE now carries the
-//    same two guards, byte for byte. The PM then gets exactly one rebalance a day: the runner's.
-// 2. With the replay gone, a day with no session (the previous day a Saturday or a holiday) feeds
-//    the strategies nothing, so their forecasts, volatilities and EMAs are empty that day. HD
-//    (2026-09-18): the per-strategy positions file keeps the real details, held quantities, last
+//    so with the bus on each BASE run day would be ~21,000 one-bar optimise-and-risk rebalances
+//    (execution generation on, Sundays included) before the runner's own call. Both twins
+//    disable the bus around the load and around the direct call, with the same two guards,
+//    byte for byte. The PM then gets exactly one rebalance a day: the runner's.
+// 2. A day with no session (the previous day a Saturday or a holiday) feeds the strategies
+//    nothing, so their forecasts, volatilities and EMAs are empty that day. The per-strategy
+//    positions file keeps the real details, held quantities, last
 //    marks and the last computed forecasts from the previous session, with a note that no session
 //    occurred and the values are carried, not computed. Never empty rows. Both twins.
 //
@@ -134,7 +134,7 @@ TEST(BaseBusOffSource, TheBaseLoadIsBracketedByTheSameGuardAsConservative) {
     EXPECT_EQ(base_load, cons_load)
         << "the BASE bar load is not bracketed by CONSERVATIVE's guard: every loaded row is "
            "published as a BAR event and the PortfolioManager runs a full rebalance per row "
-           "(T-BASE: 21,972 rebalances on 2026-04-24)";
+           "(21,972 rebalances on 2026-04-24)";
 
     const auto off = base_load.find("MarketDataBus::instance().set_publish_enabled(false);");
     const auto load = base_load.find("db->get_market_data(");
@@ -151,7 +151,7 @@ TEST(BaseBusOffSource, TheBaseDirectCallIsBracketedByTheSameGuardAsConservative)
     if (base.empty() || cons.empty()) GTEST_SKIP() << "runner source not found";
     const std::string from =
         "            INFO(\"Processing data through portfolio manager (optimization + risk)...\");";
-    const std::string to = "            // T-RISK-ARCH Q2 (ruled yes)";
+    const std::string to = "            // PORTFOLIO RISK REFUSE";
     const std::string base_call = between(base, from, to);
     const std::string cons_call = between(cons, from, to);
     ASSERT_FALSE(cons_call.empty());
@@ -168,7 +168,7 @@ TEST(BaseBusOffSource, TheBaseDirectCallIsBracketedByTheSameGuardAsConservative)
     for (auto at = base.find("db->get_market_data("); at != npos;
          at = base.find("db->get_market_data(", at + 1))
         ++loads;
-    // Two loads since T-ROLLX-FIX commit 4 (N-2): the window, and the session classifier's history
+    // Two loads: the window, and the session classifier's history
     // before it. Each is bracketed by the bus-off guard.
     EXPECT_EQ(loads, 2u) << "every bar load in the runner must sit inside the guard";
     for (auto at = base.find("db->get_market_data("); at != npos;
@@ -287,7 +287,7 @@ TEST_F(BusFixture, WithTheGuardThePmGetsExactlyOneRebalanceTheRunnersDirectCall)
     EXPECT_EQ(s->calls_, 1u) << "the PM must rebalance exactly once: the runner's direct call";
     EXPECT_EQ(s->bars_, all_bars.size());
 
-    // The unguarded sequence (the BASE runner before this commit): one rebalance per row, then one.
+    // The unguarded sequence (the bus left on): one rebalance per row, then one.
     s->calls_ = 0;
     for (const auto& e : events) MarketDataBus::instance().publish(e);
     ASSERT_TRUE(pm_->process_market_data(all_bars).is_ok());
@@ -387,10 +387,22 @@ TEST_F(CarriedFileTest, ASundayFileCarriesHeldQuantitiesLastMarksAndLastForecast
     ASSERT_GE(lines.size(), 3u);
 
     // The note: no session, carried, not computed.
-    EXPECT_EQ(lines[0].rfind("# Portfolio Value: 502843.64", 0), 0u);
+    EXPECT_EQ(lines[0].rfind("# Portfolio Value (as written: today's costs booked): 502843.64", 0),
+              0u)
+        << lines[0];
     EXPECT_EQ(lines[1].rfind("# NO SESSION: no session on 2026-04-25 (a Saturday).", 0), 0u)
         << "the file does not say that no session occurred: " << lines[1];
     EXPECT_NE(lines[1].find("CARRIED, not computed"), npos);
+    // A stored forecast carries the date of the run that wrote it; that run read the bars through
+    // the day before. The note says so, and the column is named for what it holds.
+    EXPECT_NE(lines[1].find("computed by the run of 2026-04-25 from bars through 2026-04-24"), npos)
+        << lines[1];
+    EXPECT_NE(lines[1].find("sizing_vol and the EMAs are not stored"), npos) << lines[1];
+    EXPECT_EQ(lines[1].find("forecast_from"), npos) << lines[1];
+    const auto names = split_csv(lines[2]);
+    ASSERT_EQ(names.size(), 15u) << lines[2];
+    EXPECT_EQ(names[8], "sizing_vol");
+    EXPECT_EQ(names[14], "forecast_run_date");
 
     // The rows: one per (sleeve, symbol the sleeve holds or last forecast), each with its real
     // quantity, its last mark and its own sleeve's last forecast.
@@ -403,12 +415,13 @@ TEST_F(CarriedFileTest, ASundayFileCarriesHeldQuantitiesLastMarksAndLastForecast
     EXPECT_EQ(rows.size(), 6u) << "two sleeves x three symbols";
     const auto& fast_c = rows.at({"Trend Following Fast", "ZC3C.v.0"});
     EXPECT_DOUBLE_EQ(std::stod(fast_c[2]), 1.0) << "held quantity";
-    EXPECT_DOUBLE_EQ(std::stod(fast_c[3]), 0.73325) << "last mark, not 0";
+    EXPECT_DOUBLE_EQ(std::stod(fast_c[3]), 0.7332) << "last mark, not 0, at the contract's four decimals";
     EXPECT_DOUBLE_EQ(std::stod(fast_c[4]), 73325.0) << "notional at the last mark";
     EXPECT_DOUBLE_EQ(std::stod(fast_c[7]), 4.25) << "FAST's own last forecast, not 0 and not TF's";
     EXPECT_EQ(fast_c[13], "2026-04-24");
     EXPECT_EQ(fast_c[14], "2026-04-25");
-    for (int col = 8; col <= 12; ++col) EXPECT_EQ(fast_c[col], "") << "volatility/EMAs not stored";
+    for (int col = 8; col <= 12; ++col)
+        EXPECT_EQ(fast_c[col], "") << "sizing_vol/EMAs not stored";
     const auto& tf_b = rows.at({"Trend Following", "ZC3B.v.0"});
     EXPECT_DOUBLE_EQ(std::stod(tf_b[2]), 0.0) << "not held: quantity 0";
     EXPECT_DOUBLE_EQ(std::stod(tf_b[3]), 77960.0) << "an unheld symbol still carries its last mark";
@@ -469,6 +482,42 @@ TEST(CarriedDaySource, BothTwinsWriteTheCarriedFileOnADayWithNoSession) {
     }
     ASSERT_EQ(blocks.size(), 2u);
     EXPECT_EQ(blocks[0], blocks[1]) << "the twins' positions-file blocks must be byte-identical";
+}
+
+// The runner's log line for a sleeve's carried forecasts says, as the carried file does, which
+// run computed them and the last bar date that run read. The stored date is a run date: the
+// line does not end with "from 2026-05-02" alone, which would read as the date of the bars.
+TEST(CarriedForecastsLogLine, NamesTheRunAndTheLastBarDateItReadAsTheCarriedFileDoes) {
+    EXPECT_EQ(carried_forecasts_log_line("TREND_FOLLOWING", 36, "2026-05-02"),
+              "Carried forecasts for TREND_FOLLOWING: 36 computed by the run of 2026-05-02 from "
+              "bars through 2026-05-01");
+    EXPECT_EQ(carried_forecasts_log_line("TREND_FOLLOWING_FAST", 36, "2026-01-01"),
+              "Carried forecasts for TREND_FOLLOWING_FAST: 36 computed by the run of 2026-01-01 "
+              "from bars through 2025-12-31");
+    // The words are the carried file's own.
+    EXPECT_NE(
+        carried_forecasts_log_line("S", 1, "2026-05-02").find(carried_forecast_label("2026-05-02")),
+        npos);
+}
+
+TEST(CarriedForecastsLogLine, ASleeveWithNoStoredSessionSaysSo) {
+    EXPECT_EQ(carried_forecasts_log_line("TREND_FOLLOWING", 0, ""),
+              "Carried forecasts for TREND_FOLLOWING: 0 (no stored session)");
+}
+
+// READS SOURCE (a labelled wiring and twin guard; the line itself is executed above).
+TEST(CarriedForecastsLogLineTwinSourceGuard, BothFuturesRunnersLogTheLineThroughItsFunction) {
+    for (const char* runner : kFuturesRunners) {
+        SCOPED_TRACE(runner);
+        const std::string src = read_source(runner);
+        if (src.empty())
+            GTEST_SKIP() << "runner source not found";
+        EXPECT_NE(src.find("INFO(trade_ngin::carried_forecasts_log_line(\n"
+                           "                    strategy_name, carried.value().forecasts.size(), "
+                           "carried.value().session_date));"),
+                  npos);
+        EXPECT_EQ(src.find("INFO(\"Carried forecasts for \""), npos);
+    }
 }
 
 // =============================================================================================

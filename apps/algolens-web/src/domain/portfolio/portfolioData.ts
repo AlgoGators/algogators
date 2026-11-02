@@ -1,0 +1,120 @@
+import type { PositionBook } from './bookLabel';
+
+export interface Position {
+  symbol: string;
+  name: string;
+  shares: number;
+  costBasis: number;
+  currentValue: number;
+  quantity?: number;
+  marketPrice?: number;
+  notional?: number;
+  percentOfTotal?: number;
+}
+
+export interface Execution {
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  quantity: number;
+  price: number;
+  notional: number;
+  commission: number;
+  date?: string;
+}
+
+export interface FinalizedPosition {
+  symbol: string;
+  quantity: number;
+  entryPrice: number;
+  exitPrice: number;
+  realizedPnL: number;
+}
+
+export interface StrategyMetrics {
+  volatility: number;
+  sharpeRatio: number;
+  maxDrawdown: number;
+  winRate: number;
+  totalTrades: number;
+  avgWin: number;
+  avgLoss: number;
+  profitFactor: number;
+  dailyReturn: number;
+  cumulativeReturn: number;
+  annualizedReturn: number;
+  grossLeverage: number;
+  netLeverage: number;
+  portfolioLeverage: number;
+  marginPosted: number;
+  equityToMarginRatio: number;
+  marginCushion: number;
+  totalNotional: number;
+  unrealizedPnL: number;
+  realizedPnL: number;
+  totalCommissions: number;
+  netPnL: number;
+  cashAvailable: number;
+  currentPortfolioValue: number;
+}
+
+export interface HistoricalDataPoint {
+  date: string;
+  value: number;
+}
+
+export interface Strategy {
+  id: string;
+  name: string;
+  description: string;
+  invested: number;
+  currentValue: number;
+  return: number;
+  returnPercent: number;
+  positions: Position[];
+  historicalData: HistoricalDataPoint[];
+  /**
+   * Equity curve per portfolio stream, keyed by stream name:
+   *   qt        what QT actually decided -- the real book
+   *   system    what the algorithm said today, given the real book
+   *   benchmark what the algorithm would have compounded to untouched
+   *
+   * Absent until the dual-portfolio migration has run, so always guard on it.
+   */
+  equityByStream?: Record<string, HistoricalDataPoint[]>;
+  bestDay: number;
+  worstDay: number;
+  metrics: StrategyMetrics;
+  executions: Execution[];
+  finalizedPositions: FinalizedPosition[];
+  managers: string[];
+  lastUpdate: string;
+  /**
+   * Position book the positions and headline curve were read from. Absent on
+   * older API versions, so always guard on it.
+   */
+  book?: PositionBook;
+  /** True when the default QT book had no rows and the system book was served. */
+  fellBack?: boolean;
+  /** Set by the portfolio-id endpoint (/portfolio/portfolios/<id>). */
+  portfolioId?: string;
+  /** D-20: the portfolio's strategies (sleeves) on its latest day, with the symbols each holds. */
+  strategies?: { name: string; positions: number }[];
+  portfolioGroup?: string | null;
+  assetClass?: 'futures' | 'equity';
+  /** desk_editable and futures (ruling 13). */
+  deskEditable?: boolean;
+  /**
+   * Whether the book counts in the fund's total (fundTotals.ts). False for the
+   * QT desk book and its model twin. Absent on older API versions: counted.
+   */
+  inFundTotal?: boolean;
+}
+
+export interface PortfolioData {
+  totalValue: number;
+  totalInvested: number;
+  totalReturn: number;
+  totalReturnPercent: number;
+  strategies: Strategy[];
+  historicalData: HistoricalDataPoint[];
+}
