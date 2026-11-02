@@ -206,8 +206,14 @@ jobs:
           $env:CMAKE_GENERATOR_PLATFORM = "x64"
           $toolchain = "$($env:VCPKG_INSTALLATION_ROOT -replace '\\','/')/scripts/buildsystems/vcpkg.cmake"
           $env:CMAKE_ARGS = "-DCMAKE_TOOLCHAIN_FILE=$toolchain -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_MANIFEST_MODE=OFF -DPython_FIND_REGISTRY=NEVER -DPython_INCLUDE_DIR=$($include -replace '\\','/') -DPython_LIBRARY=$($base -replace '\\','/')/libs/python$v.lib"
+          # A fixed build directory, not scikit-build's temporary one: MSVC's mspdbsrv can still
+          # hold files in it when the build ends, and on Python 3.10 and 3.11 the temporary
+          # directory's cleanup then recurses until it fails the build (3.12 and later cope).
+          $env:SKBUILD_BUILD_DIR = "$env:RUNNER_TEMP\skbuild"
           python -m pip wheel . --no-deps -w "$env:GITHUB_WORKSPACE\raw" -v
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rc = $LASTEXITCODE
+          Stop-Process -Name mspdbsrv -Force -ErrorAction SilentlyContinue
+          if ($rc -ne 0) { exit $rc }
           Get-ChildItem "$env:GITHUB_WORKSPACE\raw\*.whl" | ForEach-Object {
             python -m delvewheel repair --add-path "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin" -w "$env:GITHUB_WORKSPACE\out" $_.FullName
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
