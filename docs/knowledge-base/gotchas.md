@@ -16,7 +16,7 @@ Traps that have already cost time here, with the fix. Add one when something sur
 - **Tests write fixed files in the working directory** (`test_config.json`, `test_logs/`), so the
   suite must run serially.
 - **The engine refuses a config it does not understand**, at load, on the box. A schema change in a
-  PR needs the box's configs updated in the same rollout (decisions.md, 2026-11-01).
+  PR needs the box's configs updated in the same rollout ([decision 0006](decisions/0006-risk-config-schema-2.md)).
 
 ## GitHub
 
@@ -44,5 +44,5 @@ Traps that have already cost time here, with the fix. Add one when something sur
   engine-rpc's compose file has the default name.
 - **`prod` is shared** by three deploys. Fast-forward it to a commit of `main`; never push other
   work to it.
-- **A missed e-mail day is never sent late by design** (decisions.md). Look for `missed_send` and
+- **A missed e-mail day is never sent late by design** ([decision 0002](decisions/0002-qt-day-and-missed-sends.md)). Look for `missed_send` and
   `send_failed` in the logs before assuming the scheduler is broken.

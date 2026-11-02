@@ -6,11 +6,23 @@ have already cost someone time. Start here, then read the page for your task.
 
 | Page | Read it when |
 |---|---|
-| [decisions.md](decisions.md) | before proposing a change to something that looks odd: it is often a decision |
+| [decisions/](decisions/README.md) | before proposing a change to something that looks odd: it is often a decision |
 | [operations.md](operations.md) | before touching production, a deploy, the daily e-mail or the database |
 | [where-things-live.md](where-things-live.md) | looking for code, an issue, a workflow, a config or a page |
-| [people.md](people.md) | deciding who to ask, who rules on what, or who owns an area |
+| [people.md](people.md) | deciding who to ask, or who works on an area |
 | [gotchas.md](gotchas.md) | before scripting against GitHub, CI or the box, and when something fails oddly |
+
+One page per area of the repository, for working inside it:
+
+| Area | Covers |
+|---|---|
+| [trade-ngin](areas/trade-ngin.md) | the engine: books, strategies, risk, data in and out, building and testing |
+| [data-ngin](areas/data-ngin.md) | the market-data pipelines (Airflow), their schedule, tables and deploy |
+| [AlgoLens](areas/algolens.md) | the web app and research-api: the QT desk, auth, how it talks to the engine |
+| [website](areas/website.md) | algogators.com: content, build, Pages and releases |
+| [CI and deploys](areas/ci-and-deploys.md) | the workflow system, path filters, releases, `prod`, security scans |
+| [libraries and research](areas/libraries-and-research.md) | algosystem, research-core, predict-ngin, algoterminal |
+| [platform](areas/platform.md) | contracts, configs, the database package, the workspaces and `just` recipes |
 
 ## Rules that are never optional
 
@@ -32,6 +44,9 @@ These pages are only useful while they are right.
 - Every entry carries a date and a source: a PR, an issue, a commit or a file. Check the source
   before relying on an entry; the code wins when they disagree, and then fix the entry.
 - Change a page in the same PR as the change that makes it wrong.
-- Add a decision to `decisions.md` when a PR or an issue settles a question someone will ask again.
-  Do not rewrite an old decision: add a new dated one that supersedes it and say so in the old one.
+- Each area page starts with a `LAST UPDATED` date and the commit of `main` it was checked
+  against. When you check or edit a page, update both. To see what changed since, run
+  `git log --oneline <commit>..main -- <the area's paths>`.
+- Add a decision record to `decisions/` (copy `decisions/template.md`) when a PR or an issue
+  settles a question someone will ask again. Never rewrite one: a new record supersedes it.
 - Keep pages short. Link to the issue, PR or file that has the detail instead of copying it.

@@ -38,7 +38,7 @@ deploy run's log has it too. Re-running an earlier deploy run also works.
 
 **After a deploy**, read the next catch-up pass in the logs. A config the new engine refuses shows
 as `Failed to load configuration` on every model run and send (it happened on 2026-11-01; see
-decisions.md, "Risk config schema 2").
+[decision 0006](decisions/0006-risk-config-schema-2.md)).
 
 ## Checks that run by themselves
 
