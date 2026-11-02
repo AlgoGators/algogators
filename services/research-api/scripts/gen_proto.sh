@@ -1,11 +1,11 @@
 #!/usr/bin/env sh
 # Regenerate the Python stubs of the engine's gRPC APIs.
 #
-#   proto/algogators/*.proto  (vendored from trade-ngin at the commit in proto/algogators/SOURCE;
-#                              scripts/sync_protos.sh fetches and checks them)
+#   proto/algogators/*.proto  (copied from services/trade-ngin; the commit is in proto/algogators/SOURCE;
+#                              scripts/sync_protos.sh copies and checks them)
 #   -> algogators/<api>_pb2.py, algogators/<api>_pb2_grpc.py
 #   -> algogators/versions.py  (API_VERSIONS, parsed from each .proto's version header by
-#                              scripts/gen_versions.py, also vendored from trade-ngin)
+#                              scripts/gen_versions.py, also copied from services/trade-ngin)
 #
 # Needs grpcio-tools at the version pinned in requirements-dev.txt. CI runs this and fails
 # when the committed files differ from what it generates.
