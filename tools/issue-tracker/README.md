@@ -1,7 +1,12 @@
 # AlgoGators issue tracker
 
-One page listing every open issue and pull request across trade-ngin, algogators, algosystem and algogauge (AlgoLens
-is still read, though its issues now live in algogators).
+One page listing every open issue and pull request across algogators, algosystem and algogauge (AlgoLens is still
+read, though its issues now live in algogators). trade-ngin's open issues moved here on 2026-11-02 and the repository is
+archived; its open regime pull requests continue here as the `trade-ngin-pr/*` branches.
+
+The published page: **https://algogators.github.io/issue-tracker/**, rebuilt every hour by the
+[AlgoGators/issue-tracker](https://github.com/AlgoGators/issue-tracker) repository's `publish` workflow, which runs
+this script. To update it now, run that workflow (Actions → publish → Run workflow).
 
 GitHub is the source. The script reads issues, pull requests, labels, assignees, "Blocked by" links and the latest
 comment that starts with `Status:`, and writes one HTML file. It writes nothing to GitHub.
@@ -20,8 +25,9 @@ The build prints the lists that need attention: issues with no priority label, n
 `Status:` comment, issues missing from the order list, issues marked Blocked whose blockers are all closed, and new pull
 requests with no disposition. `UPDATING.md` says how to handle each.
 
-Where the built page is published for the team is still open: this repository's Pages site serves algogators.com, so it
-cannot also serve the tracker. It is a box on the migration checklist issue.
+This repository's Pages site serves algogators.com, so the page is published from its own repository
+(AlgoGators/issue-tracker), which checks this one out and runs the script. A change here shows on the page at its next
+hourly build. Queries page through every issue and pull request, 100 at a time.
 
 ## Files
 
