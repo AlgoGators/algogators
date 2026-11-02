@@ -27,6 +27,6 @@ A run must say what its risk layer is: the engine has no default. Set `no_risk_r
 `no_risk_ruled_by` and `no_risk_ruled_on` on the `BacktestRunConfig` for a run with none.
 
 See `examples/yfinance_backtest.py` in the source repository for a complete database-free run:
-https://github.com/AlgoGators/trade-ngin
+https://github.com/AlgoGators/algogators/tree/main/services/trade-ngin/examples
 
 Licensed under the GNU General Public License v3.
