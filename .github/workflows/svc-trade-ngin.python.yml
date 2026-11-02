@@ -1,0 +1,286 @@
+name: trade-ngin · python
+
+# The `tradengin` Python module (services/trade-ngin/python/, published to PyPI as `tradengin`).
+# Ported from trade-ngin's python-wheels.yml and python-wrapper.yml (#90). See
+# services/trade-ngin/python/packaging/README.md.
+#
+#   pull request / push to main   Linux wheel for one Python, tested in a clean interpreter: a
+#                                 change to the engine that breaks the module goes red here
+#   workflow_dispatch             every wheel (Linux and Windows, Python 3.10 to 3.13), tested
+#   tag tradengin/vX.Y.Z          the same, then upload to PyPI (the tag must match pyproject.toml)
+
+on:
+  push:
+    branches: [main]
+    tags: ['tradengin/v*']
+    paths:
+      - 'services/trade-ngin/python/**'
+      - 'services/trade-ngin/pyproject.toml'
+      - 'services/trade-ngin/src/api/**'
+      - 'services/trade-ngin/include/trade_ngin/api/**'
+      - 'services/trade-ngin/src/backtest/**'
+      - 'services/trade-ngin/include/trade_ngin/backtest/**'
+      - 'services/trade-ngin/src/data/market_data_source.cpp'
+      - 'services/trade-ngin/include/trade_ngin/data/market_data_source.hpp'
+      - 'services/trade-ngin/examples/**'
+      - 'services/trade-ngin/CMakeLists.txt'
+      - '.github/workflows/svc-trade-ngin.python.yml'
+  pull_request:
+    paths:
+      - 'services/trade-ngin/python/**'
+      - 'services/trade-ngin/pyproject.toml'
+      - 'services/trade-ngin/src/api/**'
+      - 'services/trade-ngin/include/trade_ngin/api/**'
+      - 'services/trade-ngin/src/backtest/**'
+      - 'services/trade-ngin/include/trade_ngin/backtest/**'
+      - 'services/trade-ngin/src/data/market_data_source.cpp'
+      - 'services/trade-ngin/include/trade_ngin/data/market_data_source.hpp'
+      - 'services/trade-ngin/examples/**'
+      - 'services/trade-ngin/CMakeLists.txt'
+      - '.github/workflows/svc-trade-ngin.python.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: svc-trade-ngin-python-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TN: services/trade-ngin
+
+jobs:
+  # Which wheels: one Linux wheel to check a change, all of them for a release or a dispatch.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      full: ${{ steps.p.outputs.full }}
+      pytags: ${{ steps.p.outputs.pytags }}
+      pythons: ${{ steps.p.outputs.pythons }}
+    steps:
+      - id: p
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || [[ "$GITHUB_REF" == refs/tags/tradengin/v* ]]; then
+            echo "full=true" >> "$GITHUB_OUTPUT"
+            echo "pytags=cp310-cp310 cp311-cp311 cp312-cp312 cp313-cp313" >> "$GITHUB_OUTPUT"
+            echo 'pythons=["3.10","3.11","3.12","3.13"]' >> "$GITHUB_OUTPUT"
+          else
+            echo "full=false" >> "$GITHUB_OUTPUT"
+            echo "pytags=cp312-cp312" >> "$GITHUB_OUTPUT"
+            echo 'pythons=["3.12"]' >> "$GITHUB_OUTPUT"
+          fi
+
+  linux:
+    name: Linux wheels
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: true
+      - uses: docker/setup-buildx-action@v3
+      # Arrow, libpqxx, NLopt and Eigen built into a manylinux image, cached between runs.
+      - name: Build the manylinux image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.TN }}/python/packaging/manylinux
+          load: true
+          tags: tn-wheel:ci
+          cache-from: type=gha,scope=tn-wheel
+          cache-to: type=gha,mode=max,scope=tn-wheel
+      - name: Build and repair the wheels
+        env:
+          PYTAGS: ${{ needs.plan.outputs.pytags }}
+        run: |
+          mkdir -p out
+          docker run --rm -v "$PWD/$TN":/src -v "$PWD/out":/out -e PYTAGS \
+            tn-wheel:ci bash /src/python/packaging/manylinux/build_wheels.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux
+          path: out/*.whl
+          if-no-files-found: error
+      # The example the tests run, for the bare test container (it has no git to check out with).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: examples
+          path: ${{ env.TN }}/examples
+          if-no-files-found: error
+
+  test-linux:
+    name: Test on Linux (Python ${{ matrix.python }})
+    needs: [plan, linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # a bare interpreter: the wheel must bring every library it needs
+    container: python:${{ matrix.python }}-slim
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJSON(needs.plan.outputs.pythons) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: examples
+          path: examples
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-linux
+          path: wheels
+      - name: Install into the clean interpreter and run the example
+        run: |
+          tag="cp$(echo '${{ matrix.python }}' | tr -d .)"
+          pip install pandas "wheels/tradengin-"*"-${tag}-${tag}-"*.whl
+          cd /tmp
+          python -c "import tradengin; print('import ok', tradengin.__file__)"
+          python "$GITHUB_WORKSPACE/examples/yfinance_backtest.py" --synthetic | tee run.txt
+          grep -q "Total trades: 4" run.txt
+          grep -q "Total return: 13.76%" run.txt
+
+  windows-deps:
+    name: Windows dependencies
+    needs: plan
+    if: needs.plan.outputs.full == 'true'
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Restore the vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-win-${{ hashFiles('services/trade-ngin/python/packaging/windows/vcpkg-packages.txt') }}
+      - name: Install the libraries
+        shell: pwsh
+        run: |
+          $pkgs = Get-Content "$env:TN/python/packaging/windows/vcpkg-packages.txt" | Where-Object { $_ } | ForEach-Object { "${_}:x64-windows" }
+          # Outside the checkout: the repository root's vcpkg.json would put vcpkg in manifest mode.
+          Set-Location $env:RUNNER_TEMP
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install @pkgs --clean-after-build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  windows:
+    name: Windows wheel (Python ${{ matrix.python }})
+    needs: [plan, windows-deps]
+    runs-on: windows-2022
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJSON(needs.plan.outputs.pythons) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Restore the vcpkg binary cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~\AppData\Local\vcpkg\archives
+          key: vcpkg-win-${{ hashFiles('services/trade-ngin/python/packaging/windows/vcpkg-packages.txt') }}
+      - name: Install the libraries (from the cache)
+        shell: pwsh
+        run: |
+          $pkgs = Get-Content "$env:TN/python/packaging/windows/vcpkg-packages.txt" | Where-Object { $_ } | ForEach-Object { "${_}:x64-windows" }
+          Set-Location $env:RUNNER_TEMP
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install @pkgs --clean-after-build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build the wheel
+        shell: pwsh
+        working-directory: ${{ env.TN }}
+        run: |
+          python -m pip install --upgrade pip wheel delvewheel
+          $include = python -c "import sysconfig; print(sysconfig.get_paths()['include'])"
+          $base = python -c "import sys; print(sys.base_prefix)"
+          $v = python -c "import sys; print('%d%d' % sys.version_info[:2])"
+          $env:CMAKE_GENERATOR = "Visual Studio 17 2022"
+          $env:CMAKE_GENERATOR_PLATFORM = "x64"
+          $toolchain = "$($env:VCPKG_INSTALLATION_ROOT -replace '\\','/')/scripts/buildsystems/vcpkg.cmake"
+          $env:CMAKE_ARGS = "-DCMAKE_TOOLCHAIN_FILE=$toolchain -DVCPKG_TARGET_TRIPLET=x64-windows -DVCPKG_MANIFEST_MODE=OFF -DPython_FIND_REGISTRY=NEVER -DPython_INCLUDE_DIR=$($include -replace '\\','/') -DPython_LIBRARY=$($base -replace '\\','/')/libs/python$v.lib"
+          python -m pip wheel . --no-deps -w "$env:GITHUB_WORKSPACE\raw" -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem "$env:GITHUB_WORKSPACE\raw\*.whl" | ForEach-Object {
+            python -m delvewheel repair --add-path "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin" -w "$env:GITHUB_WORKSPACE\out" $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.python }}
+          path: out/*.whl
+          if-no-files-found: error
+
+  test-windows:
+    name: Test on Windows (Python ${{ matrix.python }})
+    needs: [plan, windows]
+    runs-on: windows-2022
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJSON(needs.plan.outputs.pythons) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: services/trade-ngin/examples
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-windows-${{ matrix.python }}
+          path: wheels
+      - name: Install into a clean environment and run the example
+        shell: pwsh
+        run: |
+          python -m venv "$env:RUNNER_TEMP\clean"
+          $py = "$env:RUNNER_TEMP\clean\Scripts\python.exe"
+          & $py -m pip install pandas (Get-ChildItem wheels\*.whl).FullName
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $example = "$env:GITHUB_WORKSPACE\$env:TN\examples\yfinance_backtest.py"
+          Set-Location $env:RUNNER_TEMP
+          & $py -c "import tradengin; print('import ok', tradengin.__file__)"
+          $out = & $py $example --synthetic
+          $out
+          if (-not ($out -match "Total trades: 4")) { throw "unexpected trade count" }
+          if (-not ($out -match "Total return: 13.76%")) { throw "unexpected return" }
+
+  publish:
+    name: Publish to PyPI
+    if: startsWith(github.ref, 'refs/tags/tradengin/v')
+    needs: [test-linux, test-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: services/trade-ngin/pyproject.toml
+          sparse-checkout-cone-mode: false
+      - name: The tag must match pyproject.toml
+        run: |
+          version="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' "$TN/pyproject.toml")"
+          test "tradengin/v${version}" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != pyproject version tradengin/v${version}"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - run: ls -l dist
+      - name: Upload
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          # A re-run, or a platform added to a released version, skips the files PyPI holds.
+          skip-existing: true
+          password: ${{ secrets.PYPI_API_TOKEN }}

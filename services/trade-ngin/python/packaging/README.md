@@ -1,7 +1,9 @@
 # Building and publishing the `tradengin` wheels
 
-`.github/workflows/python-wheels.yml` builds the wheels, tests each in a clean environment and, on
-a version tag, uploads them to PyPI.
+`.github/workflows/svc-trade-ngin.python.yml` (at the mono repo's root) builds the wheels, tests each
+in a clean environment and, on a release tag, uploads them to PyPI. On a pull request or a push to
+`main` that touches the module, the engine API it binds or the examples, it builds and tests the
+Linux wheel for Python 3.12 only, so a change that breaks the module goes red there.
 
 | | Linux | Windows |
 |---|---|---|
@@ -18,21 +20,24 @@ same return and trade count on every platform.
 
 1. Change `version` in `pyproject.toml` (PyPI takes a file name once, so a changed wheel needs a
    new version) and merge.
-2. Push a tag `vX.Y.Z` that matches it. The workflow builds, tests and uploads; it refuses a tag
-   that does not match `pyproject.toml`.
+2. Push a tag `tradengin/vX.Y.Z` that matches it. The workflow builds, tests and uploads; it refuses
+   a tag that does not match `pyproject.toml`. (0.1.0 and 0.1.1 were released from the old
+   trade-ngin repository with tags `vX.Y.Z`.) `workflow_dispatch` builds and tests every wheel
+   without uploading.
 
 The upload skips files PyPI already holds, so a failed run can be re-run, and a platform added later
 joins an existing version. No sdist is published: the pybind11 submodule is not in one.
 
 ## Credentials
 
-The upload uses the `PYPI_API_TOKEN` repository secret (a token scoped to the `tradengin` project).
-PyPI "trusted publishing" would remove the stored token: add this repository and workflow under the
-project's Publishing settings on pypi.org, then drop `password:` from the publish step.
+The upload runs in the `pypi` environment and uses the `PYPI_API_TOKEN` repository secret (a token
+scoped to the `tradengin` project). PyPI "trusted publishing" would remove the stored token: add
+`AlgoGators/algogators`, workflow `svc-trade-ngin.python.yml`, environment `pypi` under the project's
+Publishing settings on pypi.org, then drop `password:` from the publish step.
 
 ## Building by hand
 
-Linux (Docker): `docker build -t tn-wheel python/packaging/manylinux` then
+From `services/trade-ngin/`. Linux (Docker): `docker build -t tn-wheel python/packaging/manylinux` then
 `docker run --rm -v "$PWD":/src -v "$PWD/out":/out -e PYTAGS="cp312-cp312" tn-wheel bash /src/python/packaging/manylinux/build_wheels.sh`.
 
 Windows: install the vcpkg packages in `windows/vcpkg-packages.txt` (triplet `x64-windows`), then

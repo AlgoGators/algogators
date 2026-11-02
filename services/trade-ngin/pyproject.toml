@@ -20,7 +20,7 @@ classifiers = [
 ]
 
 [project.urls]
-Source = "https://github.com/AlgoGators/trade-ngin"
+Source = "https://github.com/AlgoGators/algogators/tree/main/services/trade-ngin"
 
 [tool.scikit-build]
 cmake.version = ">=3.17"
