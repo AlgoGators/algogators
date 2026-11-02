@@ -24,6 +24,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Enable common compiler warnings
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wsign-compare)
+    # Imported pre-monorepo code: the CI presets pass -Werror, which this
+    # codebase does not yet satisfy. Ratchet by deleting this line.
+    add_compile_options(-Wno-error)
 endif()
 
 # Output directories
@@ -47,7 +50,11 @@ endif()
 # resolve @rpath next to the loading binary. Without this, the build picks up
 # whatever rpath leaks from the environment (e.g. an active conda env's lib
 # dir) and binaries fail to find libtrade_ngin.dylib at launch.
-set(CMAKE_BUILD_RPATH "@loader_path")
+# macOS only: on Linux "@loader_path" means nothing, and mold reads an argument starting with
+# "@" as a response file and fails the link.
+if(APPLE)
+    set(CMAKE_BUILD_RPATH "@loader_path")
+endif()
 set(CMAKE_BUILD_WITH_INSTALL_RPATH OFF)
 
 # Find packages
@@ -64,8 +71,13 @@ endif()
 find_package(nlohmann_json CONFIG REQUIRED)
 #set(Arrow_DIR "C:/vcpkg/installed/x64-windows/share/arrow")
 find_package(Arrow REQUIRED)
-#set(libpqxx_DIR "C:/vcpkg/installed/x64-windows/share/libpqxx")
-# find_package(libpqxx CONFIG REQUIRED)
+# vcpkg's default linux triplet builds Arrow static; Windows/mac dev setups
+# may have the shared target instead. Link whichever exists.
+if(TARGET Arrow::arrow_shared)
+    set(TRADE_NGIN_ARROW Arrow::arrow_shared)
+else()
+    set(TRADE_NGIN_ARROW Arrow::arrow_static)
+endif()
 find_package(Eigen3 REQUIRED)
 find_package(NLopt REQUIRED)
 
@@ -133,27 +145,19 @@ if(APPLE AND TARGET NLopt::nlopt)
     unset(_nlopt_fixed)
 endif()
 
-if(WIN32)
-    # vcpkg ships libpqxx's CMake config; there is no pkg-config on Windows.
-    find_package(libpqxx CONFIG REQUIRED)
-else()
-    # Try to find libpqxx via pkg-config (works with Homebrew)
+# vcpkg (the mono repo's CI, and Windows) ships libpqxx's CMake config; Homebrew
+# has only pkg-config. Use the config when there is one.
+find_package(libpqxx CONFIG QUIET)
+if(NOT TARGET libpqxx::pqxx)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(PQXX REQUIRED libpqxx)
-endif()
-
-# Find curl for email functionality
-find_package(CURL REQUIRED)
-
-if(NOT WIN32)
-add_library(libpqxx::pqxx UNKNOWN IMPORTED)
-set_target_properties(libpqxx::pqxx PROPERTIES
-    IMPORTED_LOCATION "${PQXX_LINK_LIBRARIES}"
-    INTERFACE_INCLUDE_DIRECTORIES "${PQXX_INCLUDE_DIRS}"
-    INTERFACE_LINK_LIBRARIES "${PQXX_LIBRARIES}"
-)
-
-link_directories(${PQXX_LIBRARY_DIRS})
+    add_library(libpqxx::pqxx UNKNOWN IMPORTED)
+    set_target_properties(libpqxx::pqxx PROPERTIES
+        IMPORTED_LOCATION "${PQXX_LINK_LIBRARIES}"
+        INTERFACE_INCLUDE_DIRECTORIES "${PQXX_INCLUDE_DIRS}"
+        INTERFACE_LINK_LIBRARIES "${PQXX_LIBRARIES}"
+    )
+    link_directories(${PQXX_LIBRARY_DIRS})
 endif()
 
 
@@ -168,8 +172,6 @@ set(TRADE_NGIN_SOURCES
     src/core/config_base.cpp
     src/core/config_loader.cpp
     src/core/logger.cpp
-    src/core/email_sender.cpp
-    src/core/chart_generator.cpp
     src/core/run_id_generator.cpp
     src/data/postgres_database.cpp
     src/data/postgres_database_extensions.cpp
@@ -183,6 +185,15 @@ set(TRADE_NGIN_SOURCES
     src/data/listing_dates.cpp
     src/data/market_data_source.cpp
     src/data/roll_series.cpp
+    src/data/roll_calendar.cpp
+    src/data/contract_bars.cpp
+    src/data/roll_cycle.cpp
+    src/data/carry_quote.cpp
+    src/data/contract_roll_rule.cpp
+    src/data/contract_rolls.cpp
+    src/data/per_contract_source.cpp
+    src/data/report_roll_view.cpp
+    src/live/report_roll_query.cpp
     src/instruments/futures.cpp
     src/instruments/equity.cpp
     src/instruments/option.cpp
@@ -219,6 +230,7 @@ set(TRADE_NGIN_SOURCES
     src/strategy/base_strategy.cpp
     src/strategy/trend_following.cpp
     src/strategy/trend_estimator.cpp
+    src/strategy/carry_estimator.cpp
     src/strategy/mean_reversion.cpp
     src/strategy/spread.cpp
     src/strategy/regime_detector.cpp
@@ -291,8 +303,7 @@ target_link_libraries(trade_ngin
     PUBLIC
         nlohmann_json::nlohmann_json
         libpqxx::pqxx
-        Arrow::arrow_shared
-        CURL::libcurl
+        ${TRADE_NGIN_ARROW}
         Eigen3::Eigen
         NLopt::nlopt
 )

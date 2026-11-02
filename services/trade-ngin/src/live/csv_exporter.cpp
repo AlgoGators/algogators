@@ -9,7 +9,6 @@
 #include <unordered_set>
 #include "trade_ngin/core/logger.hpp"
 #include "trade_ngin/core/report_price_text.hpp"
-#include "trade_ngin/live/account_detail.hpp"
 #include "trade_ngin/core/report_settled_marks.hpp"
 #include "trade_ngin/data/conversion_utils.hpp"
 #include "trade_ngin/data/database_interface.hpp"
@@ -22,9 +21,9 @@
 namespace trade_ngin {
 
 namespace {
-// HD 10-13, one number rule for the email and the files: a price has four decimals, or the decimals of
-// the contract's tick when four cannot show it (report_price_places); a futures quantity has two
-// decimals, a share quantity keeps six (rounding fractional shares loses the holding); money has two.
+// One number rule for the email and the files: a price has four decimals; a futures quantity has
+// two decimals, a share quantity keeps six (rounding fractional shares loses the holding); money
+// has two.
 std::shared_ptr<Instrument> csv_instrument_of(const std::string& symbol) {
     std::string lookup_sym = symbol;
     for (const char* suffix : {".v.", ".c."}) {
@@ -43,7 +42,7 @@ std::string csv_fixed(double value, int places) {
     return buf;
 }
 std::string csv_price(const std::string& symbol, double price) {
-    (void)symbol;  // HD 2026-10-14 (section 16.9): four decimals on every price, in the email and the files
+    (void)symbol;  // four decimals on every price, in the email and the files
     return csv_fixed(price, 4);
 }
 std::string csv_quantity(const std::string& symbol, double quantity) {
@@ -537,24 +536,6 @@ Result<std::string> CSVExporter::export_equity_settled(
     }
     file.close();
     INFO("CSVExporter: equity settled positions saved to " + filename);
-    return Result<std::string>(filename);
-}
-
-Result<std::string> CSVExporter::export_account_detail(
-    const std::string& portfolio_id, const std::string& date,
-    const std::vector<std::pair<std::string, std::string>>& columns) {
-    const std::string filename = output_directory_ + "account_detail_" + portfolio_id + "_" + date + ".csv";
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        return Result<std::string>(std::make_unique<TradeError>(
-            ErrorCode::FILE_IO_ERROR, "Failed to open file for writing: " + filename));
-    }
-    for (const auto& row : account_detail_rows(columns)) {
-        for (size_t i = 0; i < row.size(); ++i) file << (i ? "," : "") << row[i];
-        file << "\n";
-    }
-    file.close();
-    INFO("CSVExporter: account detail saved to " + filename);
     return Result<std::string>(filename);
 }
 

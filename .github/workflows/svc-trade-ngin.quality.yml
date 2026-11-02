@@ -1,0 +1,71 @@
+name: trade-ngin · quality
+
+on:
+  pull_request:
+    paths:
+      - 'services/trade-ngin/**'
+      - 'vcpkg.json'
+      - 'CMakePresets.json'
+      - '.github/workflows/_quality-cpp.yml'
+      - '.github/workflows/svc-trade-ngin.quality.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'services/trade-ngin/**'
+      - 'vcpkg.json'
+      - 'CMakePresets.json'
+      - '.github/workflows/_quality-cpp.yml'
+      - '.github/workflows/svc-trade-ngin.quality.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: svc-trade-ngin-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-cpp.yml
+    with:
+      path: services/trade-ngin
+      # Imported pre-monorepo code: one toolchain first; restore clang/msvc + sanitizers as the code is cleaned.
+      builds: '[{"preset":"ci-gcc13","os":"ubuntu-24.04"}]'
+      sanitizers: '[]'
+      run-clang-tidy: false
+      # 3,900+ pre-existing violations; reformat once the feature branches land.
+      run-clang-format: false
+    secrets: inherit
+
+  # The engine image of every main commit, tagged sha-<commit>. `prod` is a fast-forward of
+  # main, so svc-trade-ngin.deploy.yml finds this image and deploys it as is instead of building
+  # and testing the same commit again. Built alongside the tests rather than after them, which
+  # saves its 8 minutes: the deploy takes the image only when this whole run succeeded, so an
+  # image whose tests failed is pushed but never deployed.
+  image:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    uses: ./.github/workflows/_publish-container.yml
+    with:
+      path: services/trade-ngin
+      image: algogators/trade-ngin-engine
+      timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    secrets: inherit
+
+  gate:
+    name: svc-trade-ngin quality
+    if: always()
+    needs: [quality]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report result
+        run: |
+          if [ "${{ needs.quality.result }}" != "success" ]; then
+            echo "::error::quality result was ${{ needs.quality.result }}"
+            exit 1
+          fi

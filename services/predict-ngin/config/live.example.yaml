@@ -1,0 +1,17 @@
+# Copy to config/live.local.yaml (gitignored) to arm live trading. See docs/EXECUTION.md.
+# Live orders also need the environment variable PREDICT_NGIN_LIVE=1 and --live (or live=True) on the call.
+live:
+  enabled: false          # true to arm
+  venues: []              # e.g. [kalshi] or [kalshi, polymarket_us]
+kill: false               # true = no new orders anywhere (cancels still allowed); same as data/live/STOP
+limits:                   # all optional; unknown keys are an error. Defaults shown.
+  max_order_usd: 5
+  max_daily_usd: 25
+  max_market_usd: 10
+  max_open_orders: 5
+  max_contracts: 100
+  min_price: 0.01
+  max_price: 0.99
+  post_only_only: true
+  allow_sell: false
+  markets: []             # allowlist; empty = any market

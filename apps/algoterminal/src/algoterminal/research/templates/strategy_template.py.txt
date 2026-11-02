@@ -1,0 +1,47 @@
+"""Strategy scaffold for: {title}
+
+Thesis:
+    {thesis}
+
+Target universe: {universe} ({symbols})
+Expected edge: {expected_edge}
+
+This file was scaffolded by AlgoTerminal's Methodology stage. Fill in the
+three functions below — nothing here is generated or inferred for you.
+The Backtest stage calls them in order: generate_signals -> size_positions
+-> apply_risk_rules.
+"""
+
+from __future__ import annotations
+
+import pandas as pd
+
+
+def generate_signals(prices: pd.Series) -> pd.Series:
+    """Return a signal series aligned to `prices.index`.
+
+    Convention: +1 = long, -1 = short, 0 = flat. `prices` is the close
+    price series for the primary instrument in this hypothesis's universe.
+    """
+    # TODO: replace with your signal logic.
+    signal = pd.Series(0, index=prices.index, dtype=float)
+    return signal
+
+
+def size_positions(signal: pd.Series, prices: pd.Series) -> pd.Series:
+    """Turn a directional signal into a position size (e.g. fraction of capital).
+
+    Default: full size in the signal's direction. Override for vol-targeting,
+    Kelly sizing, or fixed-fractional schemes.
+    """
+    return signal.astype(float)
+
+
+def apply_risk_rules(positions: pd.Series, prices: pd.Series) -> pd.Series:
+    """Apply risk overlays (stop-loss, max position, max drawdown cutoff, ...).
+
+    Default: pass positions through unchanged. This is the stub the Backtest
+    stage expects you to fill in with real risk rules before trusting results.
+    """
+    # TODO: add stop-loss / exposure caps / drawdown circuit breakers here.
+    return positions

@@ -1,0 +1,35 @@
+name: research-core · publish
+
+on:
+  push:
+    tags: ['research-core/v*']
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-python.yml
+    with:
+      path: libs/research-core
+      runners: '["ubuntu-latest","windows-latest"]'
+      coverage-min: 85
+      build-check: true
+    secrets: inherit
+
+  publish:
+    needs: quality
+    uses: ./.github/workflows/_publish-pypi.yml
+    with:
+      path: libs/research-core
+      environment: pypi
+      dry-run: ${{ inputs.dry-run || false }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
