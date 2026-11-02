@@ -27,6 +27,7 @@ set(TEST_SOURCES
     data/test_db_utils.cpp
     data/test_utc_date_contract.cpp
     data/test_postgres_param_safety.cpp
+    data/test_postgres_validators.cpp
     data/test_finite_statement.cpp
     data/test_finite_statement_db.cpp
     instruments/test_equity_market_hours_exchange.cpp
