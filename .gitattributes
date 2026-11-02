@@ -31,3 +31,6 @@ package-lock.json linguist-generated=true -diff
 
 # Generated contract bindings: mark as generated so review focuses on the schema.
 platform/contracts/codegen/generated/** linguist-generated=true
+
+# The code graph (graphify): generated, collapsed in reviews, no text diff
+graphify-out/** linguist-generated=true -diff

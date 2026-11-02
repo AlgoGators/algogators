@@ -50,6 +50,7 @@ to something that looks odd: it is often a decision.
 | [0043](0043-migrations-without-an-applied-table.md) | Migrations keep no applied-state table; numbers are never reused | Accepted | 2026-10-21 |
 | [0044](0044-expirations-from-vendor-definitions.md) | Contract expirations come from vendor definitions, never a calendar guess | Accepted | 2026-10-25 |
 | [0045](0045-carry-shipped-switched-off.md) | Carry shipped switched off | Accepted | 2026-10-30 |
+| [0046](0046-code-graph-committed-and-refreshed-weekly.md) | The code graph is committed and refreshed weekly | Accepted | 2026-11-02 |
 
 ## Adding one
 
