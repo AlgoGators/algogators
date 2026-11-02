@@ -238,6 +238,7 @@ set(TRADE_NGIN_SOURCES
     src/relative_value/trade_definition.cpp
     src/relative_value/definition_validator.cpp
     src/relative_value/contract_lookup.cpp
+    src/strategy/spread.cpp
     src/strategy/regime_detector.cpp
     src/storage/results_manager_base.cpp
     src/storage/backtest_results_manager.cpp

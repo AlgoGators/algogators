@@ -281,6 +281,7 @@ set(TEST_SOURCES
     strategy/test_penny_stock_lifecycle.cpp
     relative_value/test_trade_definition.cpp
     relative_value/test_definition_validator.cpp
+    strategy/test_spread.cpp
     statistics/test_normalizer.cpp
     statistics/test_pca.cpp
     statistics/test_adf.cpp
