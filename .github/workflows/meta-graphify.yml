@@ -1,0 +1,51 @@
+name: meta · graphify
+
+# Rebuilds the code graph agents read first (graphify-out/graph.json and GRAPH_REPORT.md; see
+# AGENTS.md and docs/knowledge-base/decisions/0046) every Monday, and on Run workflow. Code only,
+# from the syntax tree: no LLM and no API key. When the graph changed it is pushed to the branch
+# chore/graph-refresh, and the run's summary links the pull request to open (this repository does
+# not let workflows open pull requests themselves).
+
+on:
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: meta-graphify
+  cancel-in-progress: true
+
+jobs:
+  refresh:
+    name: rebuild the code graph
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install graphify
+        run: uv tool install "graphifyy[sql]==0.9.58"
+      - name: Build the graph and its report
+        run: |
+          graphify extract . --code-only
+          graphify cluster-only . --no-viz --no-label
+      - name: Push the refresh when it changed
+        run: |
+          git add graphify-out/graph.json graphify-out/GRAPH_REPORT.md
+          if git diff --cached --quiet; then
+            echo "The graph is unchanged." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "chore(graphify): refresh the code graph to ${GITHUB_SHA::8}"
+          git push --force origin "HEAD:refs/heads/chore/graph-refresh"
+          {
+            echo "The code graph changed. Open the pull request:"
+            echo "https://github.com/$GITHUB_REPOSITORY/compare/main...chore/graph-refresh?expand=1"
+          } >> "$GITHUB_STEP_SUMMARY"

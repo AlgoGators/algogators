@@ -18,6 +18,7 @@ As of 2026-11-02.
 | Website (algogators.com) | `apps/website/` |
 | Shared statistics library | `libs/algosystem/` |
 | Issue tracker script | `tools/issue-tracker/` |
+| The code graph agents query first | `graphify-out/graph.json`, `graphify-out/GRAPH_REPORT.md` (see `AGENTS.md`) |
 | CI generators and the path-filter check | `platform/ci/` |
 | C++ build presets and dependencies | `CMakePresets.json`, `vcpkg.json` (repository root) |
 
@@ -33,6 +34,7 @@ Each member has `<kind>-<name>.<purpose>.yml`; reusable ones start with `_`.
 | `svc-trade-ngin.python.yml` | `tradengin` wheels; publish on tag `tradengin/vX.Y.Z` |
 | `svc-trade-ngin.watchdog.yml` | scheduled live-run checks |
 | `meta-workflow-paths.yml` | fails when a quality workflow's path filters stop matching the tree |
+| `meta-graphify.yml` | Mondays: rebuilds the code graph and pushes `chore/graph-refresh` for a PR |
 
 ## GitHub
 

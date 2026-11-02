@@ -1,0 +1,3 @@
+# graphify: what the code graph leaves out (gitignore syntax). The graph is code-only.
+graphify-out/
+services/trade-ngin/extern/
