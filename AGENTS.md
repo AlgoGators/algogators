@@ -14,4 +14,4 @@ Never optional:
 - Read-only by default against production and its database; a write goes through a script a
   person reviews and runs.
 - When you settle a question someone will ask again, add it to
-  `docs/knowledge-base/decisions.md` in the same PR.
+  `docs/knowledge-base/decisions/` (one file per decision) in the same PR.
