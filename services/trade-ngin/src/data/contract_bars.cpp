@@ -13,7 +13,10 @@ namespace {
 
 constexpr const char* kMonthCodes = "FGHJKMNQUVXZ";
 
-std::optional<Day> optional_day(const pqxx::field& f) {
+// A row's cell: pqxx::field under libpqxx 7 (vcpkg.json pins it), a field reference under the
+// libpqxx 8 the Windows wheels build against (svc-trade-ngin.python.yml).
+template <typename Field>
+std::optional<Day> optional_day(const Field& f) {
     if (f.is_null()) return std::nullopt;
     return parse_ymd(f.as<std::string>());
 }
