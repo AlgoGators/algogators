@@ -8,6 +8,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 #include "../core/test_base.hpp"
 #include "../data/test_db_utils.hpp"
@@ -80,76 +81,41 @@ public:
                                         const Timestamp& end_date,
                                         const std::unordered_map<std::string, double>& metrics,
                                         const std::string& portfolio_id,
-                                        const std::string& table_name) override {
+                                        const std::string& table_name,
+                                        const std::vector<LiveResultsCell>& cells) override {
         Call c{"store_backtest_summary", run_id, portfolio_id, "", table_name};
         c.start = start_date;
         c.end = end_date;
         c.items = metrics.size();
         calls.push_back(c);
         return MockPostgresDatabase::store_backtest_summary(run_id, start_date, end_date, metrics,
-                                                            portfolio_id, table_name);
+                                                            portfolio_id, table_name, cells);
     }
 
     Result<void> store_backtest_equity_curve_batch(
         const std::string& run_id, const std::vector<std::pair<Timestamp, double>>& points,
         const std::string& portfolio_id, const std::string& table_name,
-        const std::vector<std::string>& risk_detail) override {
+        const std::vector<std::string>& risk_detail, const BacktestCurveCells& cells) override {
         Call c{"store_backtest_equity_curve_batch", run_id, portfolio_id, "", table_name};
         c.items = points.size();
         c.risk_detail = risk_detail;
         calls.push_back(c);
-        return MockPostgresDatabase::store_backtest_equity_curve_batch(run_id, points, portfolio_id,
-                                                                       table_name, risk_detail);
+        return MockPostgresDatabase::store_backtest_equity_curve_batch(
+            run_id, points, portfolio_id, table_name, risk_detail, cells);
     }
 
     Result<void> store_backtest_positions(const std::vector<Position>& positions,
                                           const std::string& run_id,
                                           const std::string& portfolio_id,
-                                          const std::string& table_name,
-                                          bool keep_closed_rows) override {
+                                          const std::string& table_name, bool keep_closed_rows,
+                                          const std::unordered_set<std::string>& no_bar_symbols)
+        override {
         Call c{"store_backtest_positions", run_id, portfolio_id, "", table_name};
         c.items = positions.size();
         c.positions = positions;
         calls.push_back(c);
-        return MockPostgresDatabase::store_backtest_positions(positions, run_id, portfolio_id,
-                                                              table_name, keep_closed_rows);
-    }
-
-    Result<void> store_backtest_executions(const std::vector<ExecutionReport>& executions,
-                                           const std::string& run_id,
-                                           const std::string& portfolio_id,
-                                           const std::string& table_name) override {
-        Call c{"store_backtest_executions", run_id, portfolio_id, "", table_name};
-        c.items = executions.size();
-        calls.push_back(c);
-        return MockPostgresDatabase::store_backtest_executions(executions, run_id, portfolio_id,
-                                                               table_name);
-    }
-
-    Result<void> store_backtest_signals(const std::unordered_map<std::string, double>& signals,
-                                        const std::string& strategy_id, const std::string& run_id,
-                                        const Timestamp& timestamp,
-                                        const std::string& portfolio_id,
-                                        const std::string& table_name) override {
-        Call c{"store_backtest_signals", run_id, portfolio_id, strategy_id, table_name};
-        c.timestamp = timestamp;
-        c.items = signals.size();
-        calls.push_back(c);
-        return MockPostgresDatabase::store_backtest_signals(signals, strategy_id, run_id,
-                                                            timestamp, portfolio_id, table_name);
-    }
-
-    Result<void> store_backtest_positions_with_strategy(const std::vector<Position>& positions,
-                                                        const std::string& run_id,
-                                                        const std::string& strategy_id,
-                                                        const std::string& portfolio_id,
-                                                        const std::string& table_name) override {
-        Call c{"store_backtest_positions_with_strategy", run_id, portfolio_id, strategy_id,
-               table_name};
-        c.items = positions.size();
-        calls.push_back(c);
-        return MockPostgresDatabase::store_backtest_positions_with_strategy(
-            positions, run_id, strategy_id, portfolio_id, table_name);
+        return MockPostgresDatabase::store_backtest_positions(
+            positions, run_id, portfolio_id, table_name, keep_closed_rows, no_bar_symbols);
     }
 
     Result<void> store_backtest_executions_with_strategy(
@@ -184,6 +150,18 @@ public:
         return MockPostgresDatabase::store_backtest_metadata_with_portfolio(
             run_id, portfolio_run_id, strategy_id, strategy_allocation, portfolio_config, name,
             description, start_date, end_date, hyperparameters, portfolio_id, table_name);
+    }
+
+    Result<void> store_executions(const std::vector<ExecutionReport>& executions,
+                                  const std::string& strategy_id, const std::string& strategy_name,
+                                  const std::string& portfolio_id, const std::string& table_name,
+                                  const std::string& book) override {
+        Call c{"store_executions", "", portfolio_id, strategy_id, table_name};
+        c.name = strategy_name;
+        c.items = executions.size();
+        calls.push_back(c);
+        return MockPostgresDatabase::store_executions(executions, strategy_id, strategy_name,
+                                                      portfolio_id, table_name, book);
     }
 
     Result<void> store_signals(const std::unordered_map<std::string, double>& signals,
@@ -236,16 +214,11 @@ TEST_F(ResultsManagerBaseFanoutTest, BacktestPositionsGoToFinalPositionsStampedW
     ASSERT_EQ(calls.size(), 1u);
     EXPECT_EQ(calls[0].run_id, "RUN_7");
     EXPECT_EQ(calls[0].table, "backtest.final_positions");
+    EXPECT_EQ(calls[0].portfolio_id, "PORT_A");
     ASSERT_EQ(calls[0].positions.size(), 2u);
     // Every position is re-stamped with the day being stored.
     EXPECT_EQ(calls[0].positions[0].last_update, day);
     EXPECT_EQ(calls[0].positions[1].last_update, day);
-    // FIXME: the base class passes the literal "BASE_PORTFOLIO" for the backtest schema
-    // instead of portfolio_id_ ("PORT_A" here). No code in src/ or apps/ calls the base
-    // save_positions / save_executions / save_signals (BacktestResultsManager has its own
-    // batch methods that do pass the portfolio), so this moves no stored number today;
-    // the right value is portfolio_id_. Same for executions and signals below.
-    EXPECT_EQ(calls[0].portfolio_id, "BASE_PORTFOLIO");
 }
 
 TEST_F(ResultsManagerBaseFanoutTest, TradingPositionsUseThePositionsTableAndTheManagersKey) {
@@ -262,20 +235,25 @@ TEST_F(ResultsManagerBaseFanoutTest, TradingPositionsUseThePositionsTableAndTheM
     EXPECT_EQ(db_->call_count("store_backtest_positions"), 0);
 }
 
-TEST_F(ResultsManagerBaseFanoutTest, ExecutionsRouteBySchema) {
+TEST_F(ResultsManagerBaseFanoutTest, ExecutionsGoToTheLiveWriterWithTheSchemasTable) {
+    // A backtest stores its executions per strategy (save_strategy_executions); the base
+    // method is the live writer and only names the schema's table.
     PlainResultsManager bt(db_, true, "backtest", "STRAT", "PORT_A");
-    ASSERT_TRUE(bt.save_executions({make_exec("ES", 1.0)}, "RUN_B", date_at(2026, 2, 3)).is_ok());
-    auto calls = db_->calls_to("store_backtest_executions");
-    ASSERT_EQ(calls.size(), 1u);
-    EXPECT_EQ(calls[0].run_id, "RUN_B");
-    EXPECT_EQ(calls[0].table, "backtest.executions");
-    EXPECT_EQ(calls[0].items, 1u);
-    EXPECT_EQ(calls[0].portfolio_id, "BASE_PORTFOLIO");  // FIXME: see the positions test
+    (void)bt.save_executions({make_exec("ES", 1.0)}, "RUN_B", date_at(2026, 2, 3));
+    auto bcalls = db_->calls_to("store_executions");
+    ASSERT_EQ(bcalls.size(), 1u);
+    EXPECT_EQ(bcalls[0].table, "backtest.executions");
+    EXPECT_EQ(bcalls[0].portfolio_id, "PORT_A");
+    EXPECT_TRUE(db_->calls_to("store_backtest_executions_with_strategy").empty());
 
+    db_->calls.clear();
     PlainResultsManager live(db_, true, "trading", "STRAT", "PORT_A");
     ASSERT_TRUE(live.save_executions({make_exec("ES", 1.0)}, "RUN_L", date_at(2026, 2, 3))
                     .is_ok());
-    EXPECT_EQ(db_->call_count("store_executions"), 1);  // table "trading.executions"
+    auto lcalls = db_->calls_to("store_executions");
+    ASSERT_EQ(lcalls.size(), 1u);
+    EXPECT_EQ(lcalls[0].table, "trading.executions");
+    EXPECT_EQ(lcalls[0].items, 1u);
     auto key = db_->last_key("store_executions");
     EXPECT_EQ(key.strategy_id, "STRAT");
     EXPECT_EQ(key.strategy_name, "STRAT");  // empty name falls back to the id
@@ -283,19 +261,19 @@ TEST_F(ResultsManagerBaseFanoutTest, ExecutionsRouteBySchema) {
     EXPECT_EQ(db_->last_book("store_executions"), kDefaultBook);
 }
 
-TEST_F(ResultsManagerBaseFanoutTest, SignalsRouteBySchemaWithTheirDate) {
+TEST_F(ResultsManagerBaseFanoutTest, SignalsGoToTheSchemasTableWithTheirDate) {
     const auto day = date_at(2026, 2, 4);
     PlainResultsManager bt(db_, true, "backtest", "STRAT", "PORT_A");
     ASSERT_TRUE(bt.save_signals({{"ES", 0.5}, {"NQ", -0.25}}, "RUN_B", day).is_ok());
-    auto bcalls = db_->calls_to("store_backtest_signals");
+    auto bcalls = db_->calls_to("store_signals");
     ASSERT_EQ(bcalls.size(), 1u);
     EXPECT_EQ(bcalls[0].strategy_id, "STRAT");
-    EXPECT_EQ(bcalls[0].run_id, "RUN_B");
+    EXPECT_EQ(bcalls[0].portfolio_id, "PORT_A");
     EXPECT_EQ(bcalls[0].timestamp, day);
     EXPECT_EQ(bcalls[0].table, "backtest.signals");
     EXPECT_EQ(bcalls[0].items, 2u);
-    EXPECT_EQ(bcalls[0].portfolio_id, "BASE_PORTFOLIO");  // FIXME: see the positions test
 
+    db_->calls.clear();
     PlainResultsManager live(db_, true, "trading", "STRAT", "PORT_A", "NAME");
     ASSERT_TRUE(live.save_signals({{"ES", 0.5}}, "RUN_L", day).is_ok());
     auto lcalls = db_->calls_to("store_signals");
@@ -371,10 +349,6 @@ protected:
         mgr_->set_performance_metrics({{"sharpe", 1.1}, {"total_return", 0.2}});
         mgr_->set_equity_curve({{start_, 1e6}, {end_, 1.1e6}});
         mgr_->set_equity_risk_detail({"{\"a\":1}", ""});
-        mgr_->set_final_positions({make_pos("ES", 3.0)});
-        mgr_->set_executions({make_exec("ES", 3.0), make_exec("NQ", -1.0)});
-        mgr_->add_signals(date_at(2026, 1, 6), {{"ES", 0.1}});
-        mgr_->add_signals(date_at(2026, 1, 2), {{"ES", 0.2}, {"NQ", 0.3}});
     }
 
     const Timestamp start_ = date_at(2026, 1, 2);
@@ -386,32 +360,27 @@ protected:
 TEST_F(BacktestResultsFanoutTest, EveryWriteCarriesTheRunIdAndTheConstructorPortfolio) {
     ASSERT_TRUE(mgr_->save_all_results("RUN_42", end_).is_ok());
 
-    // summary, equity curve, final positions, executions, two signal timestamps
-    ASSERT_EQ(db_->calls.size(), 6u);
+    // summary and equity curve: the positions and executions are written elsewhere
+    ASSERT_EQ(db_->calls.size(), 2u);
     for (const auto& c : db_->calls) {
         EXPECT_EQ(c.run_id, "RUN_42") << c.method;
-        // The writes use the derived class's portfolio_id_ even though
-        // get_portfolio_id() (base member) still reads "BASE_PORTFOLIO": see the
-        // FIXME in test_backtest_results_manager.cpp ConstructorSetsAccessors.
         EXPECT_EQ(c.portfolio_id, "PORT_CONS") << c.method;
     }
-    EXPECT_EQ(mgr_->get_portfolio_id(), "BASE_PORTFOLIO");
+    EXPECT_EQ(mgr_->get_portfolio_id(), "PORT_CONS");
 }
 
-TEST_F(BacktestResultsFanoutTest, SaveAllWritesInForeignKeyOrderToTheRightTables) {
+TEST_F(BacktestResultsFanoutTest, SaveAllWritesTheSummaryBeforeTheCurve) {
+    // The daily positions are written through the run by the coordinator and the executions
+    // per strategy; save_all_results writes the run's row first (the curve references it).
     ASSERT_TRUE(mgr_->save_all_results("RUN_42", end_).is_ok());
     std::vector<std::string> methods, tables;
     for (const auto& c : db_->calls) {
         methods.push_back(c.method);
         tables.push_back(c.table);
     }
-    EXPECT_EQ(methods, (std::vector<std::string>{
-                           "store_backtest_summary", "store_backtest_equity_curve_batch",
-                           "store_backtest_positions", "store_backtest_executions",
-                           "store_backtest_signals", "store_backtest_signals"}));
-    EXPECT_EQ(tables, (std::vector<std::string>{"backtest.results", "backtest.equity_curve",
-                                                "backtest.final_positions", "backtest.executions",
-                                                "backtest.signals", "backtest.signals"}));
+    EXPECT_EQ(methods, (std::vector<std::string>{"store_backtest_summary",
+                                                 "store_backtest_equity_curve_batch"}));
+    EXPECT_EQ(tables, (std::vector<std::string>{"backtest.results", "backtest.equity_curve"}));
 }
 
 TEST_F(BacktestResultsFanoutTest, SummaryAndCurveCarryTheirPayload) {
@@ -428,18 +397,6 @@ TEST_F(BacktestResultsFanoutTest, SummaryAndCurveCarryTheirPayload) {
     EXPECT_EQ(curve[0].risk_detail, (std::vector<std::string>{"{\"a\":1}", ""}));
 }
 
-TEST_F(BacktestResultsFanoutTest, SignalsAreOneCallPerTimestampInTimeOrder) {
-    ASSERT_TRUE(mgr_->save_signals_batch("R").is_ok());
-    auto calls = db_->calls_to("store_backtest_signals");
-    ASSERT_EQ(calls.size(), 2u);
-    // Added out of order; stored in timestamp order.
-    EXPECT_EQ(calls[0].timestamp, date_at(2026, 1, 2));
-    EXPECT_EQ(calls[0].items, 2u);
-    EXPECT_EQ(calls[1].timestamp, date_at(2026, 1, 6));
-    EXPECT_EQ(calls[1].items, 1u);
-    for (const auto& c : calls) EXPECT_EQ(c.strategy_id, "TF_SLOW");
-}
-
 TEST_F(BacktestResultsFanoutTest, SummaryFailureStopsTheRunBeforeAnyOtherWrite) {
     db_->fail_on_call("store_backtest_summary");
     auto r = mgr_->save_all_results("R", end_);
@@ -449,66 +406,43 @@ TEST_F(BacktestResultsFanoutTest, SummaryFailureStopsTheRunBeforeAnyOtherWrite) 
     EXPECT_EQ(db_->calls[0].method, "store_backtest_summary");
 }
 
-TEST_F(BacktestResultsFanoutTest, LaterFailuresAreLoggedAndTheRunStillReportsSuccess) {
-    // Today's behaviour: only the summary is fatal. A failed equity curve, position,
-    // execution or signal write is logged and save_all_results still returns ok, and
-    // the remaining tables are still attempted.
-    for (const char* method :
-         {"store_backtest_equity_curve_batch", "store_backtest_positions",
-          "store_backtest_executions", "store_backtest_signals"}) {
-        db_->calls.clear();
-        db_->fail_on_call(method);
-        EXPECT_TRUE(mgr_->save_all_results("R", end_).is_ok()) << method;
-        EXPECT_EQ(db_->calls.size(), 6u) << method;
-        db_->clear_failure();
-    }
-}
-
-TEST_F(BacktestResultsFanoutTest, NoPortfolioLevelExecutionsMeansNoExecutionsCall) {
-    mgr_->set_executions({});
-    ASSERT_TRUE(mgr_->save_all_results("R", end_).is_ok());
-    EXPECT_TRUE(db_->calls_to("store_backtest_executions").empty());
-    EXPECT_EQ(db_->calls.size(), 5u);
+TEST_F(BacktestResultsFanoutTest, ACurveFailureIsLoggedAndTheRunStillReportsSuccess) {
+    // Only the summary is fatal: a failed equity-curve write is logged and save_all_results
+    // still returns ok.
+    db_->fail_on_call("store_backtest_equity_curve_batch");
+    EXPECT_TRUE(mgr_->save_all_results("R", end_).is_ok());
+    EXPECT_EQ(db_->calls.size(), 2u);
 }
 
 TEST_F(BacktestResultsFanoutTest, EmptyPortfolioIdFallsBackToBasePortfolio) {
     BacktestResultsManager mgr(db_, true, "TF", "");
-    mgr.set_final_positions({make_pos("ES", 1.0)});
-    ASSERT_TRUE(mgr.save_final_positions("R").is_ok());
-    auto calls = db_->calls_to("store_backtest_positions");
+    mgr.set_performance_metrics({{"sharpe", 1.0}});
+    ASSERT_TRUE(mgr.save_summary_results("R").is_ok());
+    auto calls = db_->calls_to("store_backtest_summary");
     ASSERT_EQ(calls.size(), 1u);
     EXPECT_EQ(calls[0].portfolio_id, "BASE_PORTFOLIO");
 }
 
-TEST_F(BacktestResultsFanoutTest, PerStrategyRowsCarryTheirStrategyAndSkipEmptyOnes) {
-    mgr_->set_strategy_positions("TF_FAST", {make_pos("ES", 1.0), make_pos("NQ", 2.0)});
-    mgr_->set_strategy_positions("TF_EMPTY", {});
+TEST_F(BacktestResultsFanoutTest, PerStrategyExecutionsCarryTheirStrategyAndSkipEmptyOnes) {
     mgr_->set_strategy_executions("TF_FAST", {make_exec("ES", 1.0)});
     mgr_->set_strategy_executions("TF_EMPTY", {});
-    ASSERT_TRUE(mgr_->save_strategy_positions("PRUN").is_ok());
     ASSERT_TRUE(mgr_->save_strategy_executions("PRUN").is_ok());
-
-    auto pos = db_->calls_to("store_backtest_positions_with_strategy");
-    ASSERT_EQ(pos.size(), 1u);
-    EXPECT_EQ(pos[0].strategy_id, "TF_FAST");
-    EXPECT_EQ(pos[0].run_id, "PRUN");
-    EXPECT_EQ(pos[0].portfolio_id, "PORT_CONS");
-    EXPECT_EQ(pos[0].table, "backtest.final_positions");
-    EXPECT_EQ(pos[0].items, 2u);
 
     auto exe = db_->calls_to("store_backtest_executions_with_strategy");
     ASSERT_EQ(exe.size(), 1u);
     EXPECT_EQ(exe[0].strategy_id, "TF_FAST");
+    EXPECT_EQ(exe[0].run_id, "PRUN");
+    EXPECT_EQ(exe[0].portfolio_id, "PORT_CONS");
     EXPECT_EQ(exe[0].table, "backtest.executions");
     EXPECT_EQ(exe[0].items, 1u);
 }
 
 TEST_F(BacktestResultsFanoutTest, PerStrategyFailureDoesNotStopTheOtherStrategies) {
-    mgr_->set_strategy_positions("A", {make_pos("ES", 1.0)});
-    mgr_->set_strategy_positions("B", {make_pos("NQ", 1.0)});
-    db_->fail_on_call("store_backtest_positions_with_strategy");
-    EXPECT_TRUE(mgr_->save_strategy_positions("PRUN").is_ok());
-    EXPECT_EQ(db_->calls_to("store_backtest_positions_with_strategy").size(), 2u);
+    mgr_->set_strategy_executions("A", {make_exec("ES", 1.0)});
+    mgr_->set_strategy_executions("B", {make_exec("NQ", 1.0)});
+    db_->fail_on_call("store_backtest_executions_with_strategy");
+    EXPECT_TRUE(mgr_->save_strategy_executions("PRUN").is_ok());
+    EXPECT_EQ(db_->calls_to("store_backtest_executions_with_strategy").size(), 2u);
 }
 
 TEST_F(BacktestResultsFanoutTest, StrategyMetadataRowPerAllocationWithTheRunMetadata) {
@@ -537,14 +471,10 @@ TEST_F(BacktestResultsFanoutTest, StrategyMetadataRowPerAllocationWithTheRunMeta
 
 TEST_F(BacktestResultsFanoutTest, DisabledStorageMakesEveryIndividualSaveANoOp) {
     mgr_->set_storage_enabled(false);
-    mgr_->set_strategy_positions("A", {make_pos("ES", 1.0)});
     mgr_->set_strategy_executions("A", {make_exec("ES", 1.0)});
+    EXPECT_TRUE(mgr_->save_all_results("R", end_).is_ok());
     EXPECT_TRUE(mgr_->save_summary_results("R").is_ok());
     EXPECT_TRUE(mgr_->save_equity_curve("R").is_ok());
-    EXPECT_TRUE(mgr_->save_final_positions("R").is_ok());
-    EXPECT_TRUE(mgr_->save_executions_batch("R").is_ok());
-    EXPECT_TRUE(mgr_->save_signals_batch("R").is_ok());
-    EXPECT_TRUE(mgr_->save_strategy_positions("R").is_ok());
     EXPECT_TRUE(mgr_->save_strategy_executions("R").is_ok());
     EXPECT_TRUE(mgr_->save_strategy_metadata("R", {{"A", 1.0}}, {}).is_ok());
     EXPECT_TRUE(db_->calls.empty());
@@ -554,15 +484,4 @@ TEST_F(BacktestResultsFanoutTest, NoMetricsMeansNoSummaryRow) {
     mgr_->set_performance_metrics({});
     ASSERT_TRUE(mgr_->save_summary_results("R").is_ok());
     EXPECT_TRUE(db_->calls.empty());
-}
-
-TEST(BacktestResultsRunId, RunIdIsStrategyUtcStampAndMilliseconds) {
-    const auto id = BacktestResultsManager::generate_run_id("TF");
-    // TF_YYYYMMDD_HHMMSS_mmm
-    ASSERT_EQ(id.size(), std::string("TF_20260101_120000_000").size()) << id;
-    EXPECT_EQ(id.substr(0, 3), "TF_");
-    EXPECT_EQ(id[11], '_');
-    EXPECT_EQ(id[18], '_');
-    for (size_t i : {3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 12u, 13u, 14u, 15u, 16u, 17u, 19u, 20u, 21u})
-        EXPECT_TRUE(std::isdigit(static_cast<unsigned char>(id[i]))) << id;
 }
