@@ -100,7 +100,8 @@ Teammates without the server key: use the quick start above instead.
    bash sim/snapshot.sh
    ```
 
-   It connects with `prod-deploy.pem`, reads the login from
+   It connects to the host in `SNAPSHOT_SSH_HOST` with the key in `SNAPSHOT_SSH_KEY` (both in
+   the private ops runbook, AlgoGators/ops-private), reads the login from
    `~/.config/algogators/db-app-roles.env` on the host when that file sets `PGUSER` and
    `PGPASSWORD` (otherwise it asks you), and streams back over ssh:
 

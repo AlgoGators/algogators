@@ -111,7 +111,7 @@ The master document remains the source of truth. These decisions fill its gaps, 
 
 - **Builders.** Dom and Claude only. JR and HD are not involved for now. Our own PRs are merged with admin rights.
 - **Stage 3 is on main.** #94–#99, #133–#137, #155 and #158 were admin-merged in order on 2026-10-08, and main is now byte-identical to `stage3/audit-fixes`. The Dockerfile still patched a test file that stage 3 deleted, which broke Image Generation; #159 fixes it. trade-ngin deploys only from `prod`, so the live runner is unaffected. **This answers Q4.**
-- **Co-location.** AlgoLens moves onto the trade-ngin host (ubuntu@ec2-18-118-225-224) and runs in Docker beside the engine. nginx on the old host keeps TLS for `algolens.algogators.com` and proxies to the new host's private IP, the same way it already serves airflow. Vault, Dex and monitoring stay on the old host.
+- **Co-location.** AlgoLens moves onto the trade-ngin host and runs in Docker beside the engine. nginx on the old host keeps TLS for `algolens.algogators.com` and proxies to the new host's private IP, the same way it already serves airflow. Vault, Dex and monitoring stay on the old host.
 - **gRPC command channel (amends "never call each other").** This answers Q1.
   - Postgres stays the record: all three books, the audit trail, settings and run metadata.
   - gRPC carries commands only. AlgoLens calls the engine to run the desk loop, request an override e-mail, publish, and read run status.
@@ -136,8 +136,8 @@ The master document remains the source of truth. These decisions fill its gaps, 
 - **Q3, the qt book on a day with no save.** The model run writes qt as a copy of system, marked `source=model`. A save overwrites it with `source=desk`, an approved override with `source=override`. Publish finalises whichever is there.
 - **Q5, who builds.** Answered by the first bullet.
 
-### Hosts (inspected 2026-10-08)
-- **Old host:** ec2-user@ec2-18-226-98-126, Amazon Linux 2023, 1 vCPU, 949 MB RAM, disk 73% full.
+### Hosts (inspected 2026-10-08; addresses and keys are in the private ops runbook, AlgoGators/ops-private)
+- **Old host:** Amazon Linux 2023, 1 vCPU, 949 MB RAM, disk 73% full.
   - It runs nginx and TLS for algolens, vault, monitoring and airflow, plus Vault, Dex, Grafana, Prometheus, Loki and AlgoLens.
   - **The live AlgoLens API is not the container.** nginx sends `/auth` and `/portfolio` to a bare `python3 backend/app.py`, started 09-05 from an old pre-#70 checkout whose local main has diverged from origin. The backend container on port 5000 is not routed at all.
   - The frontend container dates from 2026-02-04.
@@ -145,8 +145,8 @@ The master document remains the source of truth. These decisions fill its gaps, 
     - The GitHub deploy workflow and a cron job (`* * * * * deploy-algolens.sh`) both run `git pull`, which fails on the divergence.
     - The cron log is 130 MB.
     - The last GitHub deploy run was 09-05, and it failed.
-- **Target host:** ubuntu@ec2-18-118-225-224. trade-ngin is deployed there by `ssh-action` with `docker compose up -d` in `/home/ubuntu/docker-compose/trade-ngin`, from the `prod` branch only. It needs `Patrick.pem`.
-- **Airflow:** a third instance (172.31.23.190 private), proxied by the old host's nginx with Dex sign-in (data-ngin #124). Its port 8080 is also open on the public IP over plain HTTP, and should be closed.
+- **Target host:** the trade-ngin box (Ubuntu). trade-ngin is deployed there by `ssh-action` with `docker compose up -d` in `/home/ubuntu/docker-compose/trade-ngin`, from the `prod` branch only. It needs that box's SSH key.
+- **Airflow:** a third instance (on the private network), proxied by the old host's nginx with Dex sign-in (data-ngin #124). Its port 8080 is also open on the public IP over plain HTTP, and should be closed.
 
 ### What AlgoLens takes from data-ngin and trade-ngin CI/CD
 - Build images in CI and push them to GHCR.

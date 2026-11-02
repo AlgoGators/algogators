@@ -1,7 +1,7 @@
 # data-ngin production deploy
 
-data-ngin's Airflow stack runs on the **algocloud** EC2 box (`i-0fd5cfa45d7a13d0b`,
-t2.medium: 2 vCPU, 4 GB RAM, Ubuntu 22.04), next to Postgres/TimescaleDB,
+data-ngin's Airflow stack runs on the **algocloud** EC2 box (t2.medium: 2 vCPU, 4 GB RAM,
+Ubuntu 22.04; its instance id and host are in the private ops runbook, AlgoGators/ops-private), next to Postgres/TimescaleDB,
 trade-ngin and AlgoLens.
 
 ## How a deploy works
