@@ -36,7 +36,8 @@ include/trade_ngin/statistics/
 ├── tests/                             # adf_test.hpp, kpss_test.hpp, phillips_perron_test.hpp,
 │                                      #   variance_ratio_test.hpp, johansen_test.hpp,
 │                                      #   engle_granger_test.hpp
-├── regression/                        # ols_regression.hpp, ridge_regression.hpp, lasso_regression.hpp
+├── regression/                        # ols_regression.hpp, ridge_regression.hpp, lasso_regression.hpp,
+│                                      #   purged_kfold.hpp
 ├── volatility/                        # garch.hpp, egarch.hpp, gjr_garch.hpp, dcc_garch.hpp
 └── state_estimation/                  # kalman_filter.hpp, extended_kalman_filter.hpp, hmm.hpp,
                                        #   markov_switching.hpp
@@ -80,6 +81,7 @@ src/statistics/
 | `OLSRegression` | `regression/ols_regression.hpp` | ordinary least squares |
 | `RidgeRegression` | `regression/ridge_regression.hpp` | ridge (L2) regression |
 | `LassoRegression` | `regression/lasso_regression.hpp` | lasso (L1) regression |
+| `purged_kfold`, `purged_cv_mse` | `regression/purged_kfold.hpp` | contiguous k-fold splits with a purge and an embargo (rows), and the fold-local CV score the ridge and lasso use to choose alpha: centring and intercept are fitted on each fold's training rows only |
 
 ### Volatility models
 

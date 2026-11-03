@@ -300,6 +300,7 @@ set(TEST_SOURCES
     statistics/test_ols_regression.cpp
     statistics/test_ridge_regression.cpp
     statistics/test_lasso_regression.cpp
+    statistics/test_regression_cv.cpp
     statistics/test_egarch.cpp
     statistics/test_hurst_exponent.cpp
     statistics/test_markov_switching.cpp

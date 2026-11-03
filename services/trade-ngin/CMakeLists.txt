@@ -282,6 +282,7 @@ set(TRADE_NGIN_SOURCES
     src/statistics/regression/ols_regression.cpp
     src/statistics/regression/ridge_regression.cpp
     src/statistics/regression/lasso_regression.cpp
+    src/statistics/regression/purged_kfold.cpp
     src/statistics/hurst_exponent.cpp
     src/statistics/preprocessing/outlier_handler.cpp
     src/statistics/preprocessing/missing_data_handler.cpp

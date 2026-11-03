@@ -26,7 +26,6 @@ private:
     mutable std::mutex mutex_;
 
     RidgeResult fit_alpha(const Eigen::MatrixXd& Xc, const Eigen::VectorXd& yc, double alpha) const;
-    double cross_validate(const Eigen::MatrixXd& Xc, const Eigen::VectorXd& yc, double alpha, int k) const;
 };
 
 } // namespace statistics

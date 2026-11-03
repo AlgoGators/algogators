@@ -1,8 +1,10 @@
 #include "trade_ngin/statistics/regression/lasso_regression.hpp"
+#include "trade_ngin/statistics/regression/purged_kfold.hpp"
 #include "trade_ngin/statistics/validation.hpp"
 #include "trade_ngin/core/logger.hpp"
 #include <cmath>
 #include <algorithm>
+#include <limits>
 
 namespace trade_ngin {
 namespace statistics {
@@ -86,44 +88,6 @@ LassoResult LassoRegression::fit_alpha(const Eigen::MatrixXd& Xc, const Eigen::V
     return res;
 }
 
-double LassoRegression::cross_validate(const Eigen::MatrixXd& Xc, const Eigen::VectorXd& yc,
-                                        double alpha, int k) const {
-    int n = Xc.rows();
-    int fold_size = n / k;
-    double total_mse = 0.0;
-
-    for (int fold = 0; fold < k; ++fold) {
-        int start = fold * fold_size;
-        int end = (fold == k - 1) ? n : start + fold_size;
-        int val_size = end - start;
-        int train_size = n - val_size;
-
-        Eigen::MatrixXd X_train(train_size, Xc.cols());
-        Eigen::VectorXd y_train(train_size);
-        Eigen::MatrixXd X_val(val_size, Xc.cols());
-        Eigen::VectorXd y_val(val_size);
-
-        int idx = 0;
-        for (int i = 0; i < n; ++i) {
-            if (i >= start && i < end) {
-                X_val.row(i - start) = Xc.row(i);
-                y_val(i - start) = yc(i);
-            } else {
-                X_train.row(idx) = Xc.row(i);
-                y_train(idx) = yc(i);
-                idx++;
-            }
-        }
-
-        auto res = fit_alpha(X_train, y_train, alpha);
-        Eigen::VectorXd preds = X_val * res.coefficients;
-        double mse = (y_val - preds).squaredNorm() / val_size;
-        total_mse += mse;
-    }
-
-    return total_mse / k;
-}
-
 Result<LassoResult> LassoRegression::fit(const Eigen::MatrixXd& X, const Eigen::VectorXd& y) {
     std::lock_guard<std::mutex> lock(mutex_);
 
@@ -143,25 +107,46 @@ Result<LassoResult> LassoRegression::fit(const Eigen::MatrixXd& X, const Eigen::
 
     DEBUG("[LassoRegression::fit] n=" << X.rows() << " p=" << X.cols() << " alpha=" << config_.alpha);
 
-    // Center X and y
-    x_mean_ = X.colwise().mean();
-    y_mean_ = y.mean();
-    Eigen::MatrixXd Xc = X.rowwise() - x_mean_.transpose();
-    Eigen::VectorXd yc = y.array() - y_mean_;
-
     double best_alpha = config_.alpha;
+    std::vector<double> cv_mse;
 
-    // Cross-validation
+    // Cross-validation on the raw rows: each fold centres on its own training rows and
+    // predicts with its own intercept (purged_cv_mse), so no test row reaches a fold's fit.
     if (config_.cv_folds > 1 && !config_.alpha_candidates.empty()) {
+        auto folds = purged_kfold(static_cast<int>(X.rows()), config_.cv_folds,
+                                  config_.cv_purge, config_.cv_embargo);
+        if (folds.is_error()) {
+            return make_error<LassoResult>(folds.error()->code(), folds.error()->what(), "LassoRegression");
+        }
+
         double best_mse = std::numeric_limits<double>::infinity();
         for (double a : config_.alpha_candidates) {
-            double mse = cross_validate(Xc, yc, a, config_.cv_folds);
+            double mse = purged_cv_mse(X, y, folds.value(), config_.include_intercept,
+                [this, a](const Eigen::MatrixXd& Xtr, const Eigen::VectorXd& ytr) {
+                    return fit_alpha(Xtr, ytr, a).coefficients;
+                });
+            cv_mse.push_back(mse);
             if (mse < best_mse) {
                 best_mse = mse;
                 best_alpha = a;
             }
         }
         DEBUG("[LassoRegression::fit] CV selected alpha=" << best_alpha);
+    }
+
+    // Centre X and y for the intercept (not penalised); without one the fit goes through the origin.
+    Eigen::MatrixXd Xc;
+    Eigen::VectorXd yc;
+    if (config_.include_intercept) {
+        x_mean_ = X.colwise().mean();
+        y_mean_ = y.mean();
+        Xc = X.rowwise() - x_mean_.transpose();
+        yc = y.array() - y_mean_;
+    } else {
+        x_mean_ = Eigen::VectorXd::Zero(X.cols());
+        y_mean_ = 0.0;
+        Xc = X;
+        yc = y;
     }
 
     result_ = fit_alpha(Xc, yc, best_alpha);
@@ -172,6 +157,7 @@ Result<LassoResult> LassoRegression::fit(const Eigen::MatrixXd& X, const Eigen::
     }
 
     result_.best_alpha = best_alpha;
+    result_.cv_mse = std::move(cv_mse);
     fitted_ = true;
 
     return Result<LassoResult>(result_);
