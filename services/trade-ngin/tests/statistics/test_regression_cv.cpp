@@ -158,6 +158,23 @@ void noisy_data(Eigen::MatrixXd& X, Eigen::VectorXd& y, int n, int p, unsigned s
     }
 }
 
+// Uniform data from raw mt19937 output, which the standard fixes on every platform
+// (std::normal_distribution is implementation-defined, so it cannot feed a golden test).
+void portable_data(Eigen::MatrixXd& X, Eigen::VectorXd& y, int n, int p, unsigned seed) {
+    std::mt19937 gen(seed);
+    auto unit = [&gen]() { return static_cast<double>(gen()) / 4294967296.0; };
+    X.resize(n, p);
+    y.resize(n);
+    for (int i = 0; i < n; ++i) {
+        double yi = 0.5;
+        for (int j = 0; j < p; ++j) {
+            X(i, j) = 2.0 + 3.0 * (unit() - 0.5);
+            yi += (j + 1) * 0.7 * X(i, j);
+        }
+        y(i) = yi + 2.0 * (unit() - 0.5);
+    }
+}
+
 Eigen::MatrixXd take_rows(const Eigen::MatrixXd& X, const std::vector<int>& idx) {
     Eigen::MatrixXd out(static_cast<Eigen::Index>(idx.size()), X.cols());
     for (size_t r = 0; r < idx.size(); ++r) out.row(static_cast<Eigen::Index>(r)) = X.row(idx[r]);
@@ -356,26 +373,25 @@ TEST(RegressionCVScoreTest, NoCVLeavesTheScoresEmpty) {
 }
 
 // ---------------------------------------------------------------------------
-// Characterisation: with an intercept and no CV the fit is the parent's, to the last digits
-// recorded on the parent commit (no stored number can move; nothing in the engine calls these
-// classes, and this pins the path any later caller would take).
+// Characterisation: with an intercept and no CV the fit is the parent's. The values were printed
+// by the parent commit's binary and by this branch's, which agreed bit for bit.
 // ---------------------------------------------------------------------------
 
 TEST(RegressionCVScoreTest, NoCVFitWithInterceptIsUnchanged) {
     Eigen::MatrixXd X;
     Eigen::VectorXd y;
-    noisy_data(X, y, 50, 3, 21);
+    portable_data(X, y, 50, 3, 21);
 
     RidgeRegressionConfig rc;
     rc.alpha = 0.5;
     RidgeRegression ridge(rc);
     ASSERT_TRUE(ridge.fit(X, y).is_ok());
     const auto& r = ridge.result();
-    EXPECT_NEAR(r.coefficients(0), 0.6008065522626922, 1e-12);
-    EXPECT_NEAR(r.coefficients(1), 1.3131918352010576, 1e-12);
-    EXPECT_NEAR(r.coefficients(2), 1.8098102485541447, 1e-12);
-    EXPECT_NEAR(r.intercept, 1.4463622685217219, 1e-12);
-    EXPECT_NEAR(r.r_squared, 0.89351973632254578, 1e-12);
+    EXPECT_NEAR(r.coefficients(0), 0.66718398934576895, 1e-12);
+    EXPECT_NEAR(r.coefficients(1), 1.1269980879807786, 1e-12);
+    EXPECT_NEAR(r.coefficients(2), 2.0544107878154625, 1e-12);
+    EXPECT_NEAR(r.intercept, 1.241532961235742, 1e-12);
+    EXPECT_NEAR(r.r_squared, 0.92184873339190532, 1e-12);
 
     LassoRegressionConfig lc;
     lc.alpha = 0.05;
@@ -383,9 +399,9 @@ TEST(RegressionCVScoreTest, NoCVFitWithInterceptIsUnchanged) {
     LassoRegression lasso(lc);
     ASSERT_TRUE(lasso.fit(X, y).is_ok());
     const auto& l = lasso.result();
-    EXPECT_NEAR(l.coefficients(0), 0.55864020461698616, 1e-12);
-    EXPECT_NEAR(l.coefficients(1), 1.2779059963931401, 1e-12);
-    EXPECT_NEAR(l.coefficients(2), 1.7721155486857405, 1e-12);
-    EXPECT_NEAR(l.intercept, 1.6801625704678109, 1e-12);
-    EXPECT_NEAR(l.r_squared, 0.89231665483241673, 1e-12);
+    EXPECT_NEAR(l.coefficients(0), 0.56889327572422954, 1e-12);
+    EXPECT_NEAR(l.coefficients(1), 1.0216091040780106, 1e-12);
+    EXPECT_NEAR(l.coefficients(2), 1.9994351799575567, 1e-12);
+    EXPECT_NEAR(l.intercept, 1.7866496699331975, 1e-12);
+    EXPECT_NEAR(l.r_squared, 0.9174551998524193, 1e-12);
 }
