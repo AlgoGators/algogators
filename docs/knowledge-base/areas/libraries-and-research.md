@@ -13,6 +13,7 @@ checks with `just quality <path>` from the repository root.
 | `services/predict-ngin` | image `algogators/predict-ngin` | real code, research only | nothing outside itself |
 | `services/research-api` | image `algogators/research-api` | real code, AlgoLens's API | the AlgoLens web app, over HTTP |
 | `apps/algoterminal` | `algoterminal-cli`, never published | real code | nothing; a stand-alone app |
+| `apps/stress-test` | `algogators-stress-test`, never published (a tag keeps the wheel as an artifact) | real code | nothing; a stand-alone app |
 
 The root `README.md` still calls research-core and algoterminal "placeholders"; both have code.
 
@@ -142,3 +143,23 @@ Windows, 80% coverage. `app-algoterminal.publish.yml` on an `algoterminal/v*` ta
   against 80 for research-api.
 
 **Open issues.** #67 flag market data missing the `close` column (PR #122 open).
+
+## stress-test
+
+**For.** A command-line black-swan stress test of the book on a day, and of that book with a
+proposed edit (`apps/stress-test/README.md`, added 2026-11-02). `snapshot` is a read-only export
+from new_algo_data (books, results, recorded settings, bars with their contract ids); `shock`
+(Tier 1) holds each book unchanged through the 39 events of the fund's private black-swan
+catalogue; `replay` (Tier 2) runs the trade-ngin strategy through them with the published
+`tradengin` module, unchanged ([0047](../decisions/0047-stress-test-on-the-published-engine.md)).
+
+**Run.** `uv run stress-test --help` from the root. CI: 3.11 on Linux, 90% coverage. Tier 2 needs
+`tradengin` (`pip install tradengin` on Linux and Windows; on macOS build it from
+`services/trade-ngin` and pass `--engine`).
+
+**Gotchas.**
+- Snapshots and reports hold fund positions; they go to the gitignored `apps/stress-test/out/`
+  (or `$STRESS_TEST_OUT`). Never commit them.
+- Tier 2 cannot start from the stored book (the published engine starts flat): `replay-check`
+  shows how far the strategy's own book is from production's, and the README how close Tier 2 got
+  to an exact replay.

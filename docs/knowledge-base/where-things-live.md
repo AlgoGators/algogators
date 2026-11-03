@@ -17,6 +17,7 @@ As of 2026-11-02.
 | AlgoLens | `apps/algolens-web/` (front end), `services/research-api/` (API), `infra/algolens/` |
 | Website (algogators.com) | `apps/website/` |
 | Shared statistics library | `libs/algosystem/` |
+| Black-swan stress test (command line, `stress-test`) | `apps/stress-test/` |
 | Issue tracker script | `tools/issue-tracker/` |
 | The code graph agents query first | `graphify-out/graph.json`, `graphify-out/GRAPH_REPORT.md` (see `AGENTS.md`) |
 | CI generators and the path-filter check | `platform/ci/` |

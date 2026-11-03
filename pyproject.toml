@@ -33,6 +33,7 @@ members = [
     "services/research-api",
     "services/predict-ngin",
     "apps/algoterminal",
+    "apps/stress-test",
 ]
 
 [dependency-groups]

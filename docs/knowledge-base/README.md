@@ -21,7 +21,7 @@ One page per area of the repository, for working inside it:
 | [AlgoLens](areas/algolens.md) | the web app and research-api: the QT desk, auth, how it talks to the engine |
 | [website](areas/website.md) | algogators.com: content, build, Pages and releases |
 | [CI and deploys](areas/ci-and-deploys.md) | the workflow system, path filters, releases, `prod`, security scans |
-| [libraries and research](areas/libraries-and-research.md) | algosystem, research-core, predict-ngin, algoterminal |
+| [libraries and research](areas/libraries-and-research.md) | algosystem, research-core, predict-ngin, algoterminal, stress-test |
 | [platform](areas/platform.md) | contracts, configs, the database package, the workspaces and `just` recipes |
 
 ## Rules that are never optional

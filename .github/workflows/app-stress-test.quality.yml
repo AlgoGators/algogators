@@ -1,0 +1,51 @@
+name: app-stress-test · quality
+
+on:
+  pull_request:
+    paths:
+      - 'apps/stress-test/**'
+      - 'uv.lock'
+      - 'pyproject.toml'
+      - '.github/workflows/_quality-python.yml'
+      - '.github/workflows/app-stress-test.quality.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/stress-test/**'
+      - 'uv.lock'
+      - 'pyproject.toml'
+      - '.github/workflows/_quality-python.yml'
+      - '.github/workflows/app-stress-test.quality.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: app-stress-test-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-python.yml
+    with:
+      path: apps/stress-test
+      python-versions: '["3.11"]'
+      runners: '["ubuntu-latest"]'
+      coverage-min: 90
+      strict-types: false
+      build-check: true
+    secrets: inherit
+
+  gate:
+    name: app-stress-test quality
+    if: always()
+    needs: [quality]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report result
+        run: |
+          if [ "${{ needs.quality.result }}" != "success" ]; then
+            echo "::error::quality result was ${{ needs.quality.result }}"
+            exit 1
+          fi

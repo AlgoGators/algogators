@@ -19,3 +19,4 @@ a rendered page, a keypress, a terminal at 80×24 — not just its functions.
 |---|---|---|
 | `algolens-web/` | `AlgoLens` (`src/`, `public/`, `index.html`, `vite.config.ts`) | Vite + React 18 |
 | `algoterminal/` | — | Textual TUI, not yet written |
+| `stress-test/` | — | Python CLI (`stress-test`): black-swan stress test of the book |

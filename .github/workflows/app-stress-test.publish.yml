@@ -1,0 +1,44 @@
+name: app-stress-test · publish
+
+# The stress test is a command-line tool run from a checkout of this repository (or a wheel
+# built from it). Nothing is uploaded to a package index or deployed: a release tag runs the
+# quality gates, builds and checks the wheel, and keeps it as a workflow artifact.
+on:
+  push:
+    tags: ['stress-test/v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    uses: ./.github/workflows/_quality-python.yml
+    with:
+      path: apps/stress-test
+      coverage-min: 90
+      build-check: true
+    secrets: inherit
+
+  wheel:
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Build and check the wheel
+        run: |
+          uv build apps/stress-test --out-dir dist
+          uvx twine check dist/*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stress-test-dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 90

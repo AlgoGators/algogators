@@ -1,0 +1,2 @@
+# Snapshots and reports hold fund-internal positions and prices. Never commit them.
+out/
