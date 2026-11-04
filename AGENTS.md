@@ -31,7 +31,5 @@ Set up once: `uv tool install "graphifyy[sql]==0.9.58"` (or `pipx install "graph
 - The graph can be a week old. Confirm a detail in the code before relying on it. For a fresh local
   copy run `graphify update .`, but **do not commit changes under `graphify-out/`**: the weekly
   refresh does that.
-- Claude Code runs a hook (`.claude/settings.json`) that reminds the agent to query the graph before
-  searching. It never blocks, and does nothing where graphify is not installed.
 - The graph holds only code symbols and repository paths. Documentation is in
   `docs/knowledge-base/`, not in the graph.
