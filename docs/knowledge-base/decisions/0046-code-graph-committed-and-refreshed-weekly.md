@@ -19,8 +19,8 @@ file modified in everyone's working tree and adds a version to the history at ev
 - `meta-graphify.yml` rebuilds them every Monday and on Run workflow, and pushes the result to
   `chore/graph-refresh`; a person opens the PR from the link in the run's summary. Workflows here
   cannot open PRs, and the setting that would allow it also lets the workflow token approve PRs.
-- No per-commit git hook. Claude Code's hook in `.claude/settings.json` only reminds the agent to
-  query the graph; `AGENTS.md` gives every agent the same rules.
+- No per-commit git hook, and no agent-specific hook either: `AGENTS.md` gives every agent the same
+  rules.
 - The graph is code only (`--code-only`), SQL migrations included; documentation stays in
   `docs/knowledge-base/`. Communities keep numbered names (no LLM labelling).
 
