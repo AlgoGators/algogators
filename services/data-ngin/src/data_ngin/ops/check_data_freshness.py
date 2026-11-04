@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 
 ISSUE_LABEL = "data-freshness"
 ISSUE_TITLE = "[data-freshness] Market data is stale"
-CONFIG_FILES = ("config.yaml", "new_config.yaml", "config_tiingo.yaml")
+# config.yaml is left out: its DAG has no schedule since #185, so algo_data goes stale on purpose.
+CONFIG_FILES = ("new_config.yaml", "config_tiingo.yaml")
 CONFIG_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config")
 
 

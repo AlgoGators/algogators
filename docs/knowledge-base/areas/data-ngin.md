@@ -36,7 +36,7 @@ All times New York (`America/New_York` in the DAG files).
 
 | DAG | Vendor | Schedule | Pulls | Writes |
 |---|---|---|---|---|
-| `data_pipeline_dag` | Databento GLBX.MDP3, ohlcv-1d, volume roll, front contract (`.v.0`) | 04:30 every day | `contract_valid.csv` | `algo_data`: `futures_data.ohlcv_1d`, `ohlcv_1d_raw` |
+| `data_pipeline_dag` | Databento GLBX.MDP3, ohlcv-1d, volume roll, front contract (`.v.0`) | none: manual only since #185 | `contract_valid.csv` | `algo_data`: `futures_data.ohlcv_1d`, `ohlcv_1d_raw` |
 | `new_data_pipeline_dag` | Databento, same | 04:30 every day | `new_full_contracts.csv`; then the per-contract pull for 40 roots | `new_algo_data`: `futures_data.ohlcv_1d`, `ohlcv_1d_raw`, `contract_ohlcv_1d`; `ops.data_ready` |
 | `tiingo_data_dag` | Tiingo equities | 07:15 weekdays | `contract_tiingo.csv` | `new_algo_data`: `equities_data.ohlcv_1d`, `ohlcv_1d_raw` |
 
@@ -119,8 +119,8 @@ Airflow roles (data-ngin#124). `svc-data-ngin.publish.yml` is a separate, tag-tr
 
 ## Gotchas
 
-- **Two databases.** `data_pipeline_dag` writes `algo_data`; the other two write `new_algo_data`.
-  The production engine runs still point at `algo_data` until #185.
+- **Two databases.** Production runs on `new_algo_data`, which the scheduled pipelines write. `algo_data`
+  gets nothing unless `data_pipeline_dag` is run by hand, and is retired by #202.
 - **The service README is partly stale**: its project tree and Poetry steps predate the monorepo.
   Use uv and the paths above.
 - **Keep DAG files light.** The dag-processor re-parses them constantly; heavy imports at module
