@@ -398,7 +398,7 @@ class PaperTrader:
                     price = float(prices[0])
                     self.price_tracker.update(market_id, price)
                     return price
-        except:
+        except Exception:
             pass
 
         return None
@@ -421,7 +421,7 @@ class PaperTrader:
                     total_liq += float(level.get("size", 0))
 
                 return total_liq
-        except:
+        except Exception:
             pass
 
         return 1000  # Default assumption
@@ -663,7 +663,7 @@ class PaperTrader:
                     tokens = data.get("clobTokenIds", [])
                     if tokens:
                         token_id = tokens[0]
-            except:
+            except Exception:
                 pass
 
         if not token_id:

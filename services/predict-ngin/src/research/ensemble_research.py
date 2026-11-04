@@ -76,7 +76,7 @@ def load_price_data(db_path: str) -> pd.DataFrame:
             WHERE outcome = 'YES'
             ORDER BY market_id, timestamp
         """, conn)
-    except:
+    except Exception:
         df = pd.DataFrame()
 
     conn.close()
@@ -101,7 +101,7 @@ def load_trade_data(db_path: str) -> pd.DataFrame:
             WHERE usd_amount >= 10
             ORDER BY timestamp
         """, conn)
-    except:
+    except Exception:
         df = pd.DataFrame()
 
     conn.close()
@@ -351,7 +351,7 @@ def evaluate_signals(
         # Find price at signal time
         try:
             signal_price = prices.asof(signal_time)
-        except:
+        except Exception:
             continue
 
         if pd.isna(signal_price):
@@ -361,7 +361,7 @@ def evaluate_signals(
         forward_time = signal_time + timedelta(hours=forward_hours)
         try:
             forward_price = prices.asof(forward_time)
-        except:
+        except Exception:
             continue
 
         if pd.isna(forward_price):

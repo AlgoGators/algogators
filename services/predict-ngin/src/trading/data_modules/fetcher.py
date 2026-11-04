@@ -540,7 +540,7 @@ class DataFetcher:
                         outcome_prices = ast.literal_eval(prices_str)
                     else:
                         outcome_prices = [0, 0]
-                except:
+                except Exception:
                     outcome_prices = [0, 0]
             
             # Get volume (prefer volume_float if we created it, otherwise parse)
@@ -2499,7 +2499,7 @@ def ensure_data_exists(data_dir: str = "data", min_bets: int = 10000) -> bool:
         try:
             with open(f, encoding="utf-8") as file:
                 total_bets += len(json.load(file))
-        except:
+        except Exception:
             pass
 
     if total_bets < min_bets:

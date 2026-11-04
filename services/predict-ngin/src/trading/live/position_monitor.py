@@ -202,7 +202,7 @@ def slack_alert_handler(webhook_url: str) -> Callable[[Alert], None]:
 
         try:
             requests.post(webhook_url, json=payload, timeout=5)
-        except:
+        except Exception:
             pass
 
     return handler
@@ -380,7 +380,7 @@ class PositionMonitor:
                 prices = data.get("outcomePrices", [])
                 if prices:
                     return float(prices[0])
-        except:
+        except Exception:
             pass
         return None
 
