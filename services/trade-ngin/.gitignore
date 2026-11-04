@@ -42,3 +42,6 @@ config/portfolios/conservative/risk.json
 email.json
 /AGENTS.md
 futures_release_run/
+
+# Run output of scripts/futures_release: holds bought bars, never commit it
+futures_release_run/
