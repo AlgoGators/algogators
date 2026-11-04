@@ -232,12 +232,14 @@ class GetStrategyDetail:
         if cfg is None:
             raise StrategyNotFoundError(strategy_id)
 
-        rows = self.reader.fetch_detail_rows(
-            cfg["strategy_type"],
+        # Issue #59: the registry entry names the book by its portfolio id.
+        rows = self.reader.fetch_portfolio_rows(
             cfg["portfolio_id"],
             book=requested_book,
             allow_fallback=allow_fallback,
         )
+        if getattr(rows, "book_missing", False):
+            raise BookNotWrittenError(cfg["portfolio_id"], rows.book)
         detail = build_strategy_detail(cfg, rows)
         if detail is None:
             raise StrategyDataNotFoundError(strategy_id)
@@ -253,7 +255,7 @@ class ListStrategies:
         strategies = []
         for cfg in self.registry.list(active_only=True):
             try:
-                latest = self.reader.fetch_summary_row(cfg["strategy_type"], cfg["portfolio_id"])
+                latest = self.reader.fetch_summary_row(cfg["portfolio_id"])
                 summary = build_strategy_summary(cfg, latest)
             except Exception as exc:
                 logger.error(
@@ -371,6 +373,8 @@ class GetPortfolioDetail:
                 "requestedBook": requested_book,
                 # D-20: the portfolio's strategies (sleeves), not the portfolio called a strategy.
                 "strategies": [dict(s) for s in rows.sleeves],
+                # Issue #59: the dates the book's sleeve set changed (run metadata).
+                "sleeveChanges": [dict(c) for c in getattr(rows, "sleeve_changes", ())],
             }
         )
         return detail

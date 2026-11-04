@@ -91,6 +91,8 @@ def transform_executions(
                 "notional": quantity * price * size,
                 "commission": float(_get(execution, "commissions_fees")),
                 "date": exec_time.isoformat() if exec_time else None,
+                # Issue #59: the sleeve that made the fill (the book's strategy_name).
+                "sleeve": _get(execution, "strategy_name"),
             }
         )
     return transformed

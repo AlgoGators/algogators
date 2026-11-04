@@ -67,16 +67,16 @@ class FakeRegistry:
 
 
 class SummaryReader:
-    """Reader stub for ListStrategies; raises for ids listed in `broken`."""
+    """Reader stub for ListStrategies; raises for portfolio ids listed in `broken`."""
 
-    def __init__(self, rows_by_type, broken=()):
-        self.rows_by_type = rows_by_type
+    def __init__(self, rows_by_portfolio, broken=()):
+        self.rows_by_portfolio = rows_by_portfolio
         self.broken = set(broken)
 
-    def fetch_summary_row(self, strategy_type, portfolio_id):
-        if strategy_type in self.broken:
+    def fetch_summary_row(self, portfolio_id):
+        if portfolio_id in self.broken:
             raise RuntimeError("db exploded")
-        return self.rows_by_type.get(strategy_type)
+        return self.rows_by_portfolio.get(portfolio_id)
 
 
 class RecordingReader:
@@ -174,7 +174,7 @@ def test_get_all_strategies_returns_summaries(client, monkeypatch):
         "total_annualized_return": 12.0,
     }
     registry = FakeRegistry([cfg])
-    reader = SummaryReader({"LIVE_TREND_FOLLOWING": latest})
+    reader = SummaryReader({"MAIN": latest})
     _patch_deps(monkeypatch, registry=registry, reader=reader)
     _auth(client)
 
@@ -197,15 +197,15 @@ def test_get_all_strategies_skips_broken_and_dataless_strategies(client, monkeyp
         "portfolio_id": "P1",
         "initial_equity": 100.0,
     }
-    broken = {**good, "id": "broken", "strategy_type": "BROKEN"}
-    no_data = {**good, "id": "nodata", "strategy_type": "NODATA"}
+    broken = {**good, "id": "broken", "portfolio_id": "BROKEN"}
+    no_data = {**good, "id": "nodata", "portfolio_id": "NODATA"}
     latest = {
         "current_portfolio_value": 110.0,
         "volatility": 5.0,
         "total_annualized_return": 7.0,
     }
     registry = FakeRegistry([good, broken, no_data])
-    reader = SummaryReader({"GOOD": latest}, broken={"BROKEN"})
+    reader = SummaryReader({"P1": latest}, broken={"BROKEN"})
     _patch_deps(monkeypatch, registry=registry, reader=reader)
     _auth(client)
 
