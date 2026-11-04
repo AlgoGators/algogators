@@ -81,7 +81,6 @@ class TestCheckDataFreshness(unittest.TestCase):
         self.assertEqual(
             freshness.monitored_tables(),
             [
-                ("algo_data", "futures_data.ohlcv_1d"),
                 ("new_algo_data", "futures_data.ohlcv_1d"),
                 ("new_algo_data", "equities_data.ohlcv_1d"),
             ],
