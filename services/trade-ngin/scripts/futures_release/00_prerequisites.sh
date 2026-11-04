@@ -10,8 +10,9 @@ set -u
 . "${0:A:h}/lib.zsh"
 bad=0
 miss() { print -r -- "MISSING: $1"; bad=1 }
-[ "$(uname)" = Darwin ] && print -r -- "ok: macOS" || miss "macOS (the scripts use sed -i '' and md5)"
-for c in zsh python3 zstd cmake git curl shasum md5 gzip; do
+case "$(uname)" in Darwin|Linux) print -r -- "ok: $(uname)" ;; *) miss "macOS or Linux (on Windows, run this inside WSL)" ;; esac
+command -v md5 > /dev/null || command -v md5sum > /dev/null || miss "the command md5 or md5sum"
+for c in zsh python3 zstd cmake git curl shasum gzip; do
   if command -v "$c" > /dev/null; then print -r -- "ok: $c ($(command -v "$c"))"; else miss "the command $c"; fi
 done
 for c in psql pg_dump pg_restore; do

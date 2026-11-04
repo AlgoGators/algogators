@@ -62,7 +62,7 @@ DONE="$HERE/fill_micros_${TARGET}.DONE"; STARTED="$HERE/fill_micros_${TARGET}.ST
 W=$(mktemp -d "$HERE/.work_${STAMP}_XXXX")
 CLEAN=0
 # The work folder is deleted only after a clean finish; on any failure it is kept and the log names it.
-trap 'sed -i "" -E "s/[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/<host>/g" "$LOG" 2>/dev/null; if [ $CLEAN = 1 ]; then /bin/rm -rf "$W"; else print -r -- "work folder kept: $W" | tee -a "$LOG"; fi' EXIT
+trap 'sed -i.scrub -E "s/[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/<host>/g" "$LOG" 2>/dev/null && rm -f "$LOG.scrub"; if [ $CLEAN = 1 ]; then /bin/rm -rf "$W"; else print -r -- "work folder kept: $W" | tee -a "$LOG"; fi' EXIT
 say() { print -r -- "$*" | tee -a "$LOG" }
 die() { local code=${2:-1}; say "STOP (exit $code): $1"; exit $code }
 q() { psql -X -v ON_ERROR_STOP=1 -q "$@" }
