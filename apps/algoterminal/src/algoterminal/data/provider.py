@@ -111,6 +111,9 @@ class DataProvider(ABC):
             issues.append("no data returned")
             return DataQualityReport(symbol, 0, 0, None, None, issues)
 
+        # Flag frames that break the provider contract by omitting close.
+        if "close" not in df:
+            issues.append("missing close column")
         missing = int(df["close"].isna().sum()) if "close" in df else 0
         if missing:
             issues.append(f"{missing} missing close values")
