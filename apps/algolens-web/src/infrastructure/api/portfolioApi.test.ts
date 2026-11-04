@@ -147,6 +147,22 @@ describe('getPortfolioData', () => {
     expect(data.strategies).toEqual([]);
     expect(data.historicalData).toEqual([]);
   });
+
+  it.each([
+    [{}, 'undefined'],
+    [{ strategies: null }, 'null'],
+    [{ strategies: 'x' }, 'string'],
+    [{ strategies: { id: 'a' } }, 'object'],
+  ])('rejects %j before fetching any strategy', async (body, received) => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(body));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(PortfolioApiService.getPortfolioData()).rejects.toThrow(
+      `Invalid /portfolio/strategies response: expected { strategies: [...] }, got strategies: ${received}`
+    );
+    // only the list request; no /portfolio/strategy/<id> detail requests
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('testConnectivity', () => {
