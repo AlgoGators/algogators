@@ -7,8 +7,10 @@ from unittest.mock import MagicMock, patch
 from data_ngin.infrastructure.repository.ohlcv_repository import OhlcvRepository
 from data_ngin.infrastructure.repository.readiness_repository import ReadinessRepository
 from data_ngin.ops.readiness_failure import (
+    AFTER_PULLS_TASKS,
     CONTINUOUS_ONLY_TASKS,
     CONTRACT_ONLY_TASKS,
+    CONTRACT_PULL_TASKS,
     make_readiness_failure_callback,
 )
 
@@ -98,14 +100,24 @@ class TestReadinessFailureCallback(unittest.TestCase):
             make_readiness_failure_callback("new_config.yaml")(context)
         return continuous, contract
 
-    def test_a_failed_contract_task_leaves_the_continuous_row_alone(self) -> None:
-        for task_id in ("run_contract_pipeline", "write_contract_readiness"):
-            with self.subTest(task_id=task_id):
-                continuous, contract = self._run_for_task(task_id)
-                continuous.assert_not_called()
-                contract.assert_called_once_with(
-                    "new_config.yaml", date(2026, 10, 12), "scheduled__2026-10-13", failed=True
-                )
+    def test_a_failed_contract_readiness_task_leaves_the_continuous_row_alone(self) -> None:
+        continuous, contract = self._run_for_task("write_contract_readiness")
+        continuous.assert_not_called()
+        contract.assert_called_once_with(
+            "new_config.yaml", date(2026, 10, 12), "scheduled__2026-10-13", failed=True
+        )
+
+    def test_a_failed_contract_pull_writes_the_continuous_row_as_it_is(self) -> None:
+        # The continuous readiness task now runs after the per-contract pull and the fill, so
+        # it never runs when the per-contract pull fails: the callback writes that row from the
+        # table (the continuous pull succeeded), never as failed.
+        continuous, contract = self._run_for_task("run_contract_pipeline")
+        continuous.assert_called_once_with(
+            "new_config.yaml", date(2026, 10, 12), "scheduled__2026-10-13", failed=False
+        )
+        contract.assert_called_once_with(
+            "new_config.yaml", date(2026, 10, 12), "scheduled__2026-10-13", failed=True
+        )
 
     def test_a_failed_continuous_readiness_task_leaves_the_contract_row_alone(self) -> None:
         continuous, contract = self._run_for_task("write_readiness")
@@ -131,7 +143,25 @@ class TestReadinessFailureCallback(unittest.TestCase):
             if isinstance(node, ast.FunctionDef)
             and any(getattr(d, "id", None) == "task" for d in node.decorator_list)
         }
-        self.assertEqual(tasks, {"run_pipeline"} | CONTINUOUS_ONLY_TASKS | CONTRACT_ONLY_TASKS)
+        self.assertEqual(
+            tasks,
+            {"run_pipeline"}
+            | CONTINUOUS_ONLY_TASKS
+            | CONTRACT_ONLY_TASKS
+            | CONTRACT_PULL_TASKS
+            | AFTER_PULLS_TASKS,
+        )
+
+    def test_a_failed_continuous_fill_writes_both_rows_as_they_are(self) -> None:
+        # Both pulls succeeded; the readiness tasks run after the fill and so did not run. Both
+        # rows are written from the tables, never as failed (consumers must not wait forever).
+        continuous, contract = self._run_for_task("fill_continuous_holes")
+        continuous.assert_called_once_with(
+            "new_config.yaml", date(2026, 10, 12), "scheduled__2026-10-13", failed=False
+        )
+        contract.assert_called_once_with(
+            "new_config.yaml", date(2026, 10, 12), "scheduled__2026-10-13", failed=False
+        )
 
     @patch("data_ngin.application.pipeline_tasks.write_futures_readiness")
     def test_never_raises(self, mock_write: MagicMock) -> None:
