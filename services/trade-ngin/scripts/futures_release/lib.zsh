@@ -22,6 +22,8 @@ LOCKS="$RUN_DIR/locks"
 mkdir -p "$RUN_DIR" "$LOCKS"
 PGBIN="${PGBIN:-${$(command -v psql):h}}"; export PGBIN   # the report scripts read it too
 AWAKE=(); command -v caffeinate > /dev/null && AWAKE=(caffeinate -i)
+# Linux has no md5 command. This one prints the bare hash, as macOS's `md5 -q` does.
+command -v md5 > /dev/null || md5() { [ "${1:-}" = -q ] && shift; md5sum "$@" | cut -d' ' -f1 }
 PID=CONSERVATIVE_PORTFOLIO
 . "$PROD/scratch_guard.zsh"
 export PGTZ=UTC PGCONNECT_TIMEOUT=20
@@ -204,5 +206,5 @@ no_email_in_log() {   # <log (plain or .gz)>: the run must not have sent or buil
 }
 
 scrub() {   # <files...>: replace any IPv4 address with <host> in place (a preflight prints the server's address)
-  local f; for f in "$@"; do [ -f "$f" ] && sed -i '' -E 's/[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/<host>/g' "$f"; done; return 0
+  local f; for f in "$@"; do [ -f "$f" ] && sed -i.scrub -E 's/[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/<host>/g' "$f" && rm -f "$f.scrub"; done; return 0
 }

@@ -15,7 +15,7 @@ Run `zsh scripts/futures_release/00_prerequisites.sh` first. It checks everythin
 - AlgoGators/trade-ngin#282 is merged, and it reached this repository in #98. `REF` below is the commit on `main` of AlgoGators/algogators that the daily image is built from at the release. Use one `REF` for the image and the seed, so the seed's engine is the daily engine. It must hold this folder as audited. A commit id from AlgoGators/trade-ngin does not exist here.
 - `config/defaults.json` has the production login. It is read at run time and never printed.
 - `config/databento.env` has the Databento key (the pull).
-- macOS (the scripts use `sed -i ''` and `md5`), with zsh, `zstd`, `curl`, `git`, cmake and the engine's build tools.
+- macOS or Linux (on Windows, WSL), with zsh, `zstd`, `curl`, `git`, `shasum`, cmake and the engine's build tools.
 - Python 3 with **pandas** and **numpy** (the live report imports both; tested with pandas 3.0.0 and numpy 2.4.1). Every
   other Python file uses the standard library only.
 - `psql`, `pg_dump` and `pg_restore` matching the server, found on `PATH` or in `PGBIN`.
