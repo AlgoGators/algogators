@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 # Lower bounds only; uv.lock pins exact versions.
 # Derived from an AST scan of third-party imports in src/, scripts/ and tests/ (2026-10-15).
 dependencies = [
-    "aiohttp>=3.9",
+    "aiohttp>=3.14.4",
     "cryptography>=42",
     "duckdb>=1.1",
     "httpx>=0.27",
