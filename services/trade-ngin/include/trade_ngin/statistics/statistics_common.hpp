@@ -173,10 +173,12 @@ struct OLSResult {
 };
 
 struct RidgeRegressionConfig {
-    bool include_intercept{true};
+    bool include_intercept{true};       // false: no centring, the fit and predict go through the origin
     double alpha{1.0};
-    int cv_folds{0};                    // 0 = no CV, >0 = k-fold CV for alpha selection
+    int cv_folds{0};                    // 0 = no CV, >1 = contiguous k-fold CV for alpha selection (purged_kfold)
     std::vector<double> alpha_candidates; // Alphas to try during CV
+    int cv_purge{0};                    // rows dropped from training on each side of a CV test block (label horizon)
+    int cv_embargo{0};                  // further rows dropped after the trailing purge; used only when cv_folds > 1
 };
 
 struct RidgeResult {
@@ -184,15 +186,18 @@ struct RidgeResult {
     double intercept{0.0};
     double r_squared{0.0};
     double best_alpha{0.0};
+    std::vector<double> cv_mse;         // mean held-out MSE per alpha candidate, in candidate order; empty without CV
 };
 
 struct LassoRegressionConfig {
-    bool include_intercept{true};
+    bool include_intercept{true};       // false: no centring, the fit and predict go through the origin
     double alpha{1.0};
     int max_iterations{1000};
     double tolerance{1e-6};
-    int cv_folds{0};
+    int cv_folds{0};                    // 0 = no CV, >1 = contiguous k-fold CV for alpha selection (purged_kfold)
     std::vector<double> alpha_candidates;
+    int cv_purge{0};                    // rows dropped from training on each side of a CV test block (label horizon)
+    int cv_embargo{0};                  // further rows dropped after the trailing purge; used only when cv_folds > 1
 };
 
 struct LassoResult {
@@ -202,6 +207,7 @@ struct LassoResult {
     double best_alpha{0.0};
     std::vector<int> selected_features;
     int n_nonzero{0};
+    std::vector<double> cv_mse;         // mean held-out MSE per alpha candidate, in candidate order; empty without CV
 };
 
 // ============================================================================

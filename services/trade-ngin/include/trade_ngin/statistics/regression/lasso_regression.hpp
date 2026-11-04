@@ -28,7 +28,6 @@ private:
     mutable std::mutex mutex_;
 
     LassoResult fit_alpha(const Eigen::MatrixXd& Xc, const Eigen::VectorXd& yc, double alpha) const;
-    double cross_validate(const Eigen::MatrixXd& Xc, const Eigen::VectorXd& yc, double alpha, int k) const;
     static double soft_threshold(double x, double lambda);
 };
 
