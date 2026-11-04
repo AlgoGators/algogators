@@ -382,7 +382,6 @@ def normalize_trades(
         return pd.concat(parts).loc[out.index]
 
     token_id = pd.Series([None] * n, index=out.index, dtype=object)
-    oi = pd.Series(nan, index=out.index)
     label = pd.Series([None] * n, index=out.index, dtype=object)
     src = pd.Series(["unknown"] * n, index=out.index, dtype=object)
     conflict = pd.Series(np.zeros(n, dtype=bool), index=out.index)

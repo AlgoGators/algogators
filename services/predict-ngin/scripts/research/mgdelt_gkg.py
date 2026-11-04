@@ -151,9 +151,8 @@ def main():
         a, b = pd.Timestamp(sys.argv[1]), pd.Timestamp(sys.argv[2])
         w = min(int(sys.argv[3]) if len(sys.argv) > 3 else 2, 2)
         days = list(pd.date_range(a, b, freq="D"))[::-1]  # newest first: most decision days are late
-    log = open(OUT + "run.log", "a")
     t0 = time.time()
-    with Pool(w) as pool:
+    with open(OUT + "run.log", "a") as log, Pool(w) as pool:
         for i, (tag, msg) in enumerate(pool.imap_unordered(do_day, days)):
             print(f"{tag} {msg} [{i+1}/{len(days)} {time.time()-t0:.0f}s]", file=log, flush=True)
 

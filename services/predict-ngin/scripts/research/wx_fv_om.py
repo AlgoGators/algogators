@@ -130,7 +130,8 @@ class OMFair:
 
 
 def load():
-    return OMFair(json.load(open(OUT / "fv_om_params.json")))
+    with open(OUT / "fv_om_params.json") as fh:
+        return OMFair(json.load(fh))
 
 
 def main():
@@ -154,7 +155,8 @@ def main():
         params[f"{meas}|{L}"] = dict(theta=r.x.tolist(), codes=codes, nu=nu)
         w = r.x[:4]
         print(meas, L, "nu", nu, "w", np.round(w, 3), "a,c", np.round(r.x[4:6], 3))
-    json.dump(dict(params), open(OUT / "fv_om_params.json", "w"), indent=1)
+    with open(OUT / "fv_om_params.json", "w") as fh:
+        json.dump(dict(params), fh, indent=1)
     fm = OMFair(params)
     for nm, g in (("train", tr), ("test", te)):
         mu, s, nu = fm.musig(g)

@@ -82,7 +82,8 @@ def main():
         print(t, sum(r["ticker"] == t for r in rows), flush=True)
         pd.DataFrame(rows).to_parquet(fp)
     print("missing", missing)
-    json.dump(missing, open(OUT / "missing.json", "w"))
+    with open(OUT / "missing.json", "w") as fh:
+        json.dump(missing, fh)
 
 
 if __name__ == "__main__":

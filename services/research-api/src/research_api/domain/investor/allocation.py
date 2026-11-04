@@ -7,6 +7,7 @@ Notional is quantity x price x contract size; weights are shares of gross
 """
 
 from dataclasses import dataclass
+from math import isnan
 from typing import Any
 
 OTHER_SECTOR = "Other"
@@ -22,7 +23,7 @@ def _number(value, default=None):
         number = float(value)
     except (TypeError, ValueError):
         return default
-    return number if number == number else default  # NaN -> default
+    return default if isnan(number) else number
 
 
 @dataclass(frozen=True)

@@ -102,7 +102,8 @@ def get(url: str, retries: int = 6):
 
 
 def leagues() -> list[str]:
-    st = json.load(open(ROOT / "raw" / "status.json", encoding="utf-8"))
+    with open(ROOT / "raw" / "status.json", encoding="utf-8") as fh:
+        st = json.load(fh)
     # Disabled leagues (e.g. fifa-world-cup) are out of season now but can sit inside the archive window.
     return sorted({lg["id"] for b in st["sportsbooks"] for lg in b["leagues"]})
 

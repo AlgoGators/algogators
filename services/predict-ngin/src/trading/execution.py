@@ -252,7 +252,6 @@ class TradeBasedExecutionEngine:
         # Slippage from model
         slip = 0.0
         if self.slippage_model is not None:
-            vol = 0.0
             if self.liquidity_filter is not None:
                 vol = self.liquidity_filter.recent_volume(
                     market_id, outcome, signal_ts

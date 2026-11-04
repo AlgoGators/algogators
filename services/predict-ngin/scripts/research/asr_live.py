@@ -78,90 +78,93 @@ async def live(args):
     outd = OUT / "live"
     outd.mkdir(parents=True, exist_ok=True)
     out = Path(args.out) if args.out else outd / f"{args.event}__{time.strftime('%Y%m%dT%H%M%S')}.jsonl"
-    f = open(out, "a")
+    with open(out, "a") as f:
 
-    def log(rec):
-        f.write(json.dumps(rec) + "\n")
-        f.flush()
+        def log(rec):
+            f.write(json.dumps(rec) + "\n")
+            f.flush()
 
-    q = [("model", "nova-3"), ("encoding", "linear16"), ("sample_rate", SR), ("channels", 1),
-         ("interim_results", "true"), ("punctuate", "true"), ("diarize", "true"), ("endpointing", "300")]
-    q += [("keyterm", k) for k in kts[:60]]
-    url = "wss://api.deepgram.com/v1/listen?" + urllib.parse.urlencode(q)
-    hdr = {"Authorization": f"Token {env['DEEPGRAM_API_KEY']}"}
-    deadline = time.time() + args.minutes * 60
-    log({"type": "hdr", "event": args.event, "source": args.url or args.wav, "fed": args.fed, "t_start": time.time(),
-         "titles": titles, "keyterms": kts, "dry_run": bool(args.wav)})
+        q = [("model", "nova-3"), ("encoding", "linear16"), ("sample_rate", SR), ("channels", 1),
+             ("interim_results", "true"), ("punctuate", "true"), ("diarize", "true"), ("endpointing", "300")]
+        q += [("keyterm", k) for k in kts[:60]]
+        url = "wss://api.deepgram.com/v1/listen?" + urllib.parse.urlencode(q)
+        hdr = {"Authorization": f"Token {env['DEEPGRAM_API_KEY']}"}
+        deadline = time.time() + args.minutes * 60
+        log({"type": "hdr", "event": args.event, "source": args.url or args.wav, "fed": args.fed, "t_start": time.time(),
+             "titles": titles, "keyterms": kts, "dry_run": bool(args.wav)})
 
-    async with websockets.connect(url, additional_headers=hdr, max_size=2**24, ping_interval=20) as ws:
-        t0 = time.time()
-        state = {"sent": 0.0, "stop": False}
-        log({"type": "t0", "t0_wall": t0})
+        async with websockets.connect(url, additional_headers=hdr, max_size=2**24, ping_interval=20) as ws:
+            t0 = time.time()
+            state = {"sent": 0.0, "stop": False}
+            snapshots = []
+            log({"type": "t0", "t0_wall": t0})
 
-        async def sender():
-            if args.wav:
-                w = wave.open(args.wav)
-                w.setpos(int(args.wav_start * SR))
-                i = 0
-                while time.time() < deadline:
-                    b = w.readframes(CHUNK // 2)
-                    if not b:
-                        break
-                    await ws.send(b)
-                    i += 1
-                    state["sent"] = i * 0.1
-                    await asyncio.sleep(max(0.0, t0 + i * 0.1 - time.time()))
-            else:
-                p = audio_proc(args.url)
-                loop = asyncio.get_running_loop()
-                while time.time() < deadline:
-                    b = await loop.run_in_executor(None, p.stdout.read, CHUNK)
-                    if not b:
-                        break
-                    await ws.send(b)
-                    state["sent"] += len(b) / 2 / SR
-                p.kill()
-            state["stop"] = True
-            await asyncio.sleep(1.5)
-            await ws.send(json.dumps({"type": "CloseStream"}))
+            async def sender():
+                if args.wav:
+                    with wave.open(args.wav) as w:
+                        w.setpos(int(args.wav_start * SR))
+                        i = 0
+                        while time.time() < deadline:
+                            b = w.readframes(CHUNK // 2)
+                            if not b:
+                                break
+                            await ws.send(b)
+                            i += 1
+                            state["sent"] = i * 0.1
+                            await asyncio.sleep(max(0.0, t0 + i * 0.1 - time.time()))
+                else:
+                    p = audio_proc(args.url)
+                    loop = asyncio.get_running_loop()
+                    while time.time() < deadline:
+                        b = await loop.run_in_executor(None, p.stdout.read, CHUNK)
+                        if not b:
+                            break
+                        await ws.send(b)
+                        state["sent"] += len(b) / 2 / SR
+                    p.kill()
+                state["stop"] = True
+                await asyncio.sleep(1.5)
+                await ws.send(json.dumps({"type": "CloseStream"}))
 
-        async def receiver():
-            async for raw in ws:
-                rw = time.time()
-                m = json.loads(raw)
-                if m.get("type") != "Results":
-                    continue
-                alt = m["channel"]["alternatives"][0]
-                words = [(norm_tok(x["word"]), x["start"], x["end"], x.get("speaker")) for x in alt.get("words", [])]
-                fin = bool(m.get("is_final"))
-                log({"type": "asr", "rw": round(rw, 3), "sent": round(state["sent"], 2), "fin": fin,
-                     "w": [list(x) for x in words]})
-                for d in det.feed(rw, fin, words):
-                    d["type"] = "det"
-                    d["asr_lat"] = round(rw - (t0 + d["e"]), 3) if args.wav else None
-                    d["title"] = titles.get(d["ticker"])
-                    log(d)
-                    print(f"DETECT {d['policy']} {d['ticker']} '{d['title']}' at audio {d['s']:.1f}s", flush=True)
-                    if d["policy"] == "int":
-                        asyncio.get_running_loop().run_in_executor(None, snap_book, d["ticker"], log)
+            async def receiver():
+                async for raw in ws:
+                    rw = time.time()
+                    m = json.loads(raw)
+                    if m.get("type") != "Results":
+                        continue
+                    alt = m["channel"]["alternatives"][0]
+                    words = [(norm_tok(x["word"]), x["start"], x["end"], x.get("speaker")) for x in alt.get("words", [])]
+                    fin = bool(m.get("is_final"))
+                    log({"type": "asr", "rw": round(rw, 3), "sent": round(state["sent"], 2), "fin": fin,
+                         "w": [list(x) for x in words]})
+                    for d in det.feed(rw, fin, words):
+                        d["type"] = "det"
+                        d["asr_lat"] = round(rw - (t0 + d["e"]), 3) if args.wav else None
+                        d["title"] = titles.get(d["ticker"])
+                        log(d)
+                        print(f"DETECT {d['policy']} {d['ticker']} '{d['title']}' at audio {d['s']:.1f}s", flush=True)
+                        if d["policy"] == "int":
+                            snapshots.append(asyncio.get_running_loop().run_in_executor(None, snap_book, d["ticker"], log))
 
-        async def poller():
-            while not state["stop"]:
-                ts = time.time()
-                try:
-                    ms = await asyncio.get_running_loop().run_in_executor(None, fetch_markets, args.event)
-                    log({"type": "book", "rw": round(ts, 3), "rw_done": round(time.time(), 3),
-                         "m": [top(m) for m in ms]})
-                except Exception as e:  # noqa: BLE001
-                    log({"type": "book_err", "rw": ts, "err": str(e)[:200]})
-                await asyncio.sleep(max(0.0, args.poll - (time.time() - ts)))
+            async def poller():
+                while not state["stop"]:
+                    ts = time.time()
+                    try:
+                        ms = await asyncio.get_running_loop().run_in_executor(None, fetch_markets, args.event)
+                        log({"type": "book", "rw": round(ts, 3), "rw_done": round(time.time(), 3),
+                             "m": [top(m) for m in ms]})
+                    except Exception as e:  # noqa: BLE001
+                        log({"type": "book_err", "rw": ts, "err": str(e)[:200]})
+                    await asyncio.sleep(max(0.0, args.poll - (time.time() - ts)))
 
-        await asyncio.gather(sender(), receiver(), poller())
-    log({"type": "done", "t_end": time.time(), "audio_s": state["sent"]})
-    with open(OUT / "minutes_log.jsonl", "a") as g:
-        g.write(json.dumps({"event": args.event, "provider": "dg", "tag": "live" if args.url else "dryrun",
-                            "audio_min": round(state["sent"] / 60, 2), "ts": time.time()}) + "\n")
-    print("log:", out)
+            await asyncio.gather(sender(), receiver(), poller())
+            if snapshots:
+                await asyncio.gather(*snapshots)
+        log({"type": "done", "t_end": time.time(), "audio_s": state["sent"]})
+        with open(OUT / "minutes_log.jsonl", "a") as g:
+            g.write(json.dumps({"event": args.event, "provider": "dg", "tag": "live" if args.url else "dryrun",
+                                "audio_min": round(state["sent"] / 60, 2), "ts": time.time()}) + "\n")
+        print("log:", out)
 
 
 def snap_book(ticker, log):

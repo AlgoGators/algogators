@@ -25,6 +25,7 @@ API (see docs/ENGOPT_BACKTEST_ENGINE.md):
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import time
@@ -353,7 +354,7 @@ def _neq_null_aware(a: pa.Array, b: pa.Array) -> np.ndarray:
 
 
 def _same(x, y) -> bool:
-    return (x is None and y is None) or x == y or (isinstance(x, float) and isinstance(y, float) and x != x and y != y)
+    return (x is None and y is None) or x == y or (isinstance(x, float) and isinstance(y, float) and math.isnan(x) and math.isnan(y))
 
 
 def _lex_nondecreasing(keys: list) -> bool:
