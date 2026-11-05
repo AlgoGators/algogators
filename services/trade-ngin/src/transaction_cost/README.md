@@ -43,14 +43,17 @@ total     = fee + implicit x |q| x point_value
 - `spread_cost_multiplier` defaults to 0.5 and is 0.25 on the treasury and currency contracts.
   Defaults in `AssetCostConfig`: `max_spread_ticks` 10, `max_impact_bps` 100,
   `max_total_implicit_bps` 200; each contract's entry sets its own.
-- CL's baseline spread is 1 tick.
+- CL's baseline spread is 1 tick. MGC and SIL carry GC's and SI's calibration (the micros' data holds no
+  quotes) and pay impact on their own volume. Their fee rows are written by
+  `scripts/futures_release/load/load_micro_metals.sql`, not by a migration.
 - `vol_mult = clip(1 + 0.15 x clip((sigma - 0.01) / 0.005, -2, 2), 0.8, 1.5)`, where `sigma` is the
   sample standard deviation of the last 20 log returns. The 0.01 and 0.005 are fixed numbers, not
   rolling estimates.
 - The impact model floors the volume at `min_adv` = 100 and caps participation at 0.1. `k_bps` is
   10, 20, 40, 60 or 80 for a volume above 1,000,000, 200,000, 50,000, 20,000, or below.
 - A futures fill is priced on ONE volume, the signal bar's with the weekend block added
-  (`futures_cost_feed.hpp`), the same in the backtest and live. Only equities use a 20-bar average.
+  (`futures_cost_feed.hpp`), the same in the backtest and live; with `per_contract_rolls` on it is the held
+  contract's own bar. Only equities use a 20-bar average.
 - Equities: 0.005 per share, 1.00 minimum per order, a maximum of 1 percent of trade value applied
   after the minimum; the sell-side regulatory fees are off on every config.
 - `calculate_costs` takes the SIGNED quantity. Every term uses its absolute value except the

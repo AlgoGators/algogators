@@ -1,8 +1,7 @@
-# F-8 — the adjusted-frame ↔ broker-basis rule
+# Broker basis reconciliation: the book's adjusted basis against a broker statement
 
-**Status:** written 2026-09-03 (Phase B session B-4, from the E4 audit's draft).
-Branch `equities_integration`. Scope: **equities only** — futures carry no splits and no
-dividends, and nothing in this document touches a futures write path.
+Scope: **equities only**. Futures carry no splits and no dividends, and nothing in this document
+touches a futures write path.
 
 This document exists because `trading.positions.average_price` for an equity is **not** the
 number a broker statement prints. The two disagree by construction, by an amount that is
@@ -18,7 +17,7 @@ frame) relates to the outside world.
 
 ## 1. The two frames
 
-### Book (adjusted) frame — what this engine stores
+### Book (adjusted) frame: what this engine stores
 
 `trading.positions.average_price` is restated on **every class-1 ex-date the book held
 through**, by `CorporateActionsApplier::apply` (`src/live/corporate_actions_applier.cpp`):
@@ -30,22 +29,25 @@ through**, by `CorporateActionsApplier::apply` (`src/live/corporate_actions_appl
 | dividend `d`, raw ex-date close `c` | unchanged | `B /= (1 + d/c)` |
 
 `c` is the **RAW** close **on the ex-date**, not an adjusted one and not the prior close
-(`corporate_actions_applier.hpp` field comment; E2-F3; the denominator fix `22d1feb8`). It has
+(`corporate_actions_applier.hpp`, the comment on `close_at_ex_date`). It has
 to be the raw ex-date close because the applier's per-event rescale must equal
 `compute_backward_adjustment_factors`' per-event step, and that works in raw closes; an
 adjusted close carries every LATER event in the window, so under stacked events the two frames
 diverge.
 
-Marks are the back-adjusted close **anchored at the newest loaded bar** (F-7), so today's mark
+A spin-off restates the parent's basis and leaves its share count alone
+(`src/live/corporate_actions_lifecycle.cpp`); the child is handled as in identity 1 below.
+
+Marks are the back-adjusted close **anchored at the newest loaded bar**, so today's mark
 is raw and the whole series behind it is expressed in today's units.
 
 **Consequence:** a dividend is inside `total_pnl` *via the basis*, not as cash.
 `trading.live_results.total_dividend_income` is **informational only** and must never be added
 to a P&L total (`CORP_ACTIONS_DATA_BOUNDARY.md`, and two tests pin it from both directions).
 
-### Broker frame — what a statement prints
+### Broker frame: what a statement prints
 
-- Quantity is restated by **splits only** — identical to the book.
+- Quantity is restated by **splits only**, identical to the book.
 - Cost basis is **never** touched by a dividend.
 - Dividend cash is credited on the **pay** date, not the ex-date.
 - A spinoff **delivers child shares** plus cash-in-lieu for the fractional remainder.
@@ -54,7 +56,7 @@ to a P&L total (`CORP_ACTIONS_DATA_BOUNDARY.md`, and two tests pin it from both 
 
 ## 2. The identities, per open position, at any date T
 
-### Identity 1 — quantity
+### Identity 1: quantity
 
 ```
 q_book == q_broker            exactly
@@ -64,32 +66,33 @@ Exceptions, and only these:
 
 | exception | shape | tolerance |
 |---|---|---|
-| **Spinoffs the terms feed can see** (E2-F31, landed `be604beb`) | parent quantity is now correct and the child is received; under the default `spinoff_child_policy = liquidate_at_first_close` the child is sold at its first close, so the book holds none of it while a broker statement shows the receipt and the sale — reconcile against the two `CORPACTION_<child>_<ex_date>` executions, not against the position | quantity exact on the parent; the child appears only in `trading.executions` |
-| **Spinoffs the terms feed cannot see** — after 2025-08-29, or a child with no price series | the event is refused whole and logged as `SPINOFF NOT APPLIED`: parent quantity is correct, but its basis is PRE-spinoff against a POST-spinoff price series and the child is absent | none — this is a data gap, not a tolerance; the run says so every time |
+| **Spinoffs the terms feed can see** | parent quantity is correct and the child is received; under the default `spinoff_child_policy = liquidate_at_first_close` the child is sold at its first close, so the book holds none of it while a broker statement shows the receipt and the sale; reconcile against the two `CORPACTION_<child>_<ex_date>` executions, not against the position | quantity exact on the parent; the child appears only in `trading.executions` |
+| **Spinoffs the terms feed cannot see** (after 2025-08-29, or a child with no price series) | the event is refused whole and logged as `SPINOFF NOT APPLIED`: parent quantity is correct, but its basis is PRE-spinoff against a POST-spinoff price series and the child is absent | none: this is a data gap, not a tolerance; the run says so every time |
 | **Split fractions** | the book keeps a fractional share; the broker pays cash in lieu | `\|Δq\| < 1` share, AND a CIL execution must exist for `Δq × mark` |
 
-A quantity difference outside those two is a defect. Do not tolerate it.
+A quantity difference outside these is a defect. Do not tolerate it.
 
-### Identity 2 — basis
+### Identity 2: basis
 
 ```
 B_broker == B_book × Π_i (1 + d_i / c_i)
 ```
 
-over the dividends applied since the position's inception. Splits **cancel** — both frames
-divide by `F` — so only dividends appear in the product. Exact in real arithmetic; **tolerance
-1e-6 relative** for the float chain.
+over the dividends applied since the position's inception. Splits **cancel** (both frames
+divide by `F`), so only dividends appear in the product. Exact in real arithmetic; **tolerance
+1e-6 relative** for the float chain. `raw_basis` multiplies the DIVIDEND rows only and skips
+every other row, spin-offs and terminations included (`src/live/broker_frame.cpp`).
 
 Each factor `(1 + d_i / c_i)` is exactly `PositionAdjustment.ratio_change`, which is what the
-`basis_ratio` column on `trading.corp_action_applied` stores (§4). Before that column existed
-the chain could only be recomputed by joining back to `ohlcv_1d` for the raw ex-date closes —
-i.e. the ledger could not be inverted from the ledger.
+`basis_ratio` column on `trading.corp_action_applied` stores (§4). A row written before that
+column existed carries NULL, and its chain can only be recomputed by joining back to `ohlcv_1d`
+for the raw ex-date closes.
 
-### Identity 3 — P&L is NOT reconciled dollar-for-dollar
+### Identity 3: P&L is NOT reconciled dollar-for-dollar
 
 ```
 U_book            = q (M − B_book)
-U_broker + D      = q (M − B_broker) + Σ q·d_i
+U_broker + D      = q (M − B_broker) + Σ q_i·d_i
 ```
 
 These are **not** equal, and expecting them to be is the mistake this section exists to
@@ -99,13 +102,19 @@ prevent. For a single dividend the gap is exactly
 U_book − (U_broker + D) = q · d · (B_broker − (c + d)) / (c + d)
 ```
 
-— the dividend times the *relative distance* between the raw basis and the cum-dividend close.
+the dividend times the *relative distance* between the raw basis and the cum-dividend close.
 It is **zero only when the position was bought at the cum-dividend close**. In general, over
 `n` applied dividends:
 
 ```
-gap = q · B_broker · (1 − 1 / Π_i r_i) − q · Σ_i d_i,      r_i = 1 + d_i / c_i
+gap = q · B_broker · (1 − 1 / Π_i r_i) − q · Σ_i d_i / S_i,      r_i = 1 + d_i / c_i
 ```
+
+where `S_i` is the product of the split factors applied *after* dividend `i`: a dividend paid
+before a 4:1 split was paid on a quarter of today's shares, so it is charged at the share count
+held then, not today's (`expected_pnl_gap`, `include/trade_ngin/live/broker_frame.hpp`). Only
+SPLIT and ADR_SPLIT rows count as share-count changes; a spin-off or termination row changes
+neither term.
 
 **The rule:**
 
@@ -151,18 +160,20 @@ number an operator will otherwise spend an afternoon on.
 
 ## 4. Where this is asserted
 
-| site | what it checks | status |
-|---|---|---|
-| `src/live/broker_frame.{hpp,cpp}` | pure `raw_basis(adj_basis, applied_dividends)` and `expected_pnl_gap(...)` — the two functions above, with no DB and no I/O | LANDED `553ee9d1` |
-| `tests/live/corp_actions/test_broker_frame.cpp` | `RawBasisRecoveredFromAdjustedBasisAndDividendChain`, `PnLGapEqualsDividendTimesBasisDistance` | LANDED `553ee9d1` |
-| `tests/live/corp_actions/test_broker_frame_db.cpp` | `AppliedRowCarriesTheRatioNeededToInvertIt` — the `basis_ratio` column exists, is written, and inverts the stored basis | LANDED `553ee9d1` |
-| `trading.corp_action_applied.basis_ratio` (migration 006) | the per-event factor, so identity 2 is computable from the ledger alone | LANDED `553ee9d1`, applied to `new_algo_data` 2026-09-03 |
-| the live equity runner, after the class-1 apply | one INFO line per adjusted symbol: `F-8 basis frames \| SYM adjusted=X raw-equivalent=Y (n dividend event(s) …)`, and a WARN naming the symbol when a pre-006 row makes the chain uninvertible | LANDED `553ee9d1` |
+| site | what it checks |
+|---|---|
+| `src/live/broker_frame.{hpp,cpp}` | pure `raw_basis(adj_basis, applied_dividends)` and `expected_pnl_gap(...)`, the two functions above, with no DB and no I/O |
+| `tests/live/corp_actions/test_broker_frame.cpp` | `RawBasisRecoveredFromAdjustedBasisAndDividendChain`, `PnLGapEqualsDividendTimesBasisDistance` |
+| `tests/live/test_broker_frame_event_classes.cpp` | only SPLIT and ADR_SPLIT discount an earlier dividend; a spin-off does not; a termination's NULL ratio does not silence the chain; an unknown dividend ratio does |
+| `tests/live/corp_actions/test_broker_frame_db.cpp` | `AppliedRowCarriesTheRatioNeededToInvertIt`: the `basis_ratio` column exists, is written, and inverts the stored basis |
+| `trading.corp_action_applied.basis_ratio` (migration 006) | the per-event factor, so identity 2 is computable from the ledger alone |
+| the live equity runner, after the class-1 apply | one INFO line per adjusted symbol: `F-8 basis frames \| SYM adjusted=X raw-equivalent=Y (n dividend event(s) …)` (`F-8 basis frames` is a fixed prefix in the runner's log text: search the log for it), and a WARN naming the symbol when a pre-006 row makes the chain uninvertible |
 
-**Until a broker adapter exists this is a human-run statement compare.** `src/broker` does not
-exist; the "Broker reconciliation / partial fills" row deferred in the completion plan's §3 is
-the *automation* of this rule, not the rule itself. Do not conflate the two: F-8 is closed by
-the rule + the pure functions + the column; the deferred row stays deferred.
+All of it landed with AlgoGators/trade-ngin#82. The runner logs the raw-equivalent basis only;
+`expected_pnl_gap` has no production caller and is there for a reconciliation and its tests.
+
+**Until a broker adapter exists this is a statement compare done by hand.** `src/broker` does
+not exist. No automated compare exists; the rule, the pure functions and the column stand without it.
 
 ### The query
 
@@ -187,16 +198,23 @@ SELECT p.symbol,
 
 `exp(sum(ln(...)))` rather than a product aggregate because PostgreSQL has no `product()`;
 every `basis_ratio` is `> 0` by construction (`1 + d/c` with `c > 0`, or `F > 0`), so the log
-is always defined. **Rows with `basis_ratio IS NULL` are rows written before migration 006** —
+is always defined. **Rows with `basis_ratio IS NULL` are rows written before migration 006**:
 they are not zero-effect, they are *unknown*, and a chain containing one cannot be inverted
 from the ledger. Say so in the reconciliation rather than treating NULL as 1.0.
 
-### The verification run
+### Checking it on a book
 
-Replay a window containing an applied dividend already in the validated set — **GOOGL 06-08**
-or **META 06-15**. Then `avg_price × Π basis_ratio` from the dedup rows must equal the fill
-price in `trading.executions` to 1e-6 relative, and the runner's log line must show both
-numbers.
+Replay a window in which a held position goes through a dividend. For a position opened by one
+fill and held through dividends only, `avg_price × Π basis_ratio` from the de-duplication rows
+must equal the fill price in `trading.executions` to 1e-6 relative, and the runner's log line
+must show both numbers.
+
+A worked example on real data: META's dividend of 2026-06-15. The `basis_ratio` the equity book
+stored for it in `trading.corp_action_applied`, 1.0008846127923434, equals 1 + 0.525 / 593.48 (the
+dividend over the raw ex-date close) to every digit. The arithmetic can be checked from these
+numbers; the stored value itself is in the database, not in this repository, so checking it needs a
+read of that table. The split path of `basis_ratio` is pinned by the unit tests in the table above; on real
+data it is unmeasured.
 
 ---
 
@@ -208,36 +226,7 @@ numbers.
 - It does not license restating the broker's numbers into the book's frame in reporting. Report
   what each frame says and the expected gap between them.
 - It says nothing about **realized** P&L on a closed position. A closed row carries no basis
-  (`AVERAGE_PRICE_LIFECYCLE.md` rule 5, `average_price = 0`), so identity 2 has no subject
+  (`AVERAGE_PRICE_LIFECYCLE.md` rule 7, `average_price = 0`), so identity 2 has no subject
   there. The realized figure on the exit was struck against the *adjusted* basis, and it
-  therefore carries the same gap, permanently. That is the strongest argument for storing
+  therefore carries the same gap, permanently. That is the reason for storing
   `basis_ratio`: after the row closes, the ledger is the only remaining record of the chain.
-
----
-
-## 6. Implementation status (update this table as the pieces land)
-
-| piece | tier | status |
-|---|---|---|
-| the rule (this document) | Tier 1 | **DONE** 2026-09-03, commit `ad0532d5` |
-| `src/live/broker_frame.{hpp,cpp}` | Tier 2 | **DONE** `553ee9d1` |
-| the three tests | Tier 2 | **DONE** `553ee9d1` (2 pure + 1 DB-gated) |
-| `basis_ratio` column, migration 006 | Tier 2 | **DONE** `553ee9d1`; migration applied to `new_algo_data` 2026-09-03 |
-| runner log line | Tier 2 | **DONE** `553ee9d1` |
-| GOOGL 06-08 / META 06-15 verification replay | Tier 2 | **NOT RUN** — see the note below |
-| broker adapter / automated compare | deferred (§3 of the completion plan) | NOT STARTED, deliberately |
-
-**The GOOGL/META verification replay was not run, and cannot yet prove what it was meant to.**
-Every `trading.corp_action_applied` row that exists today predates migration 006, so
-`basis_ratio` is NULL on all of them and `raw_basis` correctly answers UNKNOWN. The column only
-starts carrying values on dividends applied by a run built after `553ee9d1`. The replay
-therefore belongs to the Phase D end gate, which rebuilds the book from the chain start with
-the new binary: at that point `avg_price × Π basis_ratio` can be compared against the fill price
-in `trading.executions` to 1e-6 relative, exactly as the rule specifies. The mechanism itself is
-proven by `AppliedRowCarriesTheRatioNeededToInvertIt`, which round-trips a real row through the
-real table and inverts a basis with it.
-
-**Migration number:** the E4 audit and `PHASE_B_E3_E4_FIXES.md` both say "migration 005" for
-`basis_ratio`. 005 was taken on 2026-09-03 by `corp_action_applied.run_date` (E2-F23 / F23-C′,
-commit `4e9cfabe`), so `basis_ratio` is **006**. The two are independent columns on the same
-table and neither depends on the other.

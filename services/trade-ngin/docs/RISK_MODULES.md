@@ -162,8 +162,10 @@ load error. The design comment is `include/trade_ngin/risk/risk_module_config.hp
 ### 4.1 The file
 
 The `conservative` book's file (`config_template/portfolios/conservative/risk.json`, comment keys
-omitted). The `base` book's file (`config_template/portfolios/base/risk.json`) is the same except
-`max_drawdown`, which is 0.4:
+omitted). The `base` book's file (`config_template/portfolios/base/risk.json`) has the same keys with
+other values: `max_gross_leverage` 8.0 and `max_net_leverage` 6.0 (in
+the module and in `risk_reporting`), `R_max` 2.25, `R_jump_max` 4.5, `R_shock_max` 4.0,
+`overlay_covariance` `"sample"` and `max_drawdown` 0.4:
 
 ```json
 {
@@ -172,17 +174,18 @@ omitted). The `base` book's file (`config_template/portfolios/base/risk.json`) i
     {
       "id": "carver",
       "type": "carver",
-      "max_gross_leverage": 8.0,
-      "max_net_leverage": 6.0,
+      "max_gross_leverage": 7.25,
+      "max_net_leverage": 5.5,
       "confidence_level": 0.99,
       "lookback_period": 252,
       "lookback_unit": "dates",
       "min_gate_dates": 21,
-      "R_max": 2.25,
-      "R_jump_max": 4.5,
-      "R_shock_max": 4.0,
+      "R_max": 1.75,
+      "R_jump_max": 4.75,
+      "R_shock_max": 3.0,
       "per_name_cap": 2,
       "trim_max": 5,
+      "overlay_covariance": "carver",
       "missing_symbol_policy": "ignore",
       "_missing_symbol_policy_reason": "..."
     }
@@ -190,8 +193,8 @@ omitted). The `base` book's file (`config_template/portfolios/base/risk.json`) i
   "risk_reporting": {
     "type": "carver",
     "window": "all_bars",
-    "max_gross_leverage": 8.0,
-    "max_net_leverage": 6.0,
+    "max_gross_leverage": 7.25,
+    "max_net_leverage": 5.5,
     "confidence_level": 0.99,
     "lookback_period": 252
   },
@@ -215,10 +218,11 @@ runner refuses to start without one (`ConfigLoader::require_loop_keys`,
 | Key | Required | Meaning | Read by |
 |---|---|---|---|
 | `id`, `type` | yes | the module's name and `"carver"` | the loader, every record |
-| `R_max`, `R_jump_max`, `R_shock_max` | yes, all three together | the three risk limits as ratios to `tau`; each a positive number | the overlay |
+| `R_max`, `R_jump_max`, `R_shock_max` | yes, all three together | the three risk limits as ratios to `tau`; each a positive number, `R_max` at most 3 and the other two at most 6 | the overlay |
 | `max_gross_leverage`, `max_net_leverage` | yes | the gross and net leverage limits, as they are; `0 < net <= gross <= 10` | the overlay; must equal the `risk_reporting` pair, which is what the reporter reads |
-| `per_name_cap` | yes | the cap `L` on one symbol's weight on the sizing capital; positive | the cap on the target, the search, the clip, the CAP mark |
-| `trim_max` | yes | the most contracts the trim removes in one rebalance; a whole number, 0 or more | the trim |
+| `per_name_cap` | yes | the cap `L` on one symbol's weight on the sizing capital; positive, at most 4 | the cap on the target, the search, the clip, the CAP mark |
+| `trim_max` | yes | the most contracts the trim removes in one rebalance; a whole number, 0 to 20 | the trim |
+| `overlay_covariance` | yes | `"sample"` or `"carver"`: how the overlay's covariance is built (section 5.3); any other value, or a missing key, is a load error (`src/risk/risk_module_config.cpp`) | the overlay (`overlay::carver_covariance`; `PortfolioConfig::overlay_carver`, set by `apply_loop_config`) |
 | `confidence_level` | yes | in (0, 1) | nothing in the overlay; checked at load (table below) |
 | `lookback_period` | yes | a positive whole number of dates, at least 120 and at least `min_gate_dates` | nothing in the overlay; checked at load (table below) |
 | `lookback_unit` | yes | must be `"dates"`; `"bars"` is refused with the command that upgrades the file | nothing; checked at load (table below) |
@@ -279,28 +283,29 @@ A book that does NOT carry the overlay's limits (the equity book) keeps the olde
 ### 4.4 The load rules
 
 `parse_risk_schema` (`risk_module_config.cpp`) stops at the first broken rule. The order is in
-the comment at `risk_module_config.cpp`.
+the comment at the head of `risk_module_config.cpp`. The lines are those of `src/risk/risk_module_config.cpp` on
+AlgoGators/algogators main, `services/trade-ngin/`.
 
-| Rule | Line |
+| Rule | Where |
 |---|---|
-| A file with no `schema` key and any flat gating key is schema 1: refused, with the migration command in the message | `check_not_schema1`, 671-682 |
-| `schema` is required and must be 2; `modules` is required | 757-764 |
-| The only top-level keys are `schema`, `modules`, `risk_reporting`, `max_drawdown`, `max_leverage` | 767-775 |
-| `max_drawdown` is required, in (0, 1] | 782-787 |
-| `modules` is a non-empty array: an omission and a decision must not share an encoding | 802-806 |
-| Every module has a known `type`; a key that is not one of its type's keys is refused; every required key of its type must be present (the only optional keys are `every_lap` on a `constant_scale` module and the three overlay limits on a `carver` module) | `ModuleParser::parse`, 97; `require_keys`, 382-387 |
-| `none` needs non-empty `_reason`, `_ruled_by` and `_ruled_on` (YYYY-MM-DD), is valid at portfolio scope only, and must be the only module of its scope | 130-152, 815-819 |
-| `carver` is valid at portfolio scope only | 160-165 |
-| `R_max`, `R_jump_max`, `R_shock_max` come together or not at all | 169-176 |
-| `constant_scale` needs `scale` in (0, 1]; `warn` and `refuse` need a `condition` and a non-empty `reason` | 319-349 |
-| A `warn` or `refuse` whose condition is `never` needs a non-empty `_never_reason` | 986-999 |
-| A sleeve key must name a strategy of the book; a sleeve's array must not be empty | 827-842 |
-| One module id names one module across the whole book | 857-879 |
-| At most one COMPOSITION-term module along any sleeve to portfolio chain (so two `carver` modules at portfolio scope are refused) | 883-916 |
-| On a book with more than one enabled sleeve, a module that can REFUSE (a `refuse` module) is refused at either scope | 920-947 |
-| A book with no `carver` module anywhere, other than the lone `none`, needs `_ruled_by` and `_ruled_on` at the top of `risk.json` | 955-981 |
-| `risk_reporting` is required, with `type` `"carver"` and `window` `"all_bars"`, and no key outside its own list | 1017-1031, 1064-1068 |
-| While a `carver` module gates the book, every `risk_reporting` value equals the module's | 1084-1105 |
+| A file with no `schema` key and any flat gating key is schema 1: refused, with the migration command in the message | `check_not_schema1`, 720-731 |
+| `schema` is required and must be 2; `modules` is required | `parse_risk_schema`, 805-813 |
+| The only top-level keys are `schema`, `modules`, `risk_reporting`, `max_drawdown`, `max_leverage` | 815-824 |
+| `max_drawdown` is required, in (0, 1] | 829-836 |
+| `modules` is a non-empty array: an omission and a decision must not share an encoding | 849-855 |
+| Every module has a known `type`; a key that is not one of its type's keys is refused; every required key of its type must be present (the only optional keys are `every_lap` on a `constant_scale` module and the three overlay limits on a `carver` module; naming the three limits makes `per_name_cap`, `trim_max` and `overlay_covariance` required and refuses `var_limit`, `jump_risk_limit` and `max_correlation`) | `ModuleParser::parse`, 112-137, 192-207, 367; `require_keys`, 420-439 |
+| `none` needs non-empty `_reason`, `_ruled_by` and `_ruled_on` (YYYY-MM-DD), is valid at portfolio scope only, and must be the only module of its scope | 145-167, 863-869 |
+| `carver` is valid at portfolio scope only | 175-180 |
+| `R_max`, `R_jump_max`, `R_shock_max` come together or not at all | 184-191 |
+| `constant_scale` needs `scale` in (0, 1]; `warn` and `refuse` need a `condition` and a non-empty `reason` | 366-399 |
+| A `warn` or `refuse` whose condition is `never` needs a non-empty `_never_reason` | 1032-1062 |
+| A sleeve key must name a strategy of the book; a sleeve's array must not be empty | 871-901 |
+| One module id names one module across the whole book | 904-928 |
+| At most one COMPOSITION-term module along any sleeve to portfolio chain (so two `carver` modules at portfolio scope are refused) | 930-965 |
+| On a book with more than one enabled sleeve, a module that can REFUSE (a `refuse` module) is refused at either scope | 967-996 |
+| A book with no `carver` module anywhere, other than the lone `none`, needs `_ruled_by` and `_ruled_on` at the top of `risk.json` | 998-1030 |
+| `risk_reporting` is required, with `type` `"carver"` and `window` `"all_bars"`, and no key outside its own list | 1064-1081, 1113-1117 |
+| While a `carver` module gates the book, every `risk_reporting` value equals the module's | 1130-1155 |
 
 The portfolio manager repeats the structural rules on what it is handed, so a config built in code
 is held to them too: an empty module list throws (`portfolio_manager.cpp`), a module that
@@ -322,7 +327,8 @@ python3 scripts/migrate_risk_json.py <config dir> --in-place  # write it
 It keeps a `.schema1.bak` (or `.bars.bak`) copy of each file it changes and refuses, with the
 reason, where a file does not say enough to migrate safely: it never writes a value nobody wrote.
 It does not write a futures book's overlay keys. After it has run, a futures book still needs, by
-hand, `R_max`, `R_jump_max`, `R_shock_max`, `per_name_cap` and `trim_max` on its `carver` module,
+hand, `R_max`, `R_jump_max`, `R_shock_max`, `per_name_cap`, `trim_max` and `overlay_covariance` (`sample` or
+`carver`, required once the limits are named) on its `carver` module,
 and the retired keys of section 4.3 removed; `config_template/` shows the result. The script's
 header lists the other futures keys outside `risk.json` that the runners require.
 
@@ -332,7 +338,7 @@ The overlay is the book-level reduction described by Robert Carver in Advanced F
 Strategies, Part Six, "Tactic four: Risk management", section "An exogenous risk overlay": it
 takes the positions the strategy wants as its input, measures them in several ways, turns each
 measure into a multiplier no greater than one, and multiplies the positions by the smallest. Four
-of the engine's five readings are the book's four (estimated portfolio risk, jump risk, correlation
+of the engine's five readings are Carver's four (estimated portfolio risk, jump risk, correlation
 shock, leverage). The net leverage reading, the per-name cap on the target, the treatment of held
 rows, and the trim after rounding are this engine's own; the reasons for each are in
 [OPTIMIZER_AND_RISK_DESIGN.md](OPTIMIZER_AND_RISK_DESIGN.md).
@@ -355,7 +361,8 @@ Each symbol of the rebalance is classified first (`one_pass.cpp`):
 | close-out | has a bar today, is not in the hold set, no sleeve signals it now, it was signalled earlier in the run (on a live run a held position stands for that), and the held quantity is not zero | zero |
 
 The hold set is the engine's own (a symbol whose bar is not a session bar, a withheld bar, a
-change bar, a symbol the cost model cannot price) plus the deferral band (a held position on the
+pending roll: a vendor switch bar the next bar has not yet kept, a symbol the cost model cannot
+price) plus the deferral band (a held position on the
 other side of the first sleeve's forecast while that forecast is inside the band).
 [OPTIMIZER_AND_RISK_DESIGN.md](OPTIMIZER_AND_RISK_DESIGN.md) and
 [FUTURES_ROLLS.md](FUTURES_ROLLS.md) describe when each applies.
@@ -369,16 +376,17 @@ and `E` is the day's sizing capital, not the starting capital.
 
 | Reading | Formula | Limit | Where the limit is configured | Code |
 |---|---|---|---|---|
-| `R`, portfolio risk | `sqrt(x' Sigma x)`, `Sigma` the annualised covariance of the gate window | `R_max x tau` | `R_max` on the `carver` module | `overlay.cpp` |
+| `R`, portfolio risk | `sqrt(x' Sigma x)`, `Sigma` the annualised covariance of the gate window: the sample covariance under `"sample"`, `sigma_i x sigma_j x rho_ij` under `"carver"` (section 5.3) | `R_max x tau` | `R_max` on the `carver` module | `overlay.cpp` |
 | `R_jump`, jump risk | `sqrt(x' Sigma_jump x)`, `Sigma_jump` built from the window's correlations and each participant's own jump sigma | `R_jump_max x tau` | `R_jump_max` | `overlay.cpp` |
-| `R_shock`, correlation shock | `sum of abs(x_i) x sigma_i`, `sigma_i` the participant's annualised window sigma | `R_shock_max x tau` | `R_shock_max` | `overlay.cpp` |
+| `R_shock`, correlation shock | `sum of abs(x_i) x sigma_i`, `sigma_i` the participant's annualised window sigma under `"sample"`, its sizing sigma under `"carver"` (section 5.3) | `R_shock_max x tau` | `R_shock_max` | `overlay.cpp` |
 | `L_g`, gross leverage | `sum of abs(x_i)` | `max_gross_leverage` | `max_gross_leverage` | `overlay.cpp` |
 | `L_n`, net leverage | `sum of x_i`, signed; the limit applies to its absolute value | `max_net_leverage` | `max_net_leverage` | `overlay.cpp` |
 
 `tau` is the risk target of the book's first sleeve (`risk_target` in that sleeve's `config` in
 `portfolio.json`, 0.20 for the first sleeve of both futures books in `config_template`). With the
-shipped ratios 2.25, 4.5 and 4.0 the limits in reading units are 0.45, 0.90 and 0.80, beside 8.0
-and 6.0 for the two leverage readings. The limits are turned from ratios into reading units at
+conservative book's ratios 1.75, 4.75 and 3.0 the limits in reading units are 0.35, 0.95 and 0.60,
+beside 7.25 and 5.5 for the two leverage readings; the base book's 2.25, 4.5 and 4.0 give 0.45,
+0.90 and 0.80, beside 8.0 and 6.0. The limits are turned from ratios into reading units at
 `portfolio_manager.cpp`. Carver's book sets each of its own limits at the 99th
 percentile of that reading's history on its own portfolio, so that the overlay acts on unusual
 days and leaves ordinary days alone. The limits here are the values written in `risk.json`;
@@ -417,6 +425,30 @@ the signal date (`overlay::gate_window`, `overlay.cpp`; the rules are the commen
 The young-participant rule is what keeps a newly listed contract from shortening everybody's
 window: a contract with twenty returns would otherwise cut the complete dates to twenty and blind
 the whole book.
+
+**`overlay_covariance`.** The table above is the `"sample"` covariance (the base book's). With
+`"carver"` (the conservative book's) the window, its participants, its mode and its annualisation
+are the same, and on a window that is not blind the covariance over the participants in `R`
+becomes `sigma_i x sigma_j x rho_ij` (`overlay::carver_covariance`, `include/trade_ngin/risk/overlay.hpp`;
+`src/risk/overlay.cpp`):
+
+- `sigma_i` is the participant's own annualised standard deviation as its sleeve sizes it, the
+  same figure the position was sized on; every participant in `R_shock` also shocks on it;
+- `rho_ij` is the exponentially weighted correlation of the two participants' weekly returns, span
+  26 weeks (`kCarverCorrelationWeeks`), over every week both have a return. A weekly return is the
+  sum of the daily returns in a Saturday-to-Friday week, taken over every row of the returns the
+  sleeve hands over, not only the window's 252. The sleeve hands over each symbol's last 300 bars
+  (`kOverlayBars`, `src/strategy/trend_following.cpp`), about 50 to 60 weeks, so the part of the
+  26-week weighting that would lie on older weeks, about 1 to 2 percent of the weight depending on
+  bars per week, is not read. A pair with fewer than two common weeks, or no variance, has `rho` 0;
+- `R_jump` reads the window's correlations, so under `"carver"` it uses these weekly
+  correlations on each participant's jump sigma.
+
+Why the conservative book uses Carver's estimator, and how it goes with the limits, is in
+[OPTIMIZER_AND_RISK_DESIGN.md](OPTIMIZER_AND_RISK_DESIGN.md), section 13. The optimiser's own covariance is separate and is not set by this key: it is the sample
+covariance of each symbol's last 756 consumed closes, with a stale rule of 5 dates, both constants
+of the code (`kOptimiserBars`, `src/strategy/trend_following.cpp`; `optimiser_covariance`,
+`src/optimization/one_pass.cpp`), with no config key.
 
 ### 5.4 BLIND
 
@@ -527,7 +559,7 @@ scope is not traded this rebalance**.
 | `trading.live_run_metadata` | the day's row is written a second time with `risk_refusal` (the action, the module, the scope id, the phase and the lap, the reason, and the error when a failure caused the refusal; `portfolio_risk_refusal`, `run_metadata_marks.hpp`) and `risk_decisions` (the full record) added to its `portfolio_config` JSON; every other key is unchanged (`mark_risk_refusal`, `include/trade_ngin/live/run_metadata_marks.hpp`; the call is `apps/strategies/live_portfolio_conservative.cpp`) |
 | Exit code | 3 (`kRiskModuleFailureExitCode`, `include/trade_ngin/live/risk_module_failure.hpp`; returned at `live_portfolio_conservative.cpp`) |
 | Log | `OVERLAY refused ... reason="..."` (the ordinary OVERLAY line when it is the re-read of the rounded book that failed), an ERROR `Risk overlay refused portfolio ...`, and an ERROR `RISK_MODULE_FAILURE ...` |
-| Email | the subject is prefixed `[RISK MODULE FAILED - BOOK HELD] ` and the body opens with a banner (`risk_module_failure.hpp`) |
+| Email | the runner hands the failure, in plain words, to the Python book report as its `--alert` (`risk_module_failure_text`, `risk_module_failure.hpp`); the report prefixes the subject `[RISK MODULE FAILED - BOOK HELD] ` and opens the body with a "Risk module failed - book held" banner (`services/rpc/algogators_rpc/services/report/__main__.py` and `services/rpc/algogators_rpc/services/report/builder.py`) |
 
 The row is marked, not deleted, because it records a run that did happen. Without the mark a held
 day would look like an ordinary completed run: its positions and results are there. The watchdog
@@ -725,9 +757,10 @@ lines), which [OPTIMIZER_AND_RISK_DESIGN.md](OPTIMIZER_AND_RISK_DESIGN.md) cover
 
 **An illustration with invented inputs.** This section shows the overlay's arithmetic on a book of
 three contracts. Every input is invented and chosen round so that each step can be checked by
-hand: no number here is a stored row or the output of a run. The settings are the shipped ones
-(`tau` 0.20, the five limits of section 5.2, a per-name cap of 2), and every step is the one the
-code takes, in the functions section 5 cites.
+hand: no number here is a stored row or the output of a run. The settings are `tau` 0.20, a
+per-name cap of 2, the sample covariance, and the base book's limits (ratios 2.25, 4.5 and 4.0;
+leverage 8.0 and 6.0), not the conservative book's of section 5.2. Every step is the one the code
+takes, in the functions section 5 cites.
 
 **The capital.** The book starts with 500,000. Its settled net P&L of the three days before the
 rebalance is +15,000, -5,000 and +30,000.

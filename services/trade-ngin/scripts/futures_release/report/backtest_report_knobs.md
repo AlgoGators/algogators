@@ -26,9 +26,10 @@ so they end on the same last bar. Each run is labelled by its first traded day a
 
 **Reading the results: each run is one path.** The book is 500,000 traded in whole contracts, the search starts each
 day from the book already held, and the sizing capital follows the account's drawdowns. So two runs that start a few
-days apart hold different books for years, and their results can differ widely on the same prices. Measured on the
-2026-10-14 engine and setup: the 10y window ending 2026-10-07, on the same prices, returned 129.1% when it started on
-2015-10-07 and 61.0% when it started on 2015-10-14. That measure was not repeated on this engine. Read a result
+days apart hold different books for years, and their results can differ widely on the same prices. Measured on an
+earlier engine and setup (the 2026-10-14 runs): the 10y window ending 2026-10-07, on the same prices, returned 129.1%
+when it started on 2015-10-07 and 61.0% when it started on 2015-10-14. On this engine the size of the effect is
+unmeasured. Read a result
 across the four windows, and do not treat a difference between two settings as real unless it is larger than what
 moving the start date does.
 
@@ -56,7 +57,7 @@ moving the start date does.
 | Interest Rates | UB, ZF, ZN, ZT | |
 | Metals | HG, MGC, PL, SIL (GC before 2010-10-04, SI before 2013-06-17) | |
 
-The first-price dates are the vendor series' as recorded for the 2026-10-14 set (data, not confirmed in code); with
+The first-price dates are the vendor series' as recorded for the 2026-10-14 set (data; no code sets them); with
 per-contract rolls a micro's history before its change is its full-size root's contracts (section 8).
 
 ### 2. Bars: which prints are used
@@ -164,7 +165,7 @@ the roll rule holds, at its own prices. The vendor's `.v.0` splice is no longer 
 | D* | the held contract's deadline: its first notice day, or its last trading day where that comes first or where it has no notice day. The last trading day is read from the contract's expiration; the first notice day comes from the exchange rule | code `contract_dates`, `contract_roll_rule.cpp`; `ExchangeRules`, `roll_calendar.hpp` |
 | 5 trading days | the roll window opens on the 5th trading day before D* and ends on the last actionable bar (the last trading-day bar whose next calendar day is still before D*) | code `contract_dates`, `contract_roll_rule.cpp` |
 | first of three | the roll happens on the first of: the vendor's confirmed forward switch; the first bar in the window where the next contract's volume is above the held one's; the last actionable bar | code, `contract_roll_rule.hpp` (the rule's design comment) |
-| the cycle | the contract rolled into is the next one in the root's cycle that prints that day: for example GC and MGC G, J, M, Q, Z; SI and SIL H, K, N, U, Z; the rates, FX and equity indexes H, M, U, Z | code `roll_cycle_table`, `roll_cycle.hpp` |
+| the cycle | the contract rolled into is the next one in the root's cycle that prints that day: for example GC and MGC G, J, M, Q, Z; SI and SIL H, K, N, U, Z; the rates, the equity indexes and FX H, M, U, Z, except 6L, which rolls every month | code `roll_cycle_table`, `roll_cycle.hpp` |
 | never back | a vendor switch into an earlier contract, or a one-bar stray, is ignored and the held contract's own bar is read | code, `contract_roll_rule.hpp` |
 | exchange calendar | trading days are the exchange's own, per product group (CME Group), not the NYSE's; a vendor switch on a Sunday or a holiday session rolls on the next trading-day bar where both contracts print | code `FuturesCalendar`, `roll_calendar.hpp`; `include/trade_ngin/core/futures_holidays.json` |
 | held | on a vendor switch bar the next bar has not yet confirmed, the bar handed out is the held contract's own | config `per_contract_switch_bar` |
@@ -189,11 +190,11 @@ roll (no close of the old contract up to the last actionable bar) books an appro
 | Number | What it does | Set in |
 |---|---|---|
 | 0.61 to 3.01 per contract per side | broker fee, Interactive Brokers' schedule: MYM 0.610; MES, MNQ, M2K 0.614; ZT, ZF 1.510; ZN 1.660; UB 1.810; MBT 2.011; CL, HO, RB 2.360; NG 2.460; FX 2.461; metals 2.510; GF, HE, LE 2.961; grains 3.010 (E-minis before 2019: ES, NQ, RTY 2.247, YM 2.240) | data `metadata.contract_metadata."Fee Per Contract"` (migration 026) |
-| MGC 0.96, SIL 0.86 | the gold and silver micros' fee: commission 0.25 + exchange 0.70 (MGC) or 0.60 (SIL) + regulatory 0.01. SIL's 0.60 exchange fee and both micros' margins are derived, not confirmed (margins are not read by sizing or trades) | data `metadata.contract_metadata."Fee Per Contract"` (the micro-metals load) |
+| MGC 0.96, SIL 0.86 | the gold and silver micros' fee: commission 0.25 + exchange 0.70 (MGC) or 0.60 (SIL) + regulatory 0.01. SIL's 0.60 exchange fee is CME notice SER-8425's, as the broker's schedule lists no SIL row, and both micros' margins are the full-size rows' divided by the ratio (margins are not read by sizing or trades) | data `metadata.contract_metadata."Fee Per Contract"` (the micro-metals load) |
 | 1.50 | fallback fee where a row has none; no row of the book uses it | code `transaction_cost_manager.hpp` |
 | metadata required | a future with no usable metadata row (no positive contract size or tick size) logs an ERROR and its spread and impact are not priced; it is never priced on a guessed constant | code, `transaction_cost_manager.cpp` |
 | 0.5 / 0.25 | share of the quoted spread paid: 0.25 on rates and FX, 0.5 on the rest | code `asset_cost_config.cpp`, `asset_cost_config.hpp` |
-| 1 or 2 ticks | baseline spread: 2 for 6L, 6M, GF, HE, KE, LE, NG, ZC, ZL, ZR, ZS, ZW; 1 for the rest, MGC and SIL included (GC's and SI's entries; the bought data has no quotes) | code `asset_cost_config.cpp` |
+| 1 or 2 ticks | baseline spread: 2 for 6L, 6M, GF, HE, KE, LE, NG, ZC, ZL, ZR, ZS, ZW; 1 for the rest, MGC and SIL included (GC's and SI's entries; the licensed data has no quotes) | code `asset_cost_config.cpp` |
 | 0.15, 0.8 to 1.5, 20 returns, 0.01, 0.005 | the spread widens with the contract's recent volatility: sensitivity, bounds, window, baseline daily volatility, its scale | code `spread_model.hpp`, `spread_model.cpp` |
 | 10, 20, 40, 60, 80 bps | market impact coefficient by the bar's volume (over 1m, 200k, 50k, 20k lots, else) times sqrt(share of volume); a micro's impact reads its own volume | code `impact_model.cpp` |
 | 100 lots, 0.10 | impact volume floor and participation cap | code `impact_model.hpp` |

@@ -25,8 +25,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 The build produces the library `trade_ngin`, one test executable, one benchmark executable (`trade_ngin_bench`,
-`benchmarks/CMakeLists.txt`) and eight applications
-(`apps/strategies/CMakeLists.txt`, `apps/backtest/CMakeLists.txt`):
+`benchmarks/CMakeLists.txt`) and nine applications, seven runners and two tools
+(`apps/strategies/CMakeLists.txt`, `apps/backtest/CMakeLists.txt`, `apps/tools/CMakeLists.txt`):
 
 | Binary | Source | Book |
 |---|---|---|
@@ -37,40 +37,68 @@ The build produces the library `trade_ngin`, one test executable, one benchmark 
 | `bt_portfolio` | `apps/backtest/bt_portfolio.cpp` | BASE backtest |
 | `bt_equity_mr` | `apps/backtest/bt_equity_mean_reversion.cpp` | equity backtest |
 | `bt_equity_validation` | `apps/backtest/bt_equity_validation.cpp` | equity validation run |
+| `qt_settings_check` | `apps/tools/qt_settings_check.cpp` | a tool: the QT desk asks it whether a settings change would be accepted by a live run |
+| `contract_rolls_dump` | `apps/tools/contract_rolls_dump.cpp` | a tool: the per-contract roll rule's held series per root, as CSV, read only |
 
-A Release build puts them in `build/bin/Release/`.
+A Release build puts them in `build/bin/Release/`. The options `TRADE_NGIN_BUILD_TESTS` and
+`TRADE_NGIN_BUILD_APPS` (both on by default, `CMakeLists.txt`) leave out the tests, or the
+applications and the benchmark.
 
 Tests are GoogleTest, compiled into `trade_ngin_tests` and discovered by CTest (`tests/CMakeLists.txt`).
 Two Python suites run through CTest as well: `MigrateRiskJson.ScriptSuite` and `CheckLiveTrading.ScriptSuite`
 (`tests/CMakeLists.txt`). Run a subset with a name pattern, for example `ctest --test-dir build -R CheckLiveTrading`.
 
+Three test scripts run the real binaries against a test database. None is in CI: each is started by hand, and each
+deletes or rewrites rows of the books it tests, so point it only at a test database. Their guards differ (last column):
+
+| Script | What it tests | What it needs |
+|---|---|---|
+| `scripts/live_mode_gate/gate.sh` | that a live runner does in production (a date equal to the host's date) what it does in every past-date test run | a database of its own, whose name contains `scratch`, starting books and a built linked worktree ([scripts/live_mode_gate/README.md](../scripts/live_mode_gate/README.md)) |
+| `scripts/qt_e2e.sh` | the QT desk end to end on `QT_E2E_PORTFOLIO`, as AlgoLens drives it: it writes the `trading.position_overrides` rows and calls the gRPC commands, then reads the books back. The steps: the model run; a desk edit and its desk run; an override request, a refused self-approval and the approver's decision; an approval of a past day refused by the 10:00 cutoff; the catch-up fallback publishing the model's book with no e-mail | run on the host next to an `engine-rpc` container (`QT_AGENT_CONTAINER`, default `engine-rpc`) whose own `DB_NAME` is the same test database (so production's `engine-rpc` is refused too); `DB_NAME` must start with `scratch_`, `test_` or `qt_e2e_`. Each run takes the latest date on or before `QT_E2E_LAST_DATE` that has no command rows yet and first deletes that book's rows. Exit code = the number of failed checks |
+| `scripts/qt_runner_check.sh` | the QT runner's own rules on the real binary and `QT_E2E_PORTFOLIO`: the model run of a desk-editable book finalises the system book's previous day from its own rows; an unpublished day refuses the next run; the daily cutoff (`--publish` freezes the day and sends nothing, `--send-now` sends from the stored rows, the model run publishes nothing, `--fallback` resets the desk book to the model's and publishes it, `--send` refuses an unpublished day); a desk flatten stores a 0-quantity row priced at the latest known price; an approval of a proposal that moved after its snapshot is refused; a published day refuses a second publish and a desk run | `QT_RUN_CMD` (runs the engine and prints `EXIT=<code>`), `QT_PSQL_CMD`, market data through 2026-10-07, migration 027; it deletes that book's rows first. Its only guard refuses the production database by name. Exit code = the number of failed checks |
+
+The QT rules these two scripts check are in `docs/design/qt-master-rulings.md` and `docs/design/qt-contract.md`.
+
 ## 2. CI
 
-`.github/workflows/ci-cd-pipeline.yml` runs on every pull request and on a push to `main`, `develop`, `main-hd`,
-`prod` or `staging` (`ci-cd-pipeline.yml`). Its jobs:
+The engine's workflows are in the AlgoGators repository's `.github/workflows/`, each named
+`svc-trade-ngin.*.yml`; shared jobs they call begin with `_`.
 
-| Job | What it does |
-|---|---|
-| Code Linting | clang-format, clang-tidy, cppcheck and cpplint, with a report artifact |
-| Build and Test | Debug and Release builds; CTest; on Debug a memory check, a coverage report and the coverage threshold (`COVERAGE_THRESHOLD`, `ci-cd-pipeline.yml`) |
-| Security Scan | a source scan |
-| Generate Summary Report | collects the artifacts |
-| Schema Ownership Guard | fails if a string literal in `src/data` or `src/storage` (`.cpp`, `.hpp`) begins with `futures_data.`, `equities_data.`, `options_data.`, `synthetic.`, `auth.` or `research.` (`ci-cd-pipeline.yml`, the pattern). A schema named later in a literal (for example `"FROM equities_data.corporate_action "`, `src/data/postgres_database.cpp`) is not caught, and reads of those schemas exist |
-| Image Generation | builds and pushes the container image (section 8) |
-| Deploy to EC2 | replaces the running container (section 8) |
+| Workflow | When | What it does |
+|---|---|---|
+| `svc-trade-ngin.quality.yml` | every pull request and push to `main` that touches the engine | the shared C++ job `_quality-cpp.yml`: configure with the `ci-gcc13` CMake preset (gcc 13; the preset sets warnings as errors, but the engine's CMake adds `-Wno-error`, so warnings do not fail the build; dependencies from the repository's vcpkg manifest), build, and run CTest. On a push to `main` it also builds the engine image and pushes it tagged with the commit (section 8) |
+| `svc-trade-ngin.rpc.yml` | a pull request or push to `main` that touches `services/rpc`, `proto`, `scripts`, `deploy`, `migrations`, `src/data` or `src/storage`; called by the deploy | the gRPC server's stubs and Python tests; migrations 025, 027, 028 and 029 applied and rolled back on a throwaway PostgreSQL 16; and the schema ownership guard |
+| `svc-trade-ngin.python.yml` | a pull request or push to `main` that touches the Python module or the code it wraps; a tag `tradengin/v*` | builds and tests the `tradengin` Python wheel (`python/`); on the tag, every wheel and the upload to PyPI |
+| `svc-trade-ngin.deploy.yml` | a push to `prod` | section 8 |
+| `svc-trade-ngin.publish.yml` | a tag `trade-ngin/v*` | the quality job, then a release image |
+| `svc-trade-ngin.watchdog.yml` | daily, and on a pull request that touches the watchdog | section 7 |
 
-Four further workflows run beside it: a dependency review on pull requests into `main`
-(`dependency-review.yml`), an SBOM on a push to `main` (`sbom.yml`), the OSSF scorecard on a push to `main` and
-weekly (`scorecard.yml`), and a daily branch-protection job (`branch-protection.yml`). The watchdog is section 7.
+The schema ownership guard fails if a string literal in `src/data` or `src/storage` (`.cpp`, `.hpp`) begins with
+`futures_data.`, `equities_data.`, `options_data.`, `synthetic.`, `auth.` or `research.` (`svc-trade-ngin.rpc.yml`, the
+pattern). A schema named later in a literal (for example `"FROM equities_data.corporate_action "`,
+`src/data/postgres_database.cpp`) is not caught, and reads of those schemas exist.
+
+What the quality job does not do: it runs no coverage measure and no coverage threshold, no lint (clang-tidy and
+clang-format are switched off in `svc-trade-ngin.quality.yml`), no memory check and no sanitizer build. The team's rules
+that pushed code has coverage above 80 percent and a green CI therefore stand, and the coverage part is checked by
+hand.
 
 ## 3. What runs where
 
-Production is one container built from `Dockerfile`. Its only job is to run cron.
+One image, built from `Dockerfile`, runs in two shapes. Started as it is, the container's only job is to run
+cron: that is the scheduled futures book of this section and sections 4 to 6. Started with the command `rpc`
+(`scripts/docker-entrypoint.sh`), it is `engine-rpc`, the engine's gRPC server, whose first service is the QT desk;
+it runs the desk's engine runs, its catch-up scheduler (the model runs, the 09:30 send and the 10:00 fallback) and
+the book e-mail of the QT books, with its own host cron of watchdogs (`deploy/engine-rpc.compose.yml`,
+`deploy/qt-engine.cron`). `docs/design/desk-service.md` and `docs/design/rpc.md` describe it; the deploy workflow
+rolls it (section 8). Moving the daily jobs to the production database is AlgoGators/algogators#185.
+
+The cron container:
 
 | Piece | What it does | Where |
 |---|---|---|
 | Time zone | `TZ=America/New_York` is set in the image, so the cron line and the wrapper's `date` are New York time. The futures runners read the date argument as local midnight (`std::mktime`) and format it back through UTC, so on a New York clock the date keeps its day and every stored instant of a run carries the 05:00Z stamp on every date of the year (the parse leaves the daylight flag at zero, so local midnight is read as standard time in summer as well). On a clock ahead of UTC the same parse would land the run a day early; the pin keeps the container on the one zone the stored rows are written in. | `Dockerfile`; `apps/strategies/live_portfolio_conservative.cpp` and the comment above it |
-| Entrypoint | cron gives each job a fresh, minimal environment, so variables passed into the container are not visible to a scheduled job. At start the entrypoint writes the variables the job needs (names matching `TRADING_*`, `DB_*`, `PG*`, plus `TZ` and `LD_LIBRARY_PATH`) to `/app/.cron_env`, mode 600, warns if neither the encryption key variable nor a key file is present, and then runs cron in the foreground. | `Dockerfile`; `scripts/docker-entrypoint.sh` |
+| Entrypoint | cron gives each job a fresh, minimal environment, so variables passed into the container are not visible to a scheduled job. At start the entrypoint writes the variables the job needs (names matching `TRADING_*`, `DB_*`, `PG*` and `QT_MAIL_*`, plus `TZ` and `LD_LIBRARY_PATH`) to `/app/.cron_env`, mode 600, warns if neither the encryption key variable nor a key file is present, and then runs cron in the foreground. | `Dockerfile`; `scripts/docker-entrypoint.sh` |
 | Cron file | installed as `/etc/cron.d/live_portfolio` and loaded as the crontab | `Dockerfile`; `live_portfolio.cron` |
 | Healthcheck | every five minutes, `pgrep -x cron`; a container whose cron daemon has died reports unhealthy. Pair it with a restart policy in the compose file on the host. | `Dockerfile` |
 | Wrapper | the script cron calls (section 5) | `scripts/run_live_portfolio.sh` |
@@ -78,7 +106,7 @@ Production is one container built from `Dockerfile`. Its only job is to run cron
 One binary is scheduled: `live_portfolio_conservative`, the wrapper's default
 (`scripts/run_live_portfolio.sh`). The wrapper reads `LIVE_BINARY` to run another binary, but a variable set in
 the container's environment does not reach the scheduled job: the entrypoint copies only `TRADING_*`, `DB_*`, `PG*`,
-`TZ` and `LD_LIBRARY_PATH` into `/app/.cron_env` (`scripts/docker-entrypoint.sh`), and the cron line sets no
+`QT_MAIL_*` (the book e-mail's settings, section 5), `TZ` and `LD_LIBRARY_PATH` into `/app/.cron_env` (`scripts/docker-entrypoint.sh`), and the cron line sets no
 variable (`live_portfolio.cron`). `LIVE_BINARY` takes effect only when the wrapper is started by hand with the
 variable set in that shell. The equity book (`live_equity_mr`) and BASE (`live_portfolio`) have no scheduled job: they run only
 when started by hand under the rules of section 6.
@@ -122,9 +150,10 @@ symbol printed it carries the whole book (see "How the futures runners differ" i
 |---|---|---|
 | 0 | A futures live runner (`live_portfolio`, `live_portfolio_conservative`) reaches the end of the run with the book not refused by the risk step, no sizing hold, and its book e-mail, when the run sends one, sent. Three cases share this code: a completed day; a carried day (no symbol has a consumed bar for the previous day, so the whole book is carried and no order is made); a run in which a store failed, was logged and was passed over. A refusal by the risk step never ends at 0: see the rows for 3 and for 1 after the `live_run_metadata` row. | A completed day: the `live_run_metadata` row, the signals, the executions, the settled rows of the previous day, the day's positions, the day's `live_results` row and its equity point. A carried day: the same without signals; the book is unchanged, so no order is made. A passed-over failure: the day without the table whose store failed, which can be the `live_run_metadata` row, the signals, the executions of a sleeve that has no roll leg, the previous day's positions, the day's positions, the previous day's equity point, or the day's `live_results` row and equity point. Exit 0 is not proof that the day is stored in full: the evidence of a completed day is the date's `trading.live_results` row. |
 | 0 | The wrapper `scripts/run_live_portfolio.sh` finds its lock directory present and skips. The binary is not started. | Nothing. |
-| 1 | A futures live runner refuses before it writes the day's `live_run_metadata` row: a bad argument; a logger that cannot be initialised; a config, database or instrument registry failure; a missed previous run; a listing-date refusal; missing margin metadata; a sleeve that cannot be built or started; bars that cannot be loaded; a feed in which no symbol has a usable bar date; a holiday calendar that is not loaded or does not cover the run date or the day before it; a held symbol with no bar for longer than the tolerance on a run for the host's date; roll state that cannot be read or placed; a stored book the run does not load; a sleeve book the sizing read cannot load; a sizing capital the portfolio manager rejects. | Nothing. |
+| 1 | A futures live runner refuses before it writes the day's `live_run_metadata` row: a bad argument; a logger that cannot be initialised; a config, database or instrument registry failure; a missed previous run; a listing-date refusal; missing margin metadata; a sleeve that cannot be built or started; bars that cannot be loaded; a feed in which no symbol has a usable bar date; a holiday calendar that is not loaded or does not cover the run date or the day before it; with `per_contract_rolls` on, a futures roll calendar that cannot be loaded; a held symbol with no bar for longer than the tolerance on a run for the host's date; roll state that cannot be read or placed; a stored book the run does not load; a sleeve book the sizing read cannot load; a sizing capital the portfolio manager rejects. | Nothing. |
 | 1 | A futures live runner stops after it wrote the day's `live_run_metadata` row. | It depends on where the run stops. The estimator history cannot be seeded, or the portfolio step fails: the `live_run_metadata` row (marked `risk_refusal` when a sizing hold was recorded first, when the portfolio step failed because the risk step refused a book that has no stored previous positions to be held at, or, with scope `sleeve`, when a sleeve risk module or the sleeve's risk step could not answer on a sleeve that has no stored previous positions). A roll leg has no usable close, executions cannot be generated with a roll owed, the strict assertion fails (the row is marked `strict_assertion`), the netting refuses a row, or the day's roll executions cannot be stored: the row and the day's signals. The margin calculation fails: the row, the signals, the executions and the rewritten positions of the previous day. The previous day's `live_results` row cannot be updated: the row, the signals, the executions and both days' positions; the previous day's `live_results` row and equity point are left as they were. The previous cumulative roll cost cannot be read: a half-written day, with the executions, both days' positions and the previous day's settled `live_results` row and equity point stored, and no `live_results` row for the day. Any other error: whatever was written before it. |
 | 2 | A live runner (`live_portfolio`, `live_portfolio_conservative`, `live_equity_mr`) is started with no date. It prints the usage and runs nothing. The wrapper always passes a date. | Nothing. No email is sent. |
+| 2 | A futures live runner in one of the desk's modes refuses the command (`QT_REFUSED` in the log), for example: the command row is already finished, or is of another kind, portfolio or date; the book is not desk-editable; the override decision cannot be checked; the day is published and so frozen; yesterday's desk book is missing or an earlier day is unpublished; there is no proposal or no desk book to act on; the desk's book is over the fund's margin cap (`live_portfolio_conservative` only). A desk run that fails rather than refuses (a read or a store that did not happen, `QT_FAILED`) exits 1, and so do the model run's own desk refusals (yesterday's desk book missing, an earlier day not published). | The command row marked `refused`, except when it was already finished. A desk or override run refused at the margin cap has already stored the day's desk book, left unmarked so that it cannot be published. |
 | 3 | Futures live runners only. The risk step refused the book, or the sizing read failed with every sleeve book loaded. The risk step refuses the book when the one pass cannot produce its answer (the overlay sleeve is not running, a held symbol that cannot be weighed has no usable close or multiplier, an input or an overlay reading is not a finite number, the pass fails), and when a sleeve risk module refuses or replaces its sleeve or cannot evaluate it: one search on the summed book cannot hold one sleeve apart, so the whole book is held. Every such refusal is recorded with its reason as an error, whether a module decided it or a module failed. The book is held and the run goes on to the end. A report that fails on such a day is logged and the code stays 3. | A held day: the held book as the day's positions, no order, the day's `live_results` row and its equity point, and the day's signals. On a sizing hold the portfolio step is not run, so the sleeves compute no forecast and the signal stored for each symbol with seeded history is 0. The `live_run_metadata` row is marked `risk_refusal`, and the subject and the body of the report are flagged. |
 | 4 | A live runner (all three) run with `--send-email` stored the day, but the book e-mail was not sent: the report module (`python -m algogators_rpc.services.report`) failed, timed out or could not start. One `EMAIL_FAILED` line at error level says so. A run without `--send-email` never exits 4. A futures day that exits 3 keeps 3, and an equity run whose results were not all saved exits 1. | The day, as on exit 0, without the e-mail. |
 | 0 or 1 | The equity live runner (`live_equity_mr`) returns these two codes, 2 and 4 as above, and never 3. It returns 1 on each of its refusals, and also when the previous day's positions or `live_results` row cannot be settled, when an execution cannot be stored or applied, and at the end of a run whose results could not all be saved. | On exit 1: nothing if the stop comes before the run's first store, as every refusal does (the feed checks, the missed-run guard, the held-symbol check and the corporate-action de-duplication included); otherwise the `live_run_metadata` row and whatever was written before the stop. On exit 0: the day; a failed store of the `live_run_metadata` row or of the previous day's equity point is logged and passed over. |
@@ -195,8 +224,10 @@ The mono repo's `.github/workflows/svc-trade-ngin.watchdog.yml` runs `scripts/ch
 database, which covers a stopped container, a dead cron, a missing binary, missing credentials and a run that
 failed part way. It reads only; it connects with the repository's database secrets.
 
-Per book (`LIVE_PORTFOLIOS`, default `CONSERVATIVE_PORTFOLIO`, `check_live_trading.py`) it reads four things
-(`_fetch`, `_fetch_run_marks`) and `evaluate` decides:
+Per book (`LIVE_PORTFOLIOS`, a comma list of portfolio ids, default `QT_CONSERVATIVE_PORTFOLIO`,
+`check_live_trading.py`) it reads four things (`_fetch`, `_fetch_run_marks`) and `evaluate` decides. The workflow
+sets no `LIVE_PORTFOLIOS`, so it watches the QT book only: `CONSERVATIVE_PORTFOLIO` is watched once the variable
+names it, and until then a refused or missing CONSERVATIVE day is not reported.
 
 | Reading | Source | Reported when |
 |---|---|---|
@@ -219,27 +250,45 @@ database.
 
 | Step | Trigger | What happens |
 |---|---|---|
-| Image | a pull request, or a push to `prod` or `staging`, after lint, build and the security scan pass (`ci-cd-pipeline.yml`) | the image is built from `Dockerfile`, tagged `<branch>-<date>-<time>` and pushed to the GitHub container registry; a push to `prod` also tags it `latest`; the image is scanned |
-| Deploy | a push to `prod`, after the image job (`ci-cd-pipeline.yml`) | the trading host pulls `latest`, stops and removes the container `trade-ngin`, and brings it up again from its compose file |
+| Image | a push to `main` that touches the engine (`svc-trade-ngin.quality.yml`) | the image is built from `Dockerfile` and pushed to the GitHub container registry as `algogators/trade-ngin-engine`, tagged with the commit (`sha-<commit>`) and the branch, with a build provenance record (`_publish-container.yml`). It is built beside the tests; the deploy takes it only when that run passed |
+| Deploy | a push to `prod` (a fast-forward of `main`) that changes the engine outside its documents (`svc-trade-ngin.deploy.yml`) | the workflow takes `main`'s image of the commit when `main`'s quality run for it passed and its rpc checks did not fail; otherwise it runs the quality and rpc jobs and builds the image itself. Then it connects to the trading host and runs `deploy/deploy.sh` with the image's digest, never a moving tag: the script waits for no engine run in progress and outside 09:00 to 10:15 New York time (the 09:30 send and the 10:00 cutoff), switches `engine-rpc` to the new image, waits for its health check, and switches back if the check never passes |
+| Release image | a tag `trade-ngin/v*` (`svc-trade-ngin.publish.yml`) | the quality job, then a tagged release image; production deploys come from `prod`, not from tags |
 
-The container is removed and recreated on each deploy, so a change made by hand inside it does not survive: every
-change to code, the cron file or the wrapper reaches production through a push to `prod`. The deploy applies no
-database migration (section 9).
+`deploy/deploy.sh <image>` in more detail: it changes only the `QT_ENGINE_IMAGE` line of the host's compose `.env`
+(it stops unless there is exactly one), and does nothing when that image is already deployed. It pulls the image and
+stops, changing nothing, unless the image holds the engine binary. It then waits, checking every 30 seconds, while an
+engine run is in progress inside `engine-rpc` or the New York time is between 09:00 and 10:15 (`QUIET_FROM`,
+`QUIET_TO`), because a restart would kill a model run or an override part way through its writes; after 45 minutes
+(`WAIT_MINUTES`) it gives up and changes nothing. It keeps a copy of `.env` (the ten newest), switches the image and
+waits up to 300 seconds for `engine-rpc` to report healthy; if it does not, it switches back to the previous image and
+fails. On success it records the previous image in `.previous-image`, removes older engine images, and prints the
+command that rolls back.
+
+The deploy rolls `engine-rpc` only. No workflow deploys the cron container of section 3: its image is built by hand from the release commit (`scripts/futures_release/README.md`, step 11), and the move of the daily jobs is AlgoGators/algogators#185; a change made by hand
+inside a running container does not survive its next recreation. Rolling back is `deploy.sh` with the earlier image,
+which the script prints, or a re-run of an earlier deploy. The deploy applies no database migration (section 9).
 
 ## 9. Migrations
 
-The files are in `migrations/`. The numbers present are 001 to 006, 012 to 020, 026 and 034 to 039. They are
+The files are in `migrations/`. The numbers present are 001 to 006, 012 to 029 and 034 to 041; 007 to 011 and
+030 to 033 are unused and never reused. `migrations/README.md` lists them in the order to apply and records by
+hand the date each was applied to each database. They are
 applied to the database in number order, by hand, before the binary runs (the one column read with a fallback is
 the fee of 014: without it the registry warns and prices every fill at the code default,
 `src/instruments/instrument_registry.cpp`). A backtest against a database missing 037 or 038 still exits 0 and
-stores nothing or only part of the run. Nothing in the release path applies them and no table records which are
-applied.
+stores nothing or only part of the run. No workflow and no deploy applies them, and no table records which are
+applied. One script applies one migration: `scripts/futures_release/03_apply_040.sh` (AlgoGators/algogators#124)
+applies 040 from the checkout's own `migrations/040_roll_split.sql`, refusing a file that differs from the commit,
+and compares the schema before and after. Every other
+migration is applied by hand. The binary from 021 on names `portfolio_type` in every read and write of the live tables and fails
+against a database without 021 (`migrations/README.md`, "Deploy notes"). 040 goes before a binary that runs with
+`per_contract_rolls` on. 041 may go before or after its binary, which writes its columns only when the database
+has them; rows written without it keep those columns NULL, and the book e-mail then leaves out the notes they carry.
 
-021 to 025 and 027 to 029 are the QT desk's migrations (see `migrations/README.md`, which also records by hand the
-date each migration was applied to `new_algo_data`). 034 to 039 were numbered 028 to 033 until 2026-10-21 and were applied to `new_algo_data` under those numbers (028
-to 030 on 2026-10-10, 031 and 032 on 2026-10-12, 033 on 2026-10-13). Each file's header says so; none is applied
-there again. Their SQL is unchanged, so the comments they stored still name the old numbers. 028 and 029 are `main`'s
-QT migrations; 030 to 033 are unused.
+021 to 025 and 027 to 029 are the QT desk's migrations. 034 to 039 were numbered 028 to 033 on the line that
+joined `main` (AlgoGators/trade-ngin#237) and were applied to the production database under those numbers
+(`migrations/README.md` records the dates). Each file's header says so; none is applied there again. Their SQL is unchanged, so the
+comments they stored still name the old numbers.
 
 | Number | File | What it does |
 |---|---|---|
@@ -273,12 +322,15 @@ QT migrations; 030 to 033 are unused.
 | 037 | `037_backtest_statistics.sql` | thirteen statistics columns on `backtest.results` and six overlay columns on `backtest.equity_curve`; needs 018 and 020 |
 | 038 | `038_final_positions_row_mark.sql` | `row_mark` (`NO_BAR` or NULL) on `backtest.final_positions`; needs 016 |
 | 039 | `039_backtest_end_date_comment.sql` | comments on `end_date` of `backtest.results` and `backtest.run_metadata`; no data change |
+| 040 | `040_roll_split.sql` | the roll split: `roll_bar_move`, `roll_gap_points` and `roll_gap_value` on a roll's closing leg in both executions tables, with a CHECK, and `roll_bar_moves` and `roll_gap_values` on `backtest.results`; NULL with `per_contract_rolls` off, moves no number; needs 015 and 018 (see [LIVE_RUN_CYCLE.md](LIVE_RUN_CYCLE.md), section 5) |
+| 041 | `041_book_email_columns.sql` | what the book e-mail shows that only the run knew: `mark_price`, `settle_from_price`, `settle_to_price` and `settle_mark` (with a CHECK) on `trading.positions`, `statistics_sessions_per_year` on `trading.live_results`; no backfill |
 
 Each file's header is its specification: what it adds, why, what it leaves untouched, its guards (for example
 whether a second apply is a no-op, or which earlier migration it needs) and how it is undone. Read the header before
 applying a file.
 
-Every migration has a rollback beside it, `<number>_<name>_rollback.sql`.
+Every migration but 024 has a rollback beside it, `<number>_<name>_rollback.sql`; 024 drops the retired QT tables
+and cannot be undone.
 
 Shell tests in the same folder apply a migration and its rollback to a real PostgreSQL and check the result:
 
@@ -306,8 +358,10 @@ Shell tests in the same folder apply a migration and its rollback to a real Post
 | `test_037_backtest_statistics.sh` | 037 |
 | `test_038_final_positions_row_mark.sh` | 038 |
 | `test_039_backtest_end_date_comment.sh` | 039 |
+| `test_040_roll_split.sh` | 040 |
 
-Migrations 002 to 006 have no shell test. A test's own header says how to run it; the full form is destructive and is
+Migrations 002 to 006 and 041 have no shell test. CI applies and rolls back 025, 027, 028 and 029 on a throwaway
+PostgreSQL 16 (`svc-trade-ngin.rpc.yml`); the other tests are run by hand. A test's own header says how to run it; the full form is destructive and is
 pointed at a throwaway database made for the purpose, never at a database that holds data.
 
 ## 10. Troubleshooting
@@ -320,6 +374,6 @@ pointed at a throwaway database made for the purpose, never at a database that h
 | "WARNING: /app/.cron_env missing" followed by a database failure | the container was not started through `scripts/docker-entrypoint.sh` |
 | Exit 1 with "A run was missed" | replay the missing dates in order (section 6) |
 | Exit 3 | the day is stored and the book is held; read the `RISK_MODULE_FAILURE` or `SIZING_HOLD` line in the log for the cause, fix it, and the next run trades from the held book |
-| Exit 4 | the day is stored and the report was not delivered; read the `EMAIL_FAILED` line in the log for the cause (the mail settings, the body directory) |
+| Exit 4 | the day is stored and the report was not delivered; read the `EMAIL_FAILED` line in the log for the cause (the book's `email.json`, or the report module's interpreter, application directory and time limit: `QT_MAIL_PYTHON`, `QT_MAIL_APP`, `QT_MAIL_TIMEOUT`) |
 | A watchdog issue | the reasons listed in the issue map to the four readings of section 7 |
 | A hung or failing test | `ctest --test-dir build -R <name> -VV` |

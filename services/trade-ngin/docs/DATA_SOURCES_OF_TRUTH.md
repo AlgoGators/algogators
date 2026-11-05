@@ -1,7 +1,7 @@
 # Data sources of truth: what to read, what never to read
 
-Applies to every strategy and every asset class in this repo, not just the currently
-configured universes. If you are writing code that reads market or corporate-action data,
+Applies to every strategy and every asset class in this repo, not just the configured
+universes. If you are writing code that reads market or corporate-action data,
 this file decides which table and column you use.
 
 Companion docs: `docs/CORP_ACTIONS_DATA_BOUNDARY.md` (per-event-class trust boundaries),
@@ -16,7 +16,8 @@ Companion docs: `docs/CORP_ACTIONS_DATA_BOUNDARY.md` (per-event-class trust boun
 Never read a vendor-derived adjusted column.**
 
 This holds for both asset classes. Equities are adjusted from `div_cash` and `split_factor`
-(section 2). Futures are adjusted from the vendor's instrument id on each bar (section 4).
+(section 2). Futures are adjusted from the vendor's instrument id on each bar, or, with
+`per_contract_rolls` on, from the two contracts' own closes on each roll bar (section 4).
 
 ---
 
@@ -50,19 +51,19 @@ series carries an adjustment between the bars of 2026-08-06 and 2026-08-10, and 
 2026-08-07 is absent.
 
 ### ⚠️ DO NOT USE: `adj_open`, `adj_high`, `adj_low`, `adjusted_close`, `adj_volume`
-These live in the same table and look authoritative. **They are stale after 2026-08-05.**
-The vendor-side re-adjustment job has not run since, so an event after that date is not
-folded back into history: MNST's 2026-08-11 2:1 split shows as a fake -50% day, and
-ex-dividends since 2026-08-10 are unadjusted. We do not read these columns, so this does not
+These live in the same table and look authoritative. **They are stale after 2026-08-05:**
+the vendor-side re-adjustment stopped there, so an event after that date is not folded back
+into history: MNST's 2026-08-11 2:1 split shows as a fake -50% day, and ex-dividends from
+2026-08-10 are unadjusted. We do not read these columns, so this does not
 affect us; it does affect any other consumer (AlgoLens, algosystem) that still reads them.
-Do not "fix" our code by switching to them. The repair is tracked in data-ngin #107.
+Do not "fix" our code by switching to them. The repair is tracked in AlgoGators/algogators#26.
 
 ### DO NOT USE: `equities_data.sharadar_ohlcv_1d`
 Legacy price table from the Sharadar era, in the old `ticker`/`date`/`closeadj` shape.
 Superseded. Only referenced in one explanatory code comment. Its removal is tracked in
-data-ngin #112.
+AlgoGators/algogators#31.
 
-### AVAILABLE, UNUSED (not deprecated, just not wired yet)
+### AVAILABLE, UNUSED (not deprecated; the engine reads none of them)
 - `sp500_membership` (`ticker, start_date, end_date`): survivorship-correct universe
   construction. Wanted when we trade a broad index universe.
 - `coverage_gaps`, `verified_absent_bars`: data-quality aids for distinguishing
@@ -100,12 +101,13 @@ the far-future date 2027-07-18 (an SBDS ticker-change pair); any reader that tak
 `max(date)` unbounded gets that value, not the freeze date.
 
 **Keep this table and its code path.** It is the only home for deal terms. The query is
-parameterised and returns zero rows today; it activates unchanged the moment rows appear
+parameterised and returns zero rows while the table holds nothing after its freeze; it activates
+unchanged the moment rows appear
 (pinned by `RevivedFeedActivatesTheRolloverPathWithNoCodeChange`,
 `tests/live/corp_actions/test_effect_classes.cpp`).
 
 **Distinguish carefully:**
-- `corporate_action`: *we still need this data; the feed stopped.* Do **not** phase out.
+- `corporate_action`: *the engine needs this data (deal terms have no other source); only its feed is frozen.* Do **not** phase out.
 - `sharadar_ohlcv_1d`: *we stopped needing it.* Safe to phase out.
 
 ### What the freeze actually costs
@@ -116,8 +118,8 @@ child shares; we do not). Both are correct backtest convention and both diverge 
 real broker, surfacing at the point of sale or broker reconciliation. Cash mergers are
 near-harmless (final close ≈ deal price). Delisting *timing* is unaffected.
 
-### Recovery options, best first
-A live deal-terms source is tracked in data-ngin #108; consuming it is trade-ngin #127.
+### Recovery options, most complete first
+A live deal-terms source is tracked in AlgoGators/algogators#27; consuming it is AlgoGators/algogators#147.
 1. Restart the Sharadar ACTIONS ingest if the subscription is live: restores full
    history and ongoing coverage.
 2. Nasdaq Data Link hosts the same Sharadar tables if the subscription lapsed.
@@ -146,9 +148,10 @@ of its symbols is carried. It is idempotent and is part of a fresh environment's
 
 | Item | Detail |
 |---|---|
-| `futures_data.ohlcv_1d` | The loader's table: one daily bar per `.v.0` symbol and date, columns `time, symbol, open, high, low, close, volume`. 36 symbols, from 2010-06-07. **It has no primary key and no unique index** (section 4.3). |
-| `futures_data.ohlcv_1d_raw` | The vendor's raw landing table. **Primary key `(ts_event, symbol)`**, and it carries `instrument_id` (the vendor's id of the contract the bar was printed in), `rtype` and `publisher_id`. One row per symbol and day. It is the only place the contract behind a bar can be read. |
-| `futures_data.new_data_ohlcv_1d`, `new_data_ohlcv_1d_raw` | Dead staging tables (six symbols, ending 2025-11-03). Do not read; their removal is tracked in data-ngin #112. |
+| `futures_data.ohlcv_1d` | The loader's table: one daily bar per `.v.0` symbol and date, columns `time, symbol, open, high, low, close, volume`. 36 symbols, from 2010-06-07. `MGC.v.0` and `SIL.v.0` are added by the futures release (its part B, `scripts/futures_release/README.md`). With the primary key `(time, symbol)` (AlgoGators/algogators#24) each pair is stored once; a copy without the key can hold repeated rows (section 4.3). |
+| `futures_data.ohlcv_1d_raw` | The vendor's raw landing table. **Primary key `(ts_event, symbol)`**, and it carries `instrument_id` (the vendor's id of the contract the bar was printed in), `rtype` and `publisher_id`. One row per symbol and day. It is the only place the contract behind a bar of the continuous series can be read. |
+| `futures_data.contract_ohlcv_1d` | One daily bar per listed contract (outright), with its `expiration`, loaded each morning by the data pipeline. The engine reads it with `per_contract_rolls` on: the held contract's own bar on each date of the continuous series (`include/trade_ngin/data/contract_bars.hpp`, `include/trade_ngin/data/per_contract_source.hpp`). The vendor reuses an instrument id across contracts years apart and `raw_symbol` has a one-digit year, so neither names a contract across dates on its own: the engine keys a contract by root, raw symbol and expiration (`ContractKey`, `contract_bars.hpp`). The per-contract rolls need `expiration` filled. |
+| `futures_data.new_data_ohlcv_1d`, `new_data_ohlcv_1d_raw` | Dead staging tables (six symbols, ending 2025-11-03). Do not read; their removal is tracked in AlgoGators/algogators#31. |
 | `metadata.contract_metadata` | One row per contract: size, tick, fee, margins (section 4.7). |
 | `metadata.symbols` | A second copy of `"IB Symbol"` and `"Contract Months"` per contract; a correction to either column is made in both tables. |
 
@@ -180,12 +183,41 @@ A reader that computes returns straight from `ohlcv_1d.close` books every roll g
 price move. `docs/FUTURES_ROLLS.md` describes the change bar, the confirmation, the two
 ROLL fills and their costs.
 
-Per-contract bars (one series per expiry, which would let a roll be priced on both
-contracts on the same day) do not exist in the database; they are tracked in data-ngin #106.
+**With `per_contract_rolls` on** (as the shipped futures templates set it) the engine names the
+contract held on each date of the continuous series itself, and the bar handed to every loader is
+that contract's own, from `futures_data.contract_ohlcv_1d`. The vendor's switch still sets the
+date of a roll whenever it comes first. The roll rule (`include/trade_ngin/data/contract_roll_rule.hpp`,
+the comment at the top) rolls on the first of:
+
+1. the vendor's confirmed forward switch: the `.v.0` series moves to a contract that expires
+   later than the held one and the next bar keeps it; the roll falls on the vendor's date;
+2. the volume crossover: the first trading-day bar inside the roll window on which the contract
+   to roll into trades more volume than the held one;
+3. the last actionable bar: the last trading-day bar whose trade, made on the next calendar day,
+   still falls before the held contract's deadline (its first notice day, or its last trading day
+   where that comes first or where it has no notice day).
+
+The window opens on the fifth trading day before the deadline and ends on the last actionable
+bar; trading days are counted on CME Group's calendar (section 4.5). Only a vendor switch back to
+an earlier-expiring contract and a one-bar stray are ignored: the held contract's own bar is read
+through them. Whatever contract the vendor switched to, the book rolls into the front month of the
+root's delivery cycle (`roll_cycle_table`, `include/trade_ngin/data/roll_cycle.hpp`). The
+deadline trigger is what keeps the book out of the delivery period on a root the vendor rolls
+late. `docs/FUTURES_ROLLS.md` gives the full rule and its cases.
+
+A roll bar then carries both contracts' closes: the return on it is the old contract's own move
+over the bar, not 0, and the two ROLL fills are priced at the bar's two closes. A roll on a vendor
+switch is booked once the next bar confirms it, still at the switch bar's two closes
+(`roll_series.hpp`, the design comment). On a switch bar the next bar has not yet confirmed,
+`per_contract_switch_bar` decides which bar is handed out: `"held"` (the default and the
+templates' value) the held contract's own, `"vendor"` the switched-to contract's; the booked moves
+and the legs are the same either way. The level readers read the held contract's close (with
+`"vendor"`, the switched-to contract's on that one bar).
 
 ### 4.3 Duplicate rows, and the rule that keeps one
 
-Because `ohlcv_1d` has no key, a re-load stores a `(symbol, time)` again instead of
+With the primary key `(time, symbol)` (AlgoGators/algogators#24) a re-load cannot store a
+`(symbol, time)` twice. A database or copy without the key stores it again on a re-load instead of
 replacing it. Known stretches:
 
 | Dates | Symbols | Copies | Do the copies agree? |
@@ -212,8 +244,8 @@ and names every pair whose copies disagree (`log_futures_bar_duplicates`,
 `build_futures_duplicate_copies_query`, `market_data_utils.hpp`).
 
 **Any other reader must de-duplicate the same way.** A plain `SELECT` from `ohlcv_1d`, a
-`JOIN` on `(symbol, time)`, an average or a count over it returns the copies. Adding the
-key and removing the copies is tracked in data-ngin #105.
+`JOIN` on `(symbol, time)`, an average or a count over it returns the copies on a database
+that has them. The engine's loader keeps its rule on every database.
 
 ### 4.4 Bad bars that are stored once
 
@@ -234,8 +266,8 @@ order, is the comment): a locked bar (`high == low`), a volume far below the
 symbol's own trailing norm, and a thin print on a changed instrument id (below 0.10 of the
 norm, `kIdChangeHoldFraction`) are all `JUNK`. On a `JUNK` verdict the position is
 held and no order is placed for that symbol; a `SESSION` bar is the only kind that trades.
-Another reader has no such guard and must filter these bars itself. Re-fetching them is
-part of data-ngin #105.
+Another reader has no such guard and must filter these bars itself. Re-fetching the wrong
+and missing bars is tracked in AlgoGators/algogators#36.
 
 ### 4.5 Dates, weekends and the calendar
 
@@ -263,16 +295,30 @@ part of data-ngin #105.
   For these a missing Sunday is a closure, not a feed hole.
 - **MBT prints Saturday bars** from 2026-06-13 on, although its metadata hours read
   Sunday to Friday like the other CME contracts. No other root has a Saturday bar.
-- **There is no CME calendar.** The only calendar the engine has is
-  `include/trade_ngin/core/holidays.json`, generated by `scripts/generate_market_holidays.py`
-  from the NYSE rules (full-day equity-market closures, no early closes, no per-exchange
-  field). Futures trade on several days it names. The classifier therefore decides "no bar
+- **Two calendars.** `include/trade_ngin/core/holidays.json`, generated by
+  `scripts/generate_market_holidays.py` from the NYSE rules (full-day equity-market closures, no
+  early closes, no per-exchange field), is the calendar of the run-date checks and of the session
+  classifier. Futures trade on several days it names. The classifier therefore decides "no bar
   expected" per symbol from that file plus the symbol's own printing history, never from the
-  file alone. A calendar published as data is tracked in data-ngin #111 and trade-ngin #126.
+  file alone. The roll rule counts trading days on CME Group's own calendar per product group,
+  `include/trade_ngin/core/futures_holidays.json`, generated and checked by
+  `scripts/generate_futures_holidays.py` (`include/trade_ngin/data/roll_calendar.hpp`); a
+  Saturday or Sunday bar is never a trading day there. The file covers 2010 to 2040, and a date
+  the rule needs outside it is an error (`CalendarCoverageError`), never read as an open day
+  (`docs/LIVE_RUN_CYCLE.md`, section 2). `TRADE_NGIN_FUTURES_HOLIDAYS_JSON` points the engine at another copy of the
+  file. `generate_futures_holidays.py --check` regenerates the file and fails on any difference
+  from the committed one; no workflow runs it, so run it by hand after changing the generator. A
+  calendar published as data is tracked in
+  AlgoGators/algogators#30 and AlgoGators/algogators#146; the futures runners' closure verdict on
+  CME's calendar in AlgoGators/algogators#168.
 
 ### 4.6 The contract set
 
-The futures book trades **36 contracts**: the 36 `.v.0` symbols of `ohlcv_1d`.
+The futures book trades **36 instruments**: the 36 `.v.0` symbols of `ohlcv_1d`. In the shipped
+conservative template two of them, gold and silver, are traded as their micros: MGC and SIL from
+their listing dates, GC and SI before (below). Once `MGC.v.0` and `SIL.v.0` are stored, each pair
+is one instrument and `GC.v.0` and `SI.v.0` drop out of the run's universe
+(`ListingDates::run_universe`, `include/trade_ngin/data/listing_dates.hpp`).
 
 | Sector | Roots |
 |---|---|
@@ -280,7 +326,7 @@ The futures book trades **36 contracts**: the 36 `.v.0` symbols of `ohlcv_1d`.
 | Equity index (micros) | MES, MNQ, MYM, M2K |
 | Interest rates | ZT, ZF, ZN, UB |
 | Energy | CL, HO, RB, NG |
-| Metals | GC, SI, HG, PL |
+| Metals | GC (MGC from 2010-10-04), SI (SIL from 2013-06-17), HG, PL |
 | Agriculture | ZC, ZS, ZW, KE, ZL, ZM, ZR, LE, GF, HE |
 | Crypto | MBT |
 
@@ -311,20 +357,47 @@ Two things follow for anyone counting "the book's 36 symbols": a backtest that t
 before 2019-05-06 holds positions and fills in four symbols that are not among the 36, and
 the Russell pair has no history at all before 2017-07-09.
 
-**The vendor relabel of 2026-02-22.** On that date the instrument id on all four micros
-changes at once (for example MES from `42140878` to `42003800`), in the middle of a
-contract's life. It is not a roll: no expiry changes hands. Read naively it is a change bar,
-and the engine would hold through it and book two ROLL fills with their costs. The
-`instrument_id_relabels` list of `portfolio.json` declares the four changes, and the loader
-then reads a bar carrying the new id as carrying the old one from that date
-(`InstrumentIdRelabel`, `include/trade_ngin/data/listing_dates.hpp`; `apply_relabels`). A reader of `ohlcv_1d_raw.instrument_id` that detects rolls by an id change must
-apply the same list.
+**The gold and silver micros.** The template declares MGC (listed 2010-10-04, ratio 10 to GC)
+and SIL (listed 2013-06-17, ratio 5 to SI) the same way. These pairs differ from the index pairs:
+`GC.v.0` and `SI.v.0` keep rows of their own, and the micros' history before their listing is
+the full-size contract's, which only the per-contract source reads. So a run refuses an MGC or
+SIL pair with `per_contract_rolls` off, and refuses a pair whose full-size series is stored and
+the micro's is not (`ListingDates::refusals`). A micro stored beside its full-size root with no
+pair declared is refused as well (`ListingDates::unpaired_micro_refusals`).
+
+**The vendor's change of 2026-02-22.** Until that date the vendor's series under the four
+micros' symbols carried the full-size contracts' bars (ES under MES, NQ under MNQ, YM under MYM,
+RTY under M2K: the same index price and expiry, the full-size volume); from it, the micro's own.
+On that date the instrument id on all four changes at once (for example MES from `42140878` to
+`42003800`), in the middle of a contract's life: no expiry changes hands.
+
+- With `per_contract_rolls` on (the shipped setting) the roll rule reads the change as a change
+  of price source between the two contracts of the same expiry (`MicroAlias`,
+  `include/trade_ngin/data/contract_roll_rule.hpp`; `SOURCE_CHANGE`,
+  `include/trade_ngin/core/types.hpp`): the day's move is booked, the price gap is left out, and
+  no fill and no cost are booked, because the account holds the micro throughout.
+  `docs/FUTURES_ROLLS.md` describes it in its section on the micros. The `instrument_id_relabels`
+  list is then not read, and a run that declares it logs one line saying so (`relabels_read`,
+  `include/trade_ngin/data/listing_dates.hpp`).
+- With the switch off, read naively the change is a change bar, and the engine would hold through
+  it and book two ROLL fills with their costs. The `instrument_id_relabels` list of
+  `portfolio.json` declares the four changes, and the loader then reads a bar carrying the new id
+  as carrying the old one from that date (`InstrumentIdRelabel`, `apply_relabels`,
+  `include/trade_ngin/data/listing_dates.hpp`).
+
+A reader of `ohlcv_1d_raw.instrument_id` that detects rolls by an id change must apply the same
+list.
 
 ### 4.7 `metadata.contract_metadata`: the basis of every size, cost and margin
 
-40 rows: the 36 traded contracts plus ES, NQ, YM and RTY (the contracts held before the
-micros' listing date). Every column is text. The database layer reads the first 21 columns by
-their position in the table (`src/data/postgres_database.cpp`) and
+The template's 36 traded contracts include MGC and SIL. Migration 026 writes 40 rows: the 34
+other traded contracts plus GC, SI, ES, NQ, YM and RTY, the full-size contracts the book holds
+before each micro's listing date. Part A of the futures release adds MGC and SIL
+(`scripts/futures_release/load/load_micro_metals.sql`), for 42 rows: the 36 traded contracts plus
+those six predecessors. The MGC and SIL rows carry their own size, tick, tick value, fee and
+contract months, and their full-size twin's other cells, with the margins divided by the ratio. Every column
+is text. The database layer reads the columns it uses by their position in the table, among the
+first 20 (`src/data/postgres_database.cpp`), and
 `"Fee Per Contract"` by name; the instrument registry then reads the converted table
 by column name (`InstrumentRegistry::load_instruments`,
 `src/instruments/instrument_registry.cpp`). The column order of the table must therefore
@@ -334,8 +407,8 @@ not change.
 |---|---|---|
 | `"Contract Size"` | **dollars per 1.0 of quoted price** (the multiplier): 50 for ES, 5 for MES, 1000 for CL, 100000 for 6A. Notional = contracts × price × this. | `instrument_registry.cpp` |
 | `"Tick Size"` | one tick in price units (the unit the close is stored in) | |
-| `"Minimum Price Fluctuation"` | the same tick in dollars per contract. It must equal `"Tick Size"` × `"Contract Size"`; all 40 rows do, and the loader warns on a row that does not. | |
-| `"Fee Per Contract"` | dollars per contract per side that the cost model charges, **per row**, from IBKR's published futures schedule (migration 026): commission plus the exchange and regulatory fee recovery charges. 0.610 to 0.614 on the four micros, 1.510 to 3.010 on the rest (ES 2.247 against MES 0.614). A CHECK (`contract_metadata_fee_per_contract_positive`) refuses a cell that is not a plain decimal number above zero. | |
+| `"Minimum Price Fluctuation"` | the same tick in dollars per contract. It must equal `"Tick Size"` × `"Contract Size"`; the 40 rows of migration 026 and the two of part A all do, and the loader warns on a row that does not. | |
+| `"Fee Per Contract"` | dollars per contract per side that the cost model charges, **per row**, from IBKR's published futures schedule (migration 026): commission plus the exchange and regulatory fee recovery charges. 0.610 to 0.614 on the four equity index micros, 0.960 on MGC and 0.860 on SIL, 1.510 to 3.010 on the rest (ES 2.247 against MES 0.614). A CHECK (`contract_metadata_fee_per_contract_positive`) refuses a cell that is not a plain decimal number above zero. | |
 | `"Overnight Initial Margin"`, `"Overnight Maintenance Margin"` | the margin per contract the engine uses | |
 | `"Intraday Initial Margin"`, `"Intraday Maintenance Margin"` | not read by the instrument registry | |
 | `"IB Symbol"`, `"Contract Months"` | read by the daily email (the broker symbol and the rollover-warning cells); the registry falls back to `"IB Symbol"` only for a row with an empty `"Databento Symbol"`, and no row has one | |
@@ -345,7 +418,7 @@ Migration 019 holds the corrections these rows carry: the tick of 6A and 6L is h
 (`"Tick Size"` 0.00005, `"Minimum Price Fluctuation"` 5); `"IB Symbol"` of 6B, 6E, 6S, ZS and
 ZW names the full-size contract the engine trades (GBP, EUR, CHF, ZS, ZW), not the broker's
 micro FX or mini grain; `"Contract Months"` of HO, NG and 6L reads `All Months`. Apart from
-the four equity index micros and MBT, every row is the full-size contract.
+the four equity index micros, MGC, SIL and MBT, every row is the full-size contract.
 
 Three cells carry a stray character: a trailing non-breaking space on `"Tick Size"` of 6N and
 HG, and a leading tab on `"Overnight Maintenance Margin"` of YM. The loader reads the number
@@ -358,7 +431,8 @@ fill.
 
 **Never re-seed this table from an old CSV export.** A snapshot taken before the
 dollar-multiplier basis carries contract sizes in other units (grains 100 times too large,
-ZT half size) and none of the corrections above. The migrations are the record.
+ZT half size) and none of the corrections above. The migrations and the release's MGC and SIL
+load are the record.
 
 ---
 
@@ -366,9 +440,11 @@ ZT half size) and none of the corrections above. The migrations are the record.
 
 | Schema | Use | State |
 |---|---|---|
-| `trading` | `live_results`, `positions`, `executions`, `signals`, `equity_curve`, `live_run_metadata` and `corp_action_applied` (written by the runners), and `strategy_trading_days_metadata` (read by them) | positions/executions/signals carry `strategy_name` and **do** attribute per strategy; `live_results`/`equity_curve` aggregate (no `strategy_name`). `docs/LIVE_RUN_CYCLE.md` says what one row of each table is. |
+| `trading` | `live_results`, `positions`, `executions`, `signals`, `equity_curve`, `live_run_metadata` and `corp_action_applied` (written by the runners), and `strategy_trading_days_metadata` (read by them) | positions/executions/signals carry `strategy_name` and **do** attribute per strategy; `live_results`/`equity_curve` aggregate (no `strategy_name`). `positions`, `executions`, `live_results` and `equity_curve` also carry `portfolio_type`, the book a row belongs to: `system` (the model run), `qt_proposal` (the desk's request) or `qt` (what the engine gave back), in every key and in every delete the runners make (migrations 001 and 021). One portfolio can hold all three books on one date, so a query that sums or joins these tables filters on `portfolio_type` (and joins on it), or it adds the books together. The engine writes no `trading.results`: the method that would (`store_trading_results`, `src/data/postgres_database.cpp`) has no caller. `docs/LIVE_RUN_CYCLE.md` says what one row of each table is. |
+| `trading` (the QT desk) | `strategy_config` (the desk's settings, one active row per portfolio, migration 022) and `position_overrides` (the desk's command log, migrations 023, 025, 029); `live_run_metadata.publish_source` and `sent_at` (migration 027); `strategy_registry.portfolio_group` and `desk_editable` (migration 023; the registry itself is AlgoLens's table); `desk_settings_locks` (the settings an admin has locked so the desk cannot save them) and `desk_settings_lock_log` (every lock and unlock, append-only), created by AlgoLens's own migration `services/research-api/migrations/004_desk_settings_locks.sql` | written by the desk and read by the engine's desk modes; `docs/design/desk-service.md` and `migrations/README.md` describe them. The two lock tables are AlgoLens's alone: its API writes and reads them (`services/research-api/src/research_api/infrastructure/qt/repositories.py`) and the engine does not read them |
+| `ops` | `data_ready` (migration 028): the data pipeline's record that a dataset's pull for a bar date is done, with the symbols expected and loaded, the ones missing and a status (`complete`, `partial` or `failed`). Two datasets: `futures_ohlcv_1d` (the continuous bars) and `futures_contract_ohlcv_1d` (the per-contract bars) | Written by the data pipeline, read by the QT desk's scheduler (`services/rpc/algogators_rpc/services/desk/catchup.py`). A book's model run waits until every dataset it needs has a row (the per-contract one only for a book with `per_contract_rolls` on), and alerts from 06:00 New York time if none has come. Once the rows are there the run is held only when **more than** N symbols (roots, on the per-contract row) have each been without a bar for more than X days as of the run's last bar date, a failed pull counting every symbol the table knows as missing. A failed pull holds the run outright only when it leaves nothing to judge: no symbol named by the row or found in the table in the last 60 days, and none expected beyond them (`_missing_verdict`). N is `QT_DATA_READY_MAX_MISSING` (`QT_CONTRACT_DATA_READY_MAX_MISSING` on the per-contract row), 2 by default; X is the book's `live.data_staleness_tolerance_days`, 4 by default (`QT_CONTRACT_DATA_READY_STALE_DAYS` can set it for the per-contract row). Otherwise the run goes ahead and each missing symbol is alerted: on the continuous row it is carried at its last price with no order; on the per-contract row the engine prices the root by its roll rule (the vendor's bar of the held contract, else its last close carried, with a warning). The engine's own feed-hole guard (`rule_held_feed_holes`, `include/trade_ngin/live/session_book_gate.hpp`) refuses a held symbol without a bar past the tolerance only when the run date is the host's date; on a past or future run date it warns and holds the symbol at its last price. The allowance exists so that a one-day failed pull, or one or two symbols stale for weeks, does not stop a 36-symbol book: the rest of the book trades as usual. |
 | `backtest` | backtest runs and per-day rows | `executions`, `final_positions`, `signals` and `run_metadata` carry `strategy_id` and attribute per sleeve; `results` and `equity_curve` are one per run, the whole book |
-| `macro_data` | regime pipeline inputs (`bsts_etf_prices`, `credit_spreads`, `growth`, `inflation`, `liquidity`, `market`, `yield_curve`) | not read by any code in this repository; keeping it current is tracked in data-ngin #109 |
+| `macro_data` | regime pipeline inputs (`bsts_etf_prices`, `credit_spreads`, `growth`, `inflation`, `liquidity`, `market`, `yield_curve`) | not read by any code in this repository; keeping it current is tracked in AlgoGators/algogators#28 |
 | `eia`, `research` and one other schema that is not this repository's | not consumed by this repo | n/a |
 
 ---
@@ -379,7 +455,7 @@ ZT half size) and none of the corrections above. The migrations are the record.
    Never read `adj_*`/`adjusted_close`/`closeadj`.
 2. Equity keys are `symbol` / `time`. `ticker` / `date` is the legacy Sharadar shape.
 3. Corporate actions: go through the effect-class layer, never query raw action strings.
-4. Design for the **full 852-symbol universe**, not the 10 symbols currently configured
+4. Design for the **full 852-symbol universe**, not the symbols configured
    for `equity_mr`: other and future strategies may hold any symbol with data.
 5. Anything reading `corporate_action` must behave correctly with **zero rows** returned,
    and must light up unchanged when rows appear.
@@ -395,8 +471,7 @@ ZT half size) and none of the corrections above. The migrations are the record.
 
 ## 7. Required database objects: engine dependencies
 
-Any environment running this engine (including the AlgoGators mono repo after migration,
-and any fresh, staging or production database) MUST have the objects below. They are not
+Any environment running this engine (any fresh, staging or production database) MUST have the objects below. They are not
 optional: without the indexes `equities_data.corporate_action` has no index at all, so the
 deal-terms read scans the whole table, and `equities_data.ohlcv_1d` has only its `(symbol, time)`
 primary key, which does not pick out the few bars that carry an event or a delisting date; and
@@ -414,7 +489,9 @@ The later migrations add the columns the runners write (on `trading`, `backtest`
 `metadata.contract_metadata`) and make the schema and data corrections they depend on: 003 adds
 indexes on `equities_data`, 004 replaces the function `trading.get_trading_days`, 012 widens
 `strategy_id`, 019 and 026 change rows of `metadata.contract_metadata` (026 also adds the fee
-CHECK); 034 and 039 write comments only. Each file's header says what it does and why.
+CHECK); 021 to 025 and 027 to 029 add the QT desk's tables, keys and grants, and 028 the `ops`
+schema; 040 and 041 add the roll split and the book e-mail's columns; 034 and 039 write comments
+only. Each file's header says what it does and why.
 
 ### NOT owned by this repo: `equities_data` schema (data-ngin owns it)
 
@@ -455,11 +532,14 @@ instead of recomputing them per query. Budget for it in run planning; it is not 
 
 ### Migration order
 
-The migrations in `migrations/` are **001 to 006, 012 to 020, 026 and 034 to 039**. Apply them in
-ascending number order, every one of them, before running a binary built from this
-repository, then run `scripts/backfill_ticker_aliases.sql`. The repository holds no migration
-with a number between those, and nothing in it depends on one. Each migration carries a rollback file beside it
-(003's rollback drops only the indexes it created).
+The migrations in `migrations/` are **001 to 006, 012 to 029 and 034 to 041**; 007 to 011 and
+030 to 033 are unused. Apply them in ascending number order, every one of them, before running a
+binary built from this repository, then run `scripts/backfill_ticker_aliases.sql`. The QT desk's
+migrations (021 to 025, 027 to 029) are part of the order: the binary from 021 on names
+`portfolio_type` in every read and write of the live tables and fails against a database without
+it. `migrations/README.md` lists the order and the dates applied. Each migration carries a rollback
+file beside it except 024, which cannot be undone (003's rollback drops only the indexes it
+created).
 
 How to apply them, what each one's safety guards do, and the shell tests that exercise
 them are in `docs/performance_upkeep.md` (section 9, "Migrations").

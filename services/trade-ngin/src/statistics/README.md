@@ -10,8 +10,9 @@ estimators. Every class is in the `trade_ngin::statistics` namespace; the helper
 It is a standalone library. No strategy, portfolio, risk, backtest or live source includes these
 headers, so nothing here takes part in sizing, the rebalance or the stored results. The statistics
 the runners store with a run (Sharpe ratio, volatility, drawdown and the rest) are computed in
-`src/backtest/backtest_metrics_calculator.cpp`, `src/live/live_metrics_calculator.cpp` and
-`src/live/live_historical_metrics.cpp`, not here.
+`src/backtest/backtest_metrics_calculator.cpp`, `src/backtest/backtest_statistics_columns.cpp`,
+`src/live/live_metrics_calculator.cpp` and `src/live/live_historical_metrics.cpp`, not here
+(`src/backtest/README.md` gives their definitions).
 
 ---
 

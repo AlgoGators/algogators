@@ -1,19 +1,19 @@
 # Migrations
 
-Apply in the order below. Each `NNN_name.sql` has a `NNN_name_rollback.sql` beside it, and most
-have a `test_NNN_*.sh` that runs the migration and its rollback against a throwaway database
+Apply in the order below. Each `NNN_name.sql` has a `NNN_name_rollback.sql` beside it, except
+024, which cannot be undone, and most have a `test_NNN_*.sh` that runs the migration and its rollback against a throwaway database
 (each script says how to call it and refuses production by name).
 
-There is no migrations table (master document ruling 26). **Applied state is tracked by hand in
+There is no migrations table (ruling 26 of `docs/design/qt-master-rulings.md`). **Applied state is tracked by hand in
 this file**: when you apply a migration to a database, fill in the date in its column in the
 same PR or straight after. A blank cell means "not recorded", not "not applied".
 
-007 to 011 are unused: they were taken on unmerged branches (#55, config-from-database,
+007 to 011 are unused: they were taken on unmerged branches (AlgoGators/trade-ngin#55, config-from-database,
 qt-platform-preview) and are retired, so the numbers are never reused (see the header of 012).
 030 to 033 are unused: main-nonQT's 028 to 033 became 034 to 039 when it joined main
-(2026-10-21), because main had its own 028 and 029.
+(2026-10-22, AlgoGators/trade-ngin#237), because main had its own 028 and 029.
 
-| # | File | What it does | Test | new_algo_data | algo_data |
+| # | File | What it does | Test | Production database | Earlier production database |
 |---|---|---|---|---|---|
 | 001 | `001_add_portfolio_type.sql` | `portfolio_type` (`system`/`qt`) on `trading.positions` and `trading.equity_curve`, and in their keys | `test_001_migration.sh` | before 2026-10-08 | |
 | 002 | `002_corp_action_applied.sql` | `trading.corp_action_applied`: durable dedup of corporate actions applied to live positions | | | |
@@ -33,11 +33,11 @@ qt-platform-preview) and are retired, so the numbers are never reused (see the h
 | 021 | `021_qt_books.sql` | Three books: `qt_proposal` allowed in positions and equity_curve; `portfolio_type` on executions and live_results and in their keys; `positions.moved_by` | `test_021_qt_books.sh` | 2026-10-09 | |
 | 022 | `022_strategy_config.sql` | `trading.strategy_config` (desk settings: versioned, one active row per portfolio); `settings_used`, `published_by`, `published_at` on `trading.live_run_metadata` | `test_022_strategy_config.sh` | 2026-10-09 | |
 | 023 | `023_qt_command_log.sql` | `trading.position_overrides` rebuilt as the desk command log; `live_results.book_source`; `strategy_registry.portfolio_group` and `desk_editable`, and the two QT portfolios | `test_023_qt_command_log.sh` | 2026-10-09 | |
-| 024 | `024_drop_retired_qt_tables.sql` | Drops `risk_limits`, `portfolios`, `strategy_book_memberships` and `portfolio_assignments` (ruling 28). Irreversible; no rollback file | `test_023_qt_command_log.sh` | | not applied (checked 2026-10-16) | |
+| 024 | `024_drop_retired_qt_tables.sql` | Drops `risk_limits`, `portfolios`, `strategy_book_memberships` and `portfolio_assignments` (ruling 28). Irreversible; no rollback file | `test_023_qt_command_log.sh` | | not applied (checked 2026-10-16) |
 | 025 | `025_qt_command_log_hardening.sql` | QT contract C2 and C4 on `trading.position_overrides`: one live decision per request, one open publish and one open override request per day (unique partial indexes); inserts must be `pending` with the engine columns NULL; status moves pending -> running -> done/refused/failed, running -> pending only under `algogators.recovery = 'on'`; terminal rows final; TRUNCATE refused. Grants: PUBLIC loses everything on `trading.live_run_metadata` and its sequence (explicit grants kept or added first); `svc_algolens` loses UPDATE, DELETE, TRUNCATE on `position_overrides` | `test_025_qt_command_log_hardening.sh` (postgres:16, throwaway server only; CI `rpc.yml`) | 2026-10-09 | |
 | 026 | `026_contract_metadata_ibkr_fees.sql` | The per-contract IBKR fee in each `"Fee Per Contract"` cell, with a CHECK that the fee is a positive number; needs 014 | `test_026_contract_metadata_ibkr_fees.sh` | 2026-10-10 | |
 | 027 | `027_qt_daily_cutoff.sql` | QT contract C7 (the daily cutoff, rulings 18 and 29 amended): `publish_source` (CHECK desk/fallback/model-only) and `sent_at` on `trading.live_run_metadata`, NULL for days published before it. Grants: svc_trade_ngin reads and writes them; svc_algolens' table-wide INSERT and UPDATE become column grants on every other column, so it reads the two columns only | `test_027_qt_daily_cutoff.sh` (postgres:16, throwaway server only; CI `rpc.yml`) | 2026-10-09 | |
-| 028 | `028_ops_data_ready.sql` | Schema `ops` and `ops.data_ready` (dataset, bar_date, expected, loaded, missing, status complete/partial/failed, run_id, finished_at; key dataset+bar_date): data-ngin's "the pull for this bar date is done", the input of the QT data-driven run (issue #191; data-ngin pulls at 04:30 ET). Grants: `qt_engine_app` and `svc_trade_ngin` USAGE on `ops` and SELECT; `postgres` (data-ngin's login today) SELECT, INSERT, UPDATE | `test_028_ops_data_ready.sh` (postgres:16, throwaway server only; CI `rpc.yml`) | about 2026-10-12 (inferred from its rows, 2026-10-16) | |
+| 028 | `028_ops_data_ready.sql` | Schema `ops` and `ops.data_ready` (dataset, bar_date, expected, loaded, missing, status complete/partial/failed, run_id, finished_at; key dataset+bar_date): data-ngin's "the pull for this bar date is done", the input of the QT data-driven run (AlgoGators/algogators#164; data-ngin pulls at 04:30 ET). Grants: `qt_engine_app` and `svc_trade_ngin` USAGE on `ops` and SELECT; `postgres` (the login data-ngin connects as) SELECT, INSERT, UPDATE | `test_028_ops_data_ready.sh` (postgres:16, throwaway server only; CI `rpc.yml`) | about 2026-10-12 (inferred from its rows, 2026-10-16) | |
 | 029 | `029_qt_rescind.sql` | QT contract C8 (Rescind): kind `rescind` on `trading.position_overrides`, one open rescind per day, and the one-done-publish index dropped (a rescinded approval leaves its row done) | (rpc.yml: 029 on postgres 16) | about 2026-10-14 (inferred from its rows, 2026-10-16) | |
 | 034 | `034_column_comments.sql` | Comments on columns and tables of `trading` and `backtest`; no data change | `test_034_column_comments.sh` | 2026-10-10 (as 028) | |
 | 035 | `035_live_results_settled_at.sql` | `settled_at` on `trading.live_results`; each existing row that has a later row of its book is stamped `1970-01-01 00:00:00+00` | `test_035_live_results_settled_at.sh` | 2026-10-10 (as 029) | |
@@ -45,13 +45,13 @@ qt-platform-preview) and are retired, so the numbers are never reused (see the h
 | 037 | `037_backtest_statistics.sql` | Thirteen statistics columns on `backtest.results` and six overlay columns on `backtest.equity_curve`; needs 018 and 020 | `test_037_backtest_statistics.sh` | 2026-10-12 (as 031) | |
 | 038 | `038_final_positions_row_mark.sql` | `row_mark` (`NO_BAR` or NULL) on `backtest.final_positions`; needs 016 | `test_038_final_positions_row_mark.sh` | 2026-10-12 (as 032) | |
 | 039 | `039_backtest_end_date_comment.sql` | Comments on `end_date` of `backtest.results` and `backtest.run_metadata`; no data change | `test_039_backtest_end_date_comment.sh` | 2026-10-13 (as 033) | |
-| 040 | `040_roll_split.sql` | The roll split (per-contract rolls, ruling 18): `roll_bar_move`, `roll_gap_points`, `roll_gap_value` on both executions tables, on a roll's closing leg only, with a CHECK (all three or none, ROLL rows only); `roll_bar_moves` and `roll_gap_values` on `backtest.results`. NULL with the switch off; moves no number; needs 015 and 018 | `test_040_roll_split.sh` | | |
+| 040 | `040_roll_split.sql` | The roll split (per-contract rolls): `roll_bar_move`, `roll_gap_points`, `roll_gap_value` on both executions tables, on a roll's closing leg only, with a CHECK (all three or none, ROLL rows only); `roll_bar_moves` and `roll_gap_values` on `backtest.results`. NULL with the switch off; moves no number; needs 015 and 018 | `test_040_roll_split.sh` | 2026-10-30 (`scripts/futures_release/03_apply_040.sh`) | |
 | 041 | `041_book_email_columns.sql` | What the book e-mail shows that only the run knew: `mark_price`, `settle_from_price`, `settle_to_price`, `settle_mark` (`NO_BAR`, `ROLL`, `WITHHELD`, with a CHECK) on `trading.positions`; `statistics_sessions_per_year` on `trading.live_results`. NULL-able, no backfill; the binary writes them only once the database has them, so it may be applied before or after the binary | applied, re-applied, CHECK and rollback run by hand on Postgres 16 | | |
 
-**Two lines, one database (D-50, D-5).** main-nonQT's migrations 028 to 033 were applied to
-new_algo_data under those numbers before main-nonQT joined main; they are 034 to 039 above (HD
-2026-10-21: ours moved, QT's 028 and 029 kept their numbers). Each of the six files' headers says
-so, and none is applied there again. Their SQL is unchanged, so the comments they stored still
+**Two lines, one database.** main-nonQT's migrations 028 to 033 were applied to the production
+database under those numbers before main-nonQT joined main; they are 034 to 039 above. The joining
+line's files took new numbers and QT's 028 and 029 kept theirs, because QT's were already on main.
+Each of the six files' headers says so, and none is applied there again. Their SQL is unchanged, so the comments they stored still
 name the old numbers.
 
 ## Deploy notes
@@ -63,30 +63,42 @@ name the old numbers.
 - **025** ships with the desk service of its commit: the service's recovery sets
   `algogators.recovery = 'on'` to put a stale `running` row back to `pending`, which 025 refuses
   otherwise. An older service only loses that recovery (its startup reset is refused and
-  logged); nothing else it does is refused. Apply 025 before or with that image. Grants, on
-  new_algo_data as checked 2026-10-09: on `trading.live_run_metadata`, PUBLIC held `arwdDxt`
-  (and `rU` on the sequence). After 025, `fund_member`, `quant_dev`, `quant_research_ro`,
+  logged); nothing else it does is refused. Apply 025 before or with that image. Grants: 025
+  first grants each named role that exists its access explicitly, then revokes everything from PUBLIC on
+  `trading.live_run_metadata` and its sequence. After 025, `fund_member`, `quant_dev`, `quant_research_ro`,
   `leadership_ro` and `investor_relations_ro` keep SELECT; `quant_dev_rw`, `quant_trading_rw`,
-  `leadership_rw`, `svc_algolens` and (newly explicit) `svc_trade_ngin` keep SELECT, INSERT,
+  `leadership_rw`, `svc_algolens` and `svc_trade_ngin` keep SELECT, INSERT,
   UPDATE, DELETE and the sequence; `qt_algolens_app` and `qt_engine_app` inherit theirs;
   `svc_airflow` and `svc_data_ngin` have no USAGE on schema `trading` and lose nothing. On
   `trading.position_overrides`, `svc_algolens` keeps SELECT, INSERT and the sequence, and
-  `svc_trade_ngin` gets SELECT, INSERT, UPDATE, DELETE explicitly. Today both services connect
-  as `postgres`, so the grants take effect when they move to `qt_algolens_app` /
-  `qt_engine_app`.
+  `svc_trade_ngin` gets SELECT, INSERT, UPDATE, DELETE explicitly. The grants bind a service only
+  when it connects as `qt_algolens_app` or `qt_engine_app`; one that connects as `postgres`, the
+  owner, is not limited by them.
 - **027** ships with the engine and desk service of its commit, and goes first: the new engine
   reads and writes `publish_source` and `sent_at` on every approval, fallback and send (it fails
   with "needs migration 027" without them), and the desk service's scheduler reads `sent_at`.
   An older engine ignores the columns. The rollback refuses while any day carries
   `publish_source` or `sent_at` unless the session sets `migration.force_rollback = 'yes'`; roll
-  the image back first (an older engine does not know a day was sent). AlgoLens (#118) reads the
+  the image back first (an older engine does not know a day was sent). AlgoLens (AlgoGators/AlgoLens#118) reads the
   columns when they are there and falls back to `published_by` `system:fallback-*` otherwise.
 - **028** goes before the engine-rpc image that reads it, or ship that image with
   `QT_EVENING_RUN=0` until the table exists and data-ngin writes it: with the data-driven run on,
-  the scheduler reads `ops.data_ready` every pass, and today's model run waits (and alerts from
+  the scheduler reads `ops.data_ready` every pass, and the day's model run waits (and alerts from
   `QT_DATA_READY_ALERT_AT`, 06:00) until a
   ready row for the previous trading day is there. When data-ngin gets its own role, grant it
   SELECT, INSERT, UPDATE on `ops.data_ready` and USAGE on `ops`.
-- **Not done, on purpose:** SET NOT NULL on columns that hold NULLs today. The spec left it;
-  `live_run_metadata.portfolio_id` is already NOT NULL on new_algo_data (0 NULL rows of 514 on
-  2026-10-09), and no NOT NULL was added to `position_overrides`.
+- **Not done, on purpose:** no migration sets NOT NULL on a column that may hold NULL rows on a
+  live database, where the statement would fail; none is added to `position_overrides`.
+
+## Changes made outside this folder
+
+Three SQL files in `scripts/` change the schema or the rows of a live database and are not
+migrations: they are not numbered, have no rollback file and no test, and are not in the order
+above. Each was written to be run once, by hand. Whether a given database has had one applied is
+not recorded here; check the database before running one.
+
+| File | What it does | Before running it |
+|---|---|---|
+| `scripts/2026-05-18_phase4.5_dividend_income_column.sql` | Adds `total_dividend_income` (`DECIMAL(18,8)`, default 0) to `trading.live_results`: the equity book's cumulative dividend cash, informational and never added to any P&L total. Safe to run again (`IF NOT EXISTS`). Its column comment still names `closeadj`, a vendor-adjusted price the engine no longer reads (`docs/DATA_SOURCES_OF_TRUTH.md`, section 2) | the equity runner writes this column, so a database built from the migrations alone needs it first |
+| `scripts/qt_oneoff/d1_retire_model_twin.sql` | Marks the QT model twin (`QT_CONSERVATIVE_MODEL_PORTFOLIO`) inactive in `trading.strategy_registry`, so AlgoLens stops listing it. Deletes nothing | the desk service stops scheduling the twin by default; remove it from `QT_CATCHUP_PORTFOLIOS` on a host that sets it |
+| `scripts/qt_oneoff/d38_remove_qt_e2e_rows.sql` | **Deletes** every row of the end-to-end test book `QT_E2E_PORTFOLIO` from `positions`, `executions`, `live_results`, `equity_curve`, `signals`, `live_run_metadata` and `strategy_trading_days_metadata` in `trading`, all three books. It refuses any database but production (by name), prints the counts first and runs in one transaction. The book's rows in `trading.position_overrides` stay (a trigger forbids deleting them), and its registry and settings rows are left as they are | there is no undo: take a copy of the rows first if they may be wanted. `scripts/qt_e2e.sh` refuses production, so nothing writes these rows there again |

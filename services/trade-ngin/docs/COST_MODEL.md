@@ -73,6 +73,8 @@ they were read and the three parts of every row (`migrations/026_contract_metada
 |---:|---|
 | 0.610 | MYM |
 | 0.614 | MES, MNQ, M2K |
+| 0.860 | SIL (0.25 commission + 0.60 exchange + 0.01 regulatory) |
+| 0.960 | MGC (0.25 commission + 0.70 exchange + 0.01 regulatory) |
 | 1.510 | ZT, ZF |
 | 1.660 | ZN |
 | 1.810 | UB |
@@ -86,8 +88,15 @@ they were read and the three parts of every row (`migrations/026_contract_metada
 | 2.961 | GF, HE, LE |
 | 3.010 | ZC, ZL, ZM, ZR, ZS, ZW, KE |
 
-That is 40 rows: the 36 contracts of the book and the four E-minis (ES, NQ, YM, RTY) the book
-holds before the micros' listing date. An E-mini fill is charged the E-mini's own fee.
+That is 42 rows: the 36 contracts the conservative template trades (with MGC and SIL, not GC and SI) and the
+six predecessors the book holds before a listed contract's listing date (the E-minis ES, NQ, YM and RTY before the equity micros, GC before MGC,
+SI before SIL). A predecessor's fill is charged the predecessor's own fee.
+
+Migration 026 prices 40 of them. The MGC and SIL rows are in no migration: they are written by
+`scripts/futures_release/load/load_micro_metals.sql`, from Interactive Brokers' fee pages (the
+file's comments and each row's notes name them). IBKR's COMEX page lists no SIL row, so SIL's 0.60 exchange fee is
+taken from CME's own fee notice (SER-8425); it is the one fee on the list not read from the broker's schedule. Migration 026 refuses
+unless the table holds exactly its 40 rows, so on a fresh database the micro load runs after it.
 
 Migration 026 also adds the CHECK `contract_metadata_fee_per_contract_positive`: the cell must be a
 plain decimal number above zero (`026_contract_metadata_ibkr_fees.sql`). Without it
@@ -106,7 +115,7 @@ no fee for the contract (`transaction_cost_manager.cpp`):
 | The cell is not a number, or is negative | a WARN naming the row (`instrument_registry.cpp`) | 1.50 for that row |
 | The symbol has a calibration entry and no metadata row (ZB) | nothing to read | 1.50, and no spread or impact (above) |
 
-Every one of the 40 rows has a figure on the schedule, so 1.50 is charged on no row.
+Every one of the 42 rows carries a figure, so 1.50 is charged on no row.
 
 ---
 
@@ -172,8 +181,8 @@ root of the share of the day's volume the order takes, times a coefficient chose
 
 None of these is a JSON key. All are compiled. `defaults.json` carries
 `execution.commission_rate` and `execution.slippage_bps`; neither is read by the cost model or by
-any futures path, and no fill is priced with them (their one reader, the equity live runner, prints
-them in its start banner, `apps/strategies/live_equity_mean_reversion.cpp`).
+any futures path, and no fill is priced with them (the one code that reads them, the equity live
+runner, prints them in its start banner, `apps/strategies/live_equity_mean_reversion.cpp`).
 
 | Constant | Value | Where |
 |---|---|---|
@@ -195,7 +204,10 @@ them in its start banner, `apps/strategies/live_equity_mean_reversion.cpp`).
 | Equity tiers | table below | `asset_cost_config.cpp` (`get_tiered_equity_config`) |
 
 The per-contract futures entries hold calibration only. Their `tick_size` and `point_value`
-fields are overwritten from the metadata row (section 2).
+fields are overwritten from the metadata row (section 2). MGC and SIL take the calibration of their
+full-size contracts, GC and SI: the data held for the micros has no quotes, and the tick in price is the
+same (0.10 and 0.005). Their impact is paid on the micro's own volume, so a thin micro's fill costs more
+than the full-size calibration alone would say (`asset_cost_config.cpp`; worked in section 11.6).
 The table lists every futures entry in the code; ZB has an entry and no metadata row, and is not in
 the book. The same function also holds fixed entries for ten equity symbols
 (`asset_cost_config.cpp`); `register_equity_costs_from_bars` replaces the entry of
@@ -203,8 +215,8 @@ every symbol a runner registers, on every live run and every backtest cycle (sec
 
 | Contracts | baseline ticks | min | max | multiplier | impact cap (bps) |
 |---|---:|---:|---:|---:|---:|
-| ES, NQ, YM, MES, MNQ, MYM, CL, GC | 1 | 1 | 5 | 0.5 | 50 |
-| RTY, M2K, SI, HG, HO, RB, ZM | 1 | 1 | 5 | 0.5 | 60 |
+| ES, NQ, YM, MES, MNQ, MYM, CL, GC, MGC | 1 | 1 | 5 | 0.5 | 50 |
+| RTY, M2K, SI, SIL, HG, HO, RB, ZM | 1 | 1 | 5 | 0.5 | 60 |
 | PL | 1 | 1 | 5 | 0.5 | 70 |
 | MBT | 1 | 1 | 10 | 0.5 | 80 |
 | ZC, ZS, ZW, KE, ZL | 2 | 1 | 5 | 0.5 | 60 |
@@ -254,8 +266,17 @@ So the engine adds the weekend block's volume to the signal bar's. No calendar i
 is a weekday on which the symbol printed no bar, and its weekend block merges into the next
 session the symbol prints. Only `V` moves; the walk of returns does not.
 
-The returns are every consecutive log return of the symbol's bars up to `B`, of which the spread
-model keeps the last 20.
+Which contract's volume `B` carries depends on `portfolio.json`'s `per_contract_rolls`. With it on, as in
+the conservative template, each bar is the held contract's own bar (`include/trade_ngin/data/per_contract_source.hpp`),
+so `V` is the volume of the contract the book holds. With it off, `V` is the vendor's continuous series'
+volume for the date. On a listing-date switch the predecessor's exit is priced on the full-size contract's
+own volume, not the micro's (`src/data/listing_dates.cpp`).
+
+The returns are the consecutive log returns of the symbol's bars up to `B`, of which the spread
+model keeps the last 20, read on the roll rule (`record_bar_log_return`, `futures_cost_feed.hpp`). With
+`per_contract_rolls` on, a roll bar's return is the old contract's own over the bar, never the gap
+between the two contracts, and the bar that confirms a vendor switch is read from the target's close on
+the switch bar. With it off, a change bar's return enters as 0.
 
 Backtest and live compute the same two inputs with the same merge rule
 (`FuturesSessionVolume::add` and `participation`, `futures_cost_feed.hpp`):
@@ -327,6 +348,16 @@ The borrow rate is 25, 50, 150 or 500 basis points a year by a count of three fl
 under 5 million a day, price under 5.00, not easy to borrow), times `clamp(annual vol / 0.25, 1, 3)`,
 unless the instrument carries its own rate. The live equity runner accrues no borrow fee and
 refuses to store a short position (`live_equity_mean_reversion.cpp`).
+
+The borrow applies only to an equity short in a backtest. A futures short pays no borrow: the fee
+skips every instrument that is not an equity (`calculate_overnight_borrow_fees`), and the futures
+book's shorts carry only the costs of section 1. The equity book is a cash book, which sets a short
+target to 0 ([EQUITY_STRATEGY_GUIDE.md](EQUITY_STRATEGY_GUIDE.md)), so on the shipped books no
+BORROW row is written. Each backtest bar accrues one day of borrow (the annual rate over 365), so
+the extra calendar days of a weekend are not charged, and a BORROW row's id
+(`BORROW_<strategy>_<symbol>`, `BacktestCoordinator::process_portfolio_day`) carries no date. Both
+stay as they are until the equity shorting work (AlgoGators/algogators#140): changing them alone
+would move only an equity backtest that shorts, a case no shipped book runs.
 
 ---
 
@@ -458,6 +489,12 @@ model has no usable volume for is not priced on the 100,000 default: it is held 
 quantity with no fill (`portfolio_manager.cpp`). The search itself is in
 `docs/OPTIMIZER_AND_RISK_DESIGN.md`.
 
+Because the search starts from the held book, keeping a position costs nothing and moving one contract
+costs 100 times its cost over the sizing capital. On a day of the conservative book's two-year backtest
+(2026-06-10, E = 447,895.51) that term ran from 0.00021 for one MNQ contract to 0.00827 for one GF
+contract over the 36 symbols, against a no-trade band of 0.0669; the day is worked row by row in
+`docs/OPTIMIZER_AND_RISK_DESIGN.md`, section 11.
+
 The cost model is not called by the forecasts, the sizing or the risk overlay. The per-contract
 list of trading rules a contract does not run (`trading_rule_removals`) is a fixed config block,
 not something a run computes; it is described in `docs/TREND_FOLLOWING_SYSTEM.md`. A book with
@@ -508,8 +545,10 @@ The stored row:
 
 ### 11.2 Netting: a full cross
 
-A three-year backtest of the two-sleeve BASE book (2023-10-07 to 2026-10-07) on its template
-configuration, which carries none of the three blocks. Monday 2026-09-14, `MES.v.0` at 7615.5.
+A three-year backtest of the two-sleeve BASE book (the repository's base template,
+`config_template/portfolios/base/`; 2023-10-07 to 2026-10-07) on the BASE configuration of
+that time, which carried none of the listing-date, relabel and rule-removal blocks (today's BASE template
+carries `listing_dates` with the MGC and SIL pairs, which does not touch this MES fill). Monday 2026-09-14, `MES.v.0` at 7615.5.
 The signal bar is the Sunday stub of 2026-09-13 (volume 25,392), so case 2 applies:
 `V` = Friday's 1,052,226 + 25,392 = 1,077,618, `k_bps` 10. One contract: spread 0.5 x 1 x 0.25 =
 0.125; impact 10 x sqrt(1 / 1,077,618) / 10000 x 7615.5 = 0.00733611; slippage 0.13233611 x 5 =
@@ -570,6 +609,45 @@ the sum of `total_transaction_costs` over every stored fill row less the sum of 
 On a book with one sleeve every `netting_adjustment` is 0: no symbol-day has a second sleeve's row to net
 against (section 9).
 
+### 11.6 Two micro fills: impact on the micro's own volume
+
+A sixteen-year backtest of the conservative book with the gold and silver micros on per-contract rolls.
+Each fill is priced at the close of its consumed bar on the held contract's own volume; both totals equal
+the stored fill.
+
+| Step | SIL BUY 1 at 21.94 (bar 2013-08-14) | MGC BUY 3 at 1660.8 (bar 2012-01-18) |
+|---|---|---|
+| `V`, the held contract's own volume that day (no weekend block) | 295 | 1,293 |
+| Volume for impact, max(`V`, 100) | 295 | 1,293 |
+| `k_bps` (`V` below 20,000) | 80 | 80 |
+| Participation, and its square root | 1 / 295 = 0.003390, 0.058222 | 3 / 1,293 = 0.002320, 0.048168 |
+| Impact = min(k x sqrt, cap) x P / 10,000 | 4.657780 bps (cap 60) = 0.01021917 | 3.853464 bps (cap 50) = 0.63998337 |
+| `vol_mult` (sd of the last 20 log returns) | 1.220983 (sd 0.017366) | 1.000601 (sd 0.010020) |
+| Spread = 0.5 x clamp(1 x vol_mult, 1, 5) x tick | 0.5 x 1.220983 x 0.005 = 0.00305246 | 0.5 x 1.000601 x 0.10 = 0.05003005 |
+| Implicit per contract | 0.01327163 | 0.69001342 |
+| Slippage = implicit x q x point value | x 1 x 1,000 = 13.27162706 | x 3 x 10 = 20.70040258 |
+| Fee | 0.86 | 3 x 0.96 = 2.88 |
+| Total | 14.13162706 | 23.58040258 |
+
+On a thin micro the impact dominates: on SIL it is 77 percent of the implicit cost. The spread
+calibration is the full-size contract's; the volume, and with it the impact, is the micro's.
+
+### 11.7 What costs come to on the conservative book
+
+The conservative book's backtests on the template's present settings (each window from its first start date;
+"a year" is per year traded):
+
+| Window | Round trips a year | Contracts a year | Costs a year | Share of 500,000 | Fees / spread and impact / roll legs a year | Cost per contract, strategy / roll |
+|---|---:|---:|---:|---:|---|---|
+| 16 years | 153 | 384 | 4,019 | 0.80% | 646 / 1,425 / 1,948 | 5.40 / 7.26 |
+| 5 years | 196 | 506 | 4,097 | 0.82% | 801 / 1,258 / 2,038 | 4.07 / 5.40 |
+| 2 years | 215 | 512 | 4,220 | 0.84% | 844 / 1,453 / 1,923 | 4.49 / 5.70 |
+
+In units of the account's Sharpe ratio, costs take about 0.05 a year (0.052, 0.051 and 0.052 on these
+windows), and doubling every fill's cost takes 0.03 to 0.06 off a run's Sharpe ratio. Roll legs are about
+half the cost, so the outright pricing of rolls (section 12) is the limit of the model with the most cost
+behind it.
+
 ---
 
 ## 12. Limits
@@ -580,8 +658,11 @@ against (section 9).
   by the engine.
 - The spread and impact calibrations are compiled constants. Changing one is a code change.
 - `vol_mult` measures every instrument against the same fixed 1 percent daily baseline.
-- A future's `V` is the continuous series' volume for the signal bar (plus the weekend block), not
-  a per-contract volume.
+- A future's `V` is one day's volume for the signal bar (plus the weekend block): the held contract's
+  own with `per_contract_rolls` on, the continuous series' with it off. It is never an average.
+- The roll legs are priced as outrights, an upper bound, until per-contract spread data is held. On the
+  conservative book's sixteen-year backtest the ROLL legs came to 1,948 of 4,019 a year of costs
+  (section 11.7).
 - Rows of one symbol-day at different fill prices are not netted (adjustment 0 and a warning).
 - Stored fills are priced by the `PortfolioManager`'s cost manager in the backtest and by the
   execution manager's in live; both are fed the same inputs.

@@ -37,6 +37,11 @@ Compiled sources in `src/live/`:
 | `execution_price_resolver.cpp` | `ExecutionPriceResolver` | the price a fill is booked at |
 | `margin_manager.cpp` | `MarginManager` | posted and maintenance margin, notional and leverage |
 | `csv_exporter.cpp` | `CSVExporter` | the positions files attached to the report |
+| `python_mail.cpp` | (functions) | builds and runs the Python report command that sends the book e-mail (`python_mail_command`, `send_via_python`) |
+| `report_roll_query.cpp` | (functions) | the held symbols and roll states the e-mail's roll view is asked for (`report_roll_query`) |
+| `live_statistics_columns.cpp` | (functions) | the live statistics of migration 036 on the results row: the worst day, the monthly skew and tail ratio, the calendar-year returns and the fill counts |
+| `live_settings.cpp` | (functions) | a run's settings: the config files with the portfolio's active `trading.strategy_config` row merged in, refusing a saved change that cannot be applied (`resolve_live_settings`) |
+| `qt_desk.cpp` | (functions, namespace `qt`) | the QT desk's reads and writes around the three books and `trading.position_overrides` |
 | `broker_frame.cpp` | (functions) | relates the book's adjusted cost basis to the broker's |
 | `corporate_actions_applier.cpp`, `corporate_actions_classification.cpp`, `corporate_actions_lifecycle.cpp`, `corporate_actions_audit_log.cpp` | `CorporateActionsApplier`, `CorporateActionsAuditLog` | equity corporate actions: classification, application, the applied record |
 
@@ -88,16 +93,23 @@ python -m algogators_rpc.services.report --portfolio-id CONSERVATIVE_PORTFOLIO -
 
 ### Arguments
 
-All three binaries take the same two arguments, in either order. An argument that is neither a date nor
-`--send-email` prints the usage line and exits 1. The equity runner accepts only an exact `YYYY-MM-DD`
-(`core::parse_utc_date`, `include/trade_ngin/core/time_utils.hpp:134-153`). The futures runners test only that a
-date could be read from the argument (`apps/strategies/live_portfolio_conservative.cpp:113-125`), and in every
-runner a second date on the line replaces the first with no message: type the date exactly as `YYYY-MM-DD`, once.
+All three binaries take the date and `--send-email`, in either order. The equity runner takes nothing else: an
+argument that is neither a date nor `--send-email` prints the usage line and exits 1. It accepts only an exact
+`YYYY-MM-DD` (`core::parse_utc_date`, `include/trade_ngin/core/time_utils.hpp`), and a second date on its line
+replaces the first with no message. The two futures runners also take the date as `--date` and the QT desk's
+arguments listed below the table; any other argument prints the usage line and exits 1. They test only that a date
+could be read from the argument (`run_date_at_local_midnight`, `include/trade_ngin/live/session_book_gate.hpp`) and
+refuse two different dates with exit 1 (`include/trade_ngin/live/run_args.hpp`). Type the date exactly as
+`YYYY-MM-DD`, once.
 
 | Argument | Format | Description |
 |---|---|---|
-| Date | `YYYY-MM-DD` | The date to run. Always given. A run started without a date takes the wall clock and turns the email on. Do not start one: nothing in the code refuses it. The futures runners read the date as midnight in the host's local time and the equity runner as midnight UTC; the three run modes are in [docs/LIVE_RUN_CYCLE.md](../../docs/LIVE_RUN_CYCLE.md), section 1. |
+| Date | `YYYY-MM-DD` | The date to run. Always given. A run started without a date prints the usage and exits 2: it runs, stores and sends nothing (`kDatelessRunExitCode`, `include/trade_ngin/live/run_args.hpp`). The futures runners read the date as midnight in the host's local time and the equity runner as midnight UTC; the two run modes are in [docs/LIVE_RUN_CYCLE.md](../../docs/LIVE_RUN_CYCLE.md), section 1.2. |
 | `--send-email` | Flag | After the day is stored, run the report module, which builds the report and mails it. Production passes it; a test or a replay never does. |
+
+The two futures binaries also take the QT desk's arguments (`--desk`, `--override`, `--publish`, `--fallback`,
+`--send`, `--finalize-system`, `--send-now`, `--portfolio-config`, `--audit-id`), which the desk service passes;
+[docs/design/desk-service.md](../../docs/design/desk-service.md) describes them.
 
 ### Environment
 
@@ -105,7 +117,7 @@ runner a second date on the line replaces the first with no message: type the da
 |----------|-------|-------------|
 | QT_MAIL_PYTHON | A Python interpreter | The interpreter that runs the report module. Default `/opt/rpc/venv/bin/python`. |
 | QT_MAIL_APP | A directory | The directory put on `PYTHONPATH` for the module. Default `/opt/rpc/app`. |
-| QT_MAIL_TIMEOUT | Seconds | The time limit of one send. Default 120. |
+| QT_MAIL_TIMEOUT | Seconds | The time limit of one send. Default 300 (`PythonMailSettings`, `python_mail.hpp`); a value that cannot be read as a number, or is not above 0, keeps the default. When the limit passes, the module's whole process group is killed and the run exits 4. |
 | QT_MAIL_TEST_TO | An address | On a QT `--send` run, mail only this address (no Cc) and record nothing: `sent_at` is left as it was, so a day already sent can be sent again as a preview. |
 | QT_MAIL_CC | Addresses, comma separated | Added to the Cc of the book e-mail (read by the module). |
 
@@ -125,8 +137,8 @@ returns 0, without starting the binary, when it finds its lock held (nothing sto
 `live_run_metadata` row is marked `risk_refusal` and the run ends at 3, whether a module could not answer or a
 sleeve module decided to refuse, or at 1 when the refused book has no stored previous positions to be held at.
 Exit 1 stores nothing when the run refuses before its `live_run_metadata` row is written, and can leave that
-row, the signals or a half-written day when it stops later. The equity runner returns 0, 1 or 4, the backtest
-runners only 0 or 1.
+row, the signals or a half-written day when it stops later. Every live runner exits 2, having done nothing, when
+it is started without a date. The equity runner returns 0, 1, 2 or 4, the backtest runners only 0 or 1.
 
 The reasons, the full exit-code table (0, 1, 2, 3, 4, and the wrapper's 127), the log locations and the scheduled job are
 in [docs/performance_upkeep.md](../../docs/performance_upkeep.md).
@@ -151,13 +163,27 @@ The book e-mail is sent by the Python report module `services/rpc/algogators_rpc
 runner. A run with `--send-email`, after storing the day, runs it through `send_via_python` (`python_mail.hpp`):
 
 ```bash
-python -m algogators_rpc.services.report --portfolio-id ID --date YYYY-MM-DD [--no-session] [--alert TEXT] \
-    [--attach FILE ...] [--to ADDR] [--preview-dir DIR]
+python -m algogators_rpc.services.report --portfolio-id ID --date YYYY-MM-DD [--strategy-id ID] [--no-session] \
+    [--equities] [--alert TEXT] [--rolls JSON] [--attach FILE ...] [--to ADDR] [--preview-dir DIR]
 ```
 
-The runner passes `--no-session` when the run carried its book (no session the day before), `--alert` with the
-risk-module failure text (`risk_module_failure_text`, `risk_module_failure.hpp`) and the positions files from
-`CSVExporter` as `--attach`. The module reads the stored day from the database (the date's `live_results` row and
+A futures runner passes `--strategy-id` with the combined id the day is stored under, `--no-session` when the run
+carried its book (no session the day before), `--alert` with the risk-module failure text (`risk_module_failure_text`,
+`risk_module_failure.hpp`), and `--to` with `QT_MAIL_TEST_TO` when that is set. The equity runner passes
+`--strategy-id` with its id (`LIVE_EQUITY_MEAN_REVERSION`), `--equities` (no futures notes, margin lines or symbols
+reference) and `--to` with `QT_MAIL_TEST_TO` when that is set. Both pass their positions files from `CSVExporter` as
+`--attach` (`python_mail_command`, `src/live/python_mail.cpp`).
+
+With `per_contract_rolls` on, a futures runner also passes `--rolls`: a JSON object of the roll texts the e-mail
+shows, made in C++ so the module only lays them out and computes none of them (`report_rolls_json`,
+`include/trade_ngin/live/report_rolls_json.hpp`). The runner asks the database's roll view
+(`PostgresDatabase::report_roll_view`) for the settled day's held symbols, the contract each holds and the run's
+`ROLL` closing legs (`report_roll_query`, `include/trade_ngin/live/report_roll_query.hpp`), and the object carries:
+one line per roll from its closing leg's split and both legs' costs; the held contracts inside their roll window,
+with the target, the date to roll by and the deadline's kind (first notice or last trading day); the contract held
+per root (the Symbols Reference's Front Month column); each root's cycle months; the footer's futures sentence; and
+the note and symbol list for a settled row whose bar was a roll bar. With the switch off the runner passes no
+`--rolls`. The module reads the stored day from the database (the date's `live_results` row and
 the one before, the positions, the executions with the roll legs and the netting, the equity curve, the start
 date), renders the HTML (a Jinja template, matplotlib charts) with a plain-text part, and sends it over SMTP.
 On a day the book was held, the e-mail opens with the alert and the subject begins

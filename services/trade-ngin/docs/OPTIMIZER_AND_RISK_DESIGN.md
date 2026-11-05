@@ -2,8 +2,8 @@
 
 This document describes one rebalance of a futures book, from the forecast to the stored whole-contract
 book, as the engine runs it. It is written for an engineer who has to read, debug or change the loop. It
-covers the two futures books: CONSERVATIVE (one trend sleeve) and BASE (two trend sleeves, a placeholder
-test book). The equity book does not go through this loop.
+covers the two futures books: CONSERVATIVE (one trend sleeve) and BASE (two trend sleeves; BASE is the
+repository's base template, `config_template/portfolios/base/`). The equity book does not go through this loop.
 
 What is elsewhere:
 
@@ -16,11 +16,19 @@ What is elsewhere:
 | The order of a live run, the tables, the column dictionary | [LIVE_RUN_CYCLE.md](LIVE_RUN_CYCLE.md) |
 | Every config key | [CONFIG_GUIDE.md](CONFIG_GUIDE.md) |
 
-"The book" in a citation is Robert Carver, Advanced Futures Trading Strategies.
+AFTS is Robert Carver, *Advanced Futures Trading Strategies* (Harriman House, 2023), cited by strategy, section and table. "The book" in this document is the futures book the engine runs.
 
 Code citations name the file and, where one is meant, the function or key. A file is given with its full path the first time and by
 its file name after that. The two live futures runners (`apps/strategies/live_portfolio_conservative.cpp`
 and `apps/strategies/live_portfolio.cpp`) carry the same loop code; the conservative one is cited.
+
+The settings tables give the values in the conservative template (`config_template/portfolios/conservative/`
+and `config_template/defaults.json`). Most worked examples (sections 3.7, 4.2, 5.2, 8.4 and the first part of
+section 11) come from runs made before the template took its present form: those runs read the vendor's
+continuous series (`per_contract_rolls` off), traded GC and SI full size rather than the gold and silver micros,
+and read the overlay on the sample covariance with the limits of that time (R_max, R_jump_max and R_shock_max
+2.25, 4.5 and 4.0 tau; gross leverage 8.0, net 6.0). The arithmetic of each stage is the same today. The last
+part of section 11 works a day on the template's present settings.
 
 ---
 
@@ -61,7 +69,7 @@ Read the design comments before the code. They state the rules this document sum
 | The log lines | `include/trade_ngin/optimization/one_pass_log.hpp` |
 | The stored record and its nine keys | `include/trade_ngin/risk/risk_detail.hpp` |
 | Listing dates, the switch rules, the relabel list | `include/trade_ngin/data/listing_dates.hpp` |
-| The live session rule and the hold | `include/trade_ngin/live/session_book_gate.hpp` |
+| The live runners' per-symbol session rule and the hold | `include/trade_ngin/live/session_book_gate.hpp` |
 | The split of a symbol over sleeves | `include/trade_ngin/portfolio/allocation_split.hpp` |
 
 Where a header comment cites a section number, the rule it refers to is stated in this document or in one of
@@ -91,7 +99,7 @@ refused, never sent through the generic optimiser step (`portfolio_manager.cpp`)
 | F_i | combined forecast after the equity slow rule | [-20, 20] | section 3 |
 | N*_i | unrounded target in contracts | | section 5 |
 | u_i | weight of one contract on the sizing capital, M_i P_i / E | | `one_pass.cpp` |
-| L | per-name cap on a position's weight, abs(n_i) u_i <= L | 2 | `risk.json` carver module `per_name_cap` |
+| L | per-name cap on a position's weight, abs(n_i) u_i <= L | 2 (BASE: 2) | `risk.json` carver module `per_name_cap` |
 | m | the overlay's scalar, in (0, 1] | | section 6 |
 | h_i, n_i | held and stored position, whole contracts | | |
 
@@ -103,20 +111,31 @@ The other constants of the pass:
 | Deferral band | 2 | `defaults.json` `optimization.sign_close_band` |
 | Floor of the no-trade band, as a ratio to tau | 0.05 | `defaults.json` `optimization.b_sigma_floor` |
 | Floor of the search's pass cap | 100 | `defaults.json` `optimization.max_iterations` |
-| R_max, R_jump_max, R_shock_max, as ratios to tau | 2.25, 4.5, 4.0 | `risk.json` carver module `R_max`, `R_jump_max`, `R_shock_max` |
-| Gross and net leverage limits | 8.0, 6.0 | `risk.json` carver module `max_gross_leverage`, `max_net_leverage` |
-| Most contracts the trim removes in a day | 5 | `risk.json` carver module `trim_max` |
+| R_max, R_jump_max, R_shock_max, as ratios to tau | 1.75, 4.75, 3.0 (BASE: 2.25, 4.5, 4.0) | `risk.json` carver module `R_max`, `R_jump_max`, `R_shock_max` |
+| Gross and net leverage limits | 7.25, 5.5 (BASE: 8.0, 6.0) | `risk.json` carver module `max_gross_leverage`, `max_net_leverage` |
+| How the overlay's covariance is built | `carver` (BASE: `sample`) | `risk.json` carver module `overlay_covariance` (`sample` or `carver`, required) |
+| Most contracts the trim removes in a day | 5 (BASE: 5) | `risk.json` carver module `trim_max` |
+| Closes behind the optimiser's covariance | 756 | none: `kOptimiserBars`, a literal in `trend_following.cpp` |
 | Sizing mode | `half_compounding` | `portfolio.json` `sizing_mode`. It is required, it is the one value accepted, and it selects nothing: the code has one sizing rule (`src/core/config_loader.cpp`) |
 
 `ConfigLoader::require_loop_keys` (`src/core/config_loader.cpp`) refuses a futures book that lacks the
 equity slow rule, the three risk ratios, `sizing_mode`, `starting_capital`, `cost_penalty_scalar`,
-`sign_close_band` or `b_sigma_floor`; the risk schema requires `per_name_cap` and `trim_max` with the ratios
-(`src/risk/risk_module_config.cpp`). `apply_loop_config`
+`sign_close_band` or `b_sigma_floor`; the risk schema requires `per_name_cap`, `trim_max` and
+`overlay_covariance` with the ratios (`src/risk/risk_module_config.cpp`). `apply_loop_config`
 (`include/trade_ngin/portfolio/loop_config.hpp`) then carries the band, the floor, the sizing mode, the
 slow rule, the cap and the trim cap into `PortfolioConfig`; the cost multiplier and the pass-cap floor are
 read by the loader into `opt_config`, and the limits stay on the carver module. One constant has an in-code
 default: `optimization.max_iterations` is not required and reads 100 when absent
 (`include/trade_ngin/optimization/dynamic_optimizer.hpp`).
+
+Three keys in the files look as if they steer the pass and do not reach it. `portfolio.json` carries
+`covariance_history_prices` 756 and `covariance_stale_dates` 5, and `defaults.json` carries
+`optimization.convergence_threshold` 1e-06. The pass takes its 756 closes from `kOptimiserBars`
+(`src/strategy/trend_following.cpp`), its stale threshold of five dates and its step threshold of 1e-6 from
+literals in `one_pass.cpp`. `covariance_stale_dates` and `convergence_threshold` are read only on the generic
+optimiser path (`portfolio_manager.cpp`; `src/optimization/dynamic_optimizer.cpp`), which a futures book never
+runs, and `covariance_history_prices` caps a stored price history of which the futures book reads only the latest
+close. The values agree today, so nothing moves; a change to any of the three has no effect on a futures book.
 
 ---
 
@@ -162,7 +181,7 @@ scaled  = clamp(raw x attenuation x scalar, -20, +20)
 |---|---|---|---|---|---|---|
 | Scalar (`forecast_scalar`, `trend_estimator.cpp`) | 12.1 | 8.53 | 5.95 | 4.10 | 2.79 | 1.91 |
 
-The scalars are fixed (the book, strategy nine, table 29). A pair with no scalar is refused when the sleeve
+The scalars are fixed (AFTS, strategy nine, table 29). A pair with no scalar is refused when the sleeve
 is initialised (`trend_following.cpp`). The trend sleeve runs all six pairs; BASE's fast sleeve runs the first
 four.
 
@@ -179,8 +198,8 @@ times the multiplier for that number of pairs, capped at +/-20 (`trend_estimator
 | Weight of each | 1/6 | 1/5 | 1/4 | 1/3 | 1/2 | 1 |
 | Multiplier | 1.26 | 1.19 | 1.13 | 1.08 | 1.03 | 1.00 |
 
-These are the rows of the book's table 36 (strategy nine). The engine reads the row by the number of pairs
-run. The book states each row for the slowest pairs of that number, which is what a contract with removed
+These are the rows of AFTS table 36 (strategy nine). The engine reads the row by the number of pairs
+run. Carver states each row for the slowest pairs of that number, which is what a contract with removed
 rules runs. BASE's fast sleeve runs the four fastest pairs and reads the four-pair row all the same. The
 table in force is
 `TrendFollowingConfig::fdm` (`include/trade_ngin/strategy/trend_following.hpp`). `defaults.json`
@@ -225,7 +244,7 @@ loader to the sleeve in one function, `hand_over_trading_rule_removals`
 `TRADING_RULE_REMOVALS` line per listed contract is logged when the sleeve initialises
 (`trend_following.cpp`).
 
-Where the list comes from. It is the book's procedure (strategy nine, "Removing expensive trading rules"): a
+Where the list comes from. It is Carver's procedure (AFTS, strategy nine, "Removing expensive trading rules"): a
 rule is removed from an instrument when the rule's yearly cost on it is over 0.15 Sharpe-ratio units, where
 
 ```
@@ -233,7 +252,7 @@ yearly cost     = (turnover of the rule + 2 x rolls a year) x cost per trade
 cost per trade  = cost of one contract / (price x multiplier) / sigma
 ```
 
-The turnovers are the book's (table 35: 98.5, 50.2, 25.4, 13.2, 7.6, 5.2 for the six pairs, the same for
+The turnovers are Carver's (AFTS table 35: 98.5, 50.2, 25.4, 13.2, 7.6, 5.2 for the six pairs, the same for
 every contract). The cost inputs are ours: the engine's own cost of one contract at the signal close (the
 fee per contract plus spread and impact, see [COST_MODEL.md](COST_MODEL.md)), and its sizing
 volatility, whose ratio is taken as the median over the signal days of the sixteen-year run the list is computed from, and the
@@ -248,22 +267,25 @@ MES, MNQ, MYM): a negative combined forecast stands only when the scaled forecas
 32/128 and 64/256, are negative. Otherwise it is set to 0. A forecast that is not negative is never touched
 (`equity_slow_ruled`, `trend_estimator.cpp`; applied at `trend_following.cpp`).
 
-The ruled forecast is the forecast from there on: it sizes the target, its sign drives the sign close and
-the deferral band, and it is the value stored in `trading.signals.signal_value`.
+The forecast after the slow rule is the forecast from there on: it sizes the target, its sign drives the sign
+close and the deferral band, and it is the value stored in `trading.signals.signal_value`. With carry on (it is
+off in every template; see [TREND_FOLLOWING_SYSTEM.md](TREND_FOLLOWING_SYSTEM.md), section 1.6a), the rule acts on
+the trend part of the blend only.
 
 A held equity-index short whose forecast the rule sets to 0 is not closed by rule. A zero forecast has no
 sign, so the symbol is a free row with a target of 0 that may only step toward zero; the short leaves the
 book as the search and the buffer take it.
 
-On BASE the fast sleeve carries neither slow pair and is not ruled (`apps/backtest/bt_portfolio.cpp`).
-A predecessor contract of a listing-date pair (ES for MES) is ruled through its listed contract's root
+On BASE the fast sleeve carries neither slow pair and the rule does not apply to it
+(`apps/backtest/bt_portfolio.cpp`). A predecessor contract of a listing-date pair (ES for MES) comes under the
+rule through its listed contract's root
 (`ListingDates::pair_root`, `include/trade_ngin/data/listing_dates.hpp`).
 
 ### 3.7 Worked forecasts
 
 An example of the arithmetic, from a replay of dated live runs of the conservative book, one run a day in
-date order, on its template configuration, which carries the listing-date, relabel and rule-removal blocks:
-run date 2026-04-30, signal bar 2026-04-29. The per-pair figures are from the run's estimator record, a diagnostic file the
+date order, on the conservative configuration of that time (see the note at the head), which carried the
+listing-date, relabel and rule-removal blocks: run date 2026-04-30, signal bar 2026-04-29. The per-pair figures are from the run's estimator record, a diagnostic file the
 sleeve writes when `TRADE_NGIN_SERIES_DUMP_DIR` is set (`trend_estimator_record.hpp`). The combined forecast
 in the last column equals the stored `trading.signals.signal_value` of that run date.
 
@@ -274,7 +296,7 @@ in the last column equals the stored `trading.signals.signal_value` of that run 
 | ZW | not run | not run | 3.505 | 4.663 | 3.458 | -0.696 | 4 | 2.733 | 1.13 | 3.088 |
 | ZR | not run | not run | not run | -6.124 | -9.420 | -18.844 | 3 | -11.462 | 1.08 | -12.379 |
 
-Check for ZW: (3.505 + 4.663 + 3.458 - 0.696) / 4 = 2.733; 2.733 x 1.13 = 3.088. MES is a ruled symbol; its
+Check for ZW: (3.505 + 4.663 + 3.458 - 0.696) / 4 = 2.733; 2.733 x 1.13 = 3.088. MES is one of the slow rule's symbols; its
 forecast is positive, so the equity slow rule leaves it alone.
 
 ---
@@ -283,7 +305,7 @@ forecast is positive, so the equity slow rule leaves it alone.
 
 ### 4.1 The rule
 
-The book is sized on Carver's half compounding (the book, Tactic three, "Half compounding"): the starting
+The book is sized on Carver's half compounding (AFTS, Tactic three, "Half compounding"): the starting
 capital less the current drawdown of the settled P&L, never above the starting capital. Losses come off the
 sizing capital at once. A profit rebuilds it up to the start. Profit above the start is set aside and never
 sized on.
@@ -319,7 +341,7 @@ finalize, a `SIZING_CAPITAL_CHECK` line compares the finalized `daily_pnl` with 
 ### 4.2 Worked table: a loss, the recovery, a gain above the start, a loss again
 
 An example of the arithmetic, from the same run as section 3.7 (a replay of dated live runs of the
-conservative book on its template configuration, with the listing-date, relabel and rule-removal blocks),
+conservative book on the configuration of that time, with the listing-date, relabel and rule-removal blocks),
 run dates 2026-04-24 to 2026-05-02. `E` and `V` are the stored `risk_detail.sizing_capital` and
 `risk_detail.account_value` of each run date's `trading.live_results` row. "Net added" is the stored
 `daily_pnl` of the day or days that settled since the previous sized run. C is V minus 500,000. The first
@@ -342,6 +364,27 @@ start and the book is sized on less than the start, because the drawdown is take
 
 V minus E is the profit set aside (11,005.96 on 2026-05-01). It is derived from the two keys and is not
 stored.
+
+**What a lower E does to the rest of the rebalance.** An illustration with invented inputs, none of them a
+stored row: a book that starts at 500,000 settles +6,000 on day 1 and -24,500 on day 2.
+
+| Sized day | Net settled before it | C | Peak P | E = 500,000 - (P - C) | Row by row, min(500,000, E + net) | V = 500,000 + C | Set aside V - E |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | (none) | 0 | 0 | 500,000.00 | start | 500,000.00 | 0.00 |
+| 2 | +6,000 | +6,000 | 6,000 | 500,000.00 | min(500,000, 506,000) = 500,000.00 | 506,000.00 | 6,000.00 |
+| 3 | -24,500 | -18,500 | 6,000 | 475,500.00 | min(500,000, 475,500) = 475,500.00 | 481,500.00 | 6,000.00 |
+
+On day 3 every capital-terms quantity moves with E, because each divides by it:
+
+| Quantity | At E = 500,000 | At E = 475,500 | Why |
+|---|---:|---:|---|
+| Weight of one contract u = M P / E | x 1 | x 1.051525 (500,000 / 475,500) | the same contract is a larger share of a smaller capital |
+| N* of a ZT row at the same forecast (+16) | 16.005634 | 15.221358 | N* is proportional to E |
+| Per-name cap in contracts, L / u, for that ZT row | 4.801690 | 4.566407 | the cap is a weight, so fewer contracts fit |
+| Cost term of one contract at a cost of 1.50, 100 x 1.50 / E | 0.000300 | 0.000315 | a trade costs more against a smaller capital |
+
+The profit of day 1 is set aside and never sized on; the loss of day 2 comes off E at once, measured from the
+peak of 6,000, so E falls by 24,500 while the account falls to 481,500.00.
 
 ### 4.3 The failure-path rule
 
@@ -387,13 +430,15 @@ Guards in `calculate_position` (`trend_following.cpp`): a forecast that is not f
 beyond 20 in size sizes at 0; sigma is clamped to [0.01, 1.0]; tau to [0.01, 0.5]; the denominator is at
 least 1. Also floored: the capital at 1,000, the IDM and FX at 0.1. A sigma or a price that is not positive
 is replaced (the caller puts 0.2 for a sigma that is not a positive finite number, `trend_following.cpp`, and the function itself 0.01; a bad price takes the last price of the symbol's history, or 1 when
-there is none), and a result that is not finite is set to 0. None binds on this book.
+there is none), and a result that is not finite is set to 0. Of these, only the sigma clamp at 1.0 binds on this book, on NG
+and MBT in high-volatility months.
 
 ### 5.1 Instrument weights and the IDM
 
 `get_weights` (`trend_following.cpp`) builds the weights from the metadata `Sector` column. The
-universe is every metadata symbol that has a row in `futures_data.ohlcv_1d` at any date, less ES
-(`trend_following.cpp`; the symbol list is read with no date filter,
+universe is every metadata symbol that has a row in `futures_data.ohlcv_1d` at any date, less ES and less a
+predecessor whose listed contract is stored (GC while MGC is, SI while SIL is; `ListingDates::run_universe`,
+called in `trend_following.cpp`; the symbol list is read with no date filter,
 `src/data/postgres_database.cpp`). If that symbol list comes back empty, every metadata symbol
 is kept. The weights are computed once per sleeve and cached, so they are the
 same on every date of a run. In a backtest that starts before a contract's first bar, the contract carries
@@ -415,16 +460,16 @@ With the 36 traded symbols in seven sectors:
 | Energy | CL, HO, NG, RB | 0.038690 |
 | Equities | M2K, MES, MNQ, MYM | 0.038690 |
 | Interest Rates | UB, ZF, ZN, ZT | 0.038690 |
-| Metals | GC, HG, PL, SI | 0.038690 |
+| Metals | HG, MGC, PL, SIL | 0.038690 |
 | Crypto | MBT | 0.071429 |
 
 Check: MBT is alone in its sector, so it is capped at half of 1/7, 0.071429. The other 35 are scaled by
 (1 - 0.071429) / (6/7) = 1.083333: an agriculture symbol is (1/7) / 10 x 1.083333 = 0.015476. The sum is 1.
 
 The two contracts of a listing-date pair read one weight: a predecessor takes its listed contract's
-(`trend_following.cpp`).
+(`trend_following.cpp`). So GC trades on MGC's weight before MGC's listing date, and SI on SIL's.
 
-The IDM is 2.5 on both books (the book, strategy four, table 16: the value for 30 or more instruments). It
+The IDM is 2.5 on both books (AFTS, strategy four, table 16: the value for 30 or more instruments). It
 is a required sleeve key with no default.
 
 ### 5.2 Worked targets
@@ -454,28 +499,72 @@ needs:
 overlay never reads a position the book cannot hold. The scalar is never computed from the optimiser's
 answer.
 
+An illustration of why the cap comes first, with invented inputs (four contracts, none a stored row): ZT's
+forecast of +16 gives an uncapped N* of 16.005634 contracts, a weight of 6.67 on the sizing capital, where the
+cap L / u is 4.801690 contracts, a weight of 2.
+
+| Book the overlay reads | R | R_jump | R_shock | L_g | L_n | m at the limits in force | Binding |
+|---|---:|---:|---:|---:|---:|---:|---|
+| Capped target (what the code reads) | 0.0808 | 0.2019 | 0.210 | 2.7652 | 2.3806 | 1 | none |
+| The same book uncapped (for comparison) | 0.2003 | 0.5008 | 0.350 | 7.4319 | 7.0473 | 0.780443 | L_n (L_g 0.975526 beside) |
+
+Read uncapped, a position the book can hold only at a weight of 2 would cut every other name by 22 percent.
+
 **In capital terms.** Each position is a signed weight on the sizing capital, `x_i = N_i M_i P_i / E`. The
 five readings (`overlay.hpp`):
 
 | Reading | Formula | Limit |
 |---|---|---|
-| R, portfolio risk | sqrt(x' Sigma x), Sigma the annualised covariance of adjusted returns over the gate window | R_max = 2.25 tau = 0.45 |
-| R_jump | sqrt(x' Sigma_jump x): the window's correlations on each symbol's jump volatility, the 99th percentile of its trailing 2,520 `sigma_short` values each taken back to a daily figure by its own bar's factor (`trend_estimator.cpp`), annualised by the gate window's factor (`one_pass.cpp`) | R_jump_max = 4.5 tau = 0.90 |
-| R_shock | sum of abs(x_i) s_i, with s_i the symbol's own volatility in the gate window, sqrt(Sigma_ii) (every correlation taken as 1). It is not the sizing volatility of section 3.2 | R_shock_max = 4.0 tau = 0.80 |
-| L_g, gross leverage | sum of abs(x_i) | 8.0 |
-| L_n, net leverage | sum of x_i, signed; the limit applies to its size | 6.0 |
+| R, portfolio risk | sqrt(x' Sigma x), Sigma the overlay's annualised covariance (below) | R_max = 1.75 tau = 0.35 |
+| R_jump | sqrt(x' Sigma_jump x): the overlay's correlations on each symbol's jump volatility, the 99th percentile of its trailing 2,520 `sigma_short` values each taken back to a daily figure by its own bar's factor (`trend_estimator.cpp`), annualised by the gate window's factor (`one_pass.cpp`) | R_jump_max = 4.75 tau = 0.95 |
+| R_shock | sum of abs(x_i) s_i (every correlation taken as 1). With `overlay_covariance` `carver`, s_i is the symbol's sizing volatility of section 3.2; with `sample`, its own volatility in the gate window, sqrt(Sigma_ii) | R_shock_max = 3.0 tau = 0.60 |
+| L_g, gross leverage | sum of abs(x_i) | 7.25 |
+| L_n, net leverage | sum of x_i, signed; the limit applies to its size | 5.5 |
 
 The gate window is the last 252 dates on which any participant has a return, ending at the signal date.
 Below 21 complete dates the three covariance readings are blind (their multipliers are 1, `OVERLAY_BLIND`
-is warned) and the two leverage readings still apply. The full window rules are in the comment at
-`overlay.hpp`.
+is warned) and the two leverage readings still apply. Which participants are in each reading and how the
+readings are annualised are the window's in both covariance settings. The full window rules are in the comment
+at `overlay.hpp`.
+
+**The overlay's covariance.** `risk.json`'s `overlay_covariance` chooses how Sigma is built
+(`carver_covariance`, `src/risk/overlay.cpp`; the comment at `overlay.hpp`):
+
+| Setting | Sigma over the participants in R | In force |
+|---|---|---|
+| `carver` | sigma_i sigma_j rho_ij. sigma_i is the symbol's sizing volatility as its sleeve sizes it (section 3.2). rho_ij is the exponentially weighted correlation of the two symbols' weekly returns, span 26 weeks, newest week weighted most, over the weeks both have a return; a weekly return is the sum of the daily adjusted returns of a Saturday-to-Friday week; a pair with fewer than two common weeks has rho 0. The weeks come from every row the sleeve hands the overlay, which is each symbol's last 300 consumed bars (`kOverlayBars`, `trend_following.cpp`), not only the window's 252 | yes, in the conservative template |
+| `sample` | the sample covariance (n - 1) of the window's complete dates, or of every window date with missing returns as zeros below 120 complete dates | no |
+
+So the overlay and the optimiser read different covariances: the overlay Carver's form above, the optimiser the
+sample covariance of 756 closes (section 7.3). Whatever the setting, the one-pass record also stores R and the
+stored book's R on the carver covariance (`carver_R`, `carver_stored_R`), so that books compare.
 
 **Where the limits are.** The five limits are fixed values of the carver module in `risk.json`. The pass
 multiplies the three risk limits by the first sleeve's tau and takes the two leverage limits as they are
 (`portfolio_manager.cpp`), so a change of tau moves the three risk limits with it and leaves
-the leverage limits and the per-name cap where the file puts them. The book sets the limits of its own
-overlay as the 99th percentile of each reading's own history, rounded (Tactic four, "An exogenous risk
-overlay"); section 13 gives its values beside ours.
+the leverage limits and the per-name cap where the file puts them. The loader bounds R_max at 3 tau, R_jump_max
+and R_shock_max at 6 tau, the per-name cap at 4, the trim at 20 contracts, and both leverage limits at 10 with
+the net limit no larger than the gross (`src/risk/risk_module_config.cpp`).
+
+**How the limit values are set.** By Carver's method (AFTS, Tactic four, "An exogenous risk overlay"): each limit
+is the 99th percentile of its reading's own history, rounded. Here the history is the conservative book's own
+sixteen-year backtest with the limits taken out of play (the three risk limits at 100 tau, both leverage limits
+at 10; the per-name cap stays at 2, so the readings are of the capped target), over the cycles with a complete
+window after the warm-up. The loader above refuses risk limits that large, so measuring the readings this way needs a
+build with the loader's three risk bounds lifted (`kMaxRRatio` and `kMaxTailRatio`). The percentile is taken by linear interpolation (`overlay::percentile`) and rounded to
+the nearest 0.25, in tau for the three risks and as a plain ratio for leverage:
+
+| Limit | 99th percentile | Nearest 0.25 | Value in force |
+|---|---:|---:|---:|
+| R_max | 1.6847 tau | 1.75 | 1.75 tau = 0.35 |
+| R_jump_max | 4.8233 tau | 4.75 | 4.75 tau = 0.95 |
+| R_shock_max | 3.0581 tau | 3.00 | 3.0 tau = 0.60 |
+| Gross leverage | 7.1847 | 7.25 | 7.25 |
+| Net leverage | 5.5926 | 5.50 | 5.5 |
+
+The net percentile, 5.5926, lies 0.032 under the midpoint between 5.50 and 5.75, so it rounds to 5.50. A change of
+universe, sizing or covariance changes the readings, so the limits are set again from a new run of the same
+kind. Section 13 gives Carver's own values beside these.
 
 **One scalar, applied once.** `m` is the smallest of `min(1, limit / reading)` over the five terms
 (`overlay::multiplier`, `src/risk/overlay.cpp`). The scaled target of every free symbol is
@@ -485,6 +574,11 @@ binding term is the first term at m, or `none`.
 **When it cannot answer.** If an input or a reading is not a finite number, the pass is refused
 (`one_pass.cpp`): every sleeve keeps its held book, there is no search, no trim and no fill,
 and a REFUSE decision is recorded. A blind window is not a refusal.
+
+**How often it cuts.** On the conservative book's sixteen-year backtest at the limits in force, the overlay cut
+193 of 4,738 cycles counted from the first fill (4.1 percent): gross leverage 32, net leverage 54, R 11, R_jump
+51, R_shock 45. On the two-year backtest of section 11's last part, 18 cycles were cut: 16 on R_shock, one on
+R_jump and one on net leverage (2026-06-10, worked there).
 
 ---
 
@@ -515,7 +609,9 @@ is fixed at its held quantity and gets no fill. The test is strict: at `abs(F) =
 the close applies. A zero forecast is never in the band. On BASE only the first sleeve's forecast is read;
 the fast sleeve's never enters the band.
 
-A change bar wins over both: a symbol on a change bar is held (section 8).
+A pending roll wins over both (section 8): with `per_contract_rolls` on, as in the templates, a symbol on a
+vendor switch bar that awaits its confirming bar is held (a crossover or deadline roll, known on its bar, is not);
+with it off, a symbol on a change bar is held.
 
 ### 7.3 The search from the held book
 
@@ -524,6 +620,11 @@ the free symbols' adjusted returns over their last 756 consumed closes, on the d
 by the count of those dates. A symbol whose last close trails the newest by more than five dates, or that
 leaves fewer than 20 shared returns, gets a 0.01 variance on its own and is named in a
 `COVARIANCE_STALE_PARTICIPANT` or `COVARIANCE_FLOOR_DROP` warning.
+
+The 756 is `kOptimiserBars`, a literal in `trend_following.cpp`: the sleeve hands the pass each symbol's last 756
+consumed closes and adjusted levels. Each symbol keeps its own 756 before the dates are intersected, and the roots
+keep different calendars, so the covariance rests on fewer than 756 shared returns. The stale threshold of five
+dates is a literal in `one_pass.cpp` too; neither reads a config key (section 2).
 
 The search minimises, over whole-contract books n:
 
@@ -550,8 +651,10 @@ How it runs (`search`, `one_pass.cpp`):
 - The pass cap is the larger of 100 and twice the contracts between the held book and the target, plus one
   (`pass_cap`, `one_pass.cpp`). Reaching it logs `OPTIMISER_PASS_CAP`.
 
-The cost term is why the starting point matters: a position already held costs nothing to keep, so the
-search moves a row only when the tracking error it removes is worth more than 100 times the trade's cost.
+From the held book the search moves a row only when the tracking error it removes is worth more than 100 times
+the trade's cost, so a holding stays unless moving it pays. Carver's greedy also prices trades from the held
+contracts (AFTS, strategy twenty-five, "Dealing with costs: a cost penalty"); what differs is that it builds its
+path from zero each day (section 13).
 
 ### 7.4 The granularity buffer, the rounding and the clip
 
@@ -600,6 +703,10 @@ alone keep a reading over, or a held row is beyond the cap (term `CAP`), the mar
 `over_limit_by_hold_terms` with the held rows named, and a `RISK_OVER_LIMIT_BY_HOLD` warning. Held rows are
 never cut. There is never a second scalar.
 
+The trim is rare. On the conservative book's sixteen-year backtest at the limits in force it removed 15 contracts
+on 14 days (CL 5, UB 3, HO 2, and one each of NQ, RB, 6B, HG and PL), and one contract (HG) on its two-year
+backtest; no stored day was left over a limit.
+
 ---
 
 ## 8. Holds and the listing-date switch
@@ -614,7 +721,7 @@ bar. The hold applies on sized days only; in warm-up the book follows the search
 | Hold | Rule | Where it is decided |
 |---|---|---|
 | Session classifier | a symbol whose T-1 verdict is not `SESSION` (`JUNK`, a closure, a feed hole) is held. The key is the verdict, never whether a price exists: a junk print has a price | `SessionVerdict`, `include/trade_ngin/data/session_classifier.hpp`; live: `live_portfolio_conservative.cpp`; backtest: `backtest_coordinator.cpp` |
-| Change bar | a symbol whose last consumed bar is pending (a change bar, either bar of a flip, a bar with no instrument id inside a pending roll) is held until its next consumed bar, on every rebalance | live: `CHANGE_BAR_HOLD`, `live_portfolio_conservative.cpp`; backtest: `backtest_coordinator.cpp`; see [FUTURES_ROLLS.md](FUTURES_ROLLS.md) |
+| Change bar | a symbol whose last consumed bar is pending is held until its next consumed bar, on every rebalance. With `per_contract_rolls` on, as in the conservative template, that is a vendor switch bar awaiting its confirming bar; a crossover or deadline roll is known on its own bar and is not held (`RollFromKind`, `include/trade_ngin/core/types.hpp`). On the vendor's series it is a change bar, either bar of a flip, or a bar with no instrument id inside a pending roll | live: `CHANGE_BAR_HOLD`, `live_portfolio_conservative.cpp`; backtest: `backtest_coordinator.cpp`; see [FUTURES_ROLLS.md](FUTURES_ROLLS.md) |
 | Deferral band | section 7.2 | `one_pass.cpp` |
 | Cannot be weighed or priced | a held symbol with no series today is valued at its last usable close; a symbol with no cost is fixed | `BOOK_UNPRICED`, `portfolio_manager.cpp` |
 
@@ -639,13 +746,24 @@ hold.
 ### 8.4 Listing dates and the switch
 
 `portfolio.json` `listing_dates` declares contracts that trade only from a date, and the contract the book
-trades before it. In force: MES, MNQ, MYM and M2K from 2019-05-06, with ES, NQ, YM and RTY before, at a
-ratio of 10. The vendor stores the E-mini's history under the micro's symbol, so a backtest whose window
-starts before the date runs the predecessor as a symbol of its own on those same bars
-(`ListingDates`, `listing_dates.hpp`). The predecessor may hold a position only on signal bars dated
-before the listing date, the listed contract only on or after it (`tradeable`, `listing_dates.hpp`;
-read at `trend_following.cpp`). Each is costed on its own contract's size and fee. The pair counts as
-one instrument for its weight, its removed rules and the equity slow rule.
+trades before it. On the conservative template (the base template carries only the MGC and SIL rows):
+
+| Listed contract | Listed | Predecessor | Ratio |
+|---|---|---|---|
+| MES, MNQ, MYM, M2K | 2019-05-06 | ES, NQ, YM, RTY | 10 |
+| MGC (micro gold) | 2010-10-04 | GC | 10 |
+| SIL (micro silver) | 2013-06-17 | SI | 5 |
+
+The listed contract's symbol carries the price history from before its listing (for the equity micros the
+vendor stores the E-mini's history under the micro's symbol; for MGC and SIL the per-contract source takes the
+bars before the listing from GC's and SI's contracts), so a backtest whose window starts before the date runs
+the predecessor as a symbol of its own on those same bars (`ListingDates`, `listing_dates.hpp`). The predecessor
+may hold a position only on signal bars dated before the listing date, the listed contract only on or after it
+(`tradeable`, `listing_dates.hpp`; read at `trend_following.cpp`). Each is costed on its own contract's size and
+fee, and the predecessor's exit on the switch is priced on the full-size contract's own volume
+(`listing_dates.cpp`). The pair counts as one instrument for its weight, its removed rules and the equity slow
+rule. MGC's listing comes before the first traded day of a sixteen-year window, so such a window never trades
+GC; it trades SI until 2013-06-17.
 
 The switch is made inside the pass of a backtest, once per pair, on the first sized rebalance whose signal bar is dated on
 or after the listing date with both contracts free to trade and the listed contract signalling
@@ -681,8 +799,8 @@ stored, a predecessor in its universe or its stored book on or after the listing
 before the listing date of a listed contract in its universe (`live_listing_refusals`, `include/trade_ngin/live/live_listing_guard.hpp`).
 
 Worked switch, an example of the arithmetic: a sixteen-year backtest of the conservative book (2010-10-07
-to 2026-10-07) on its template configuration, which carries the listing-date, relabel and rule-removal
-blocks, the cycle of 2019-05-07 on the signal bar of 2019-05-06. The overlay's scalar is 1 that day.
+to 2026-10-07) on the conservative configuration of that time (see the note at the head), which carried the
+listing-date, relabel and rule-removal blocks, the cycle of 2019-05-07 on the signal bar of 2019-05-06. The overlay's scalar is 1 that day.
 Targets are from the run's `LISTING_LEG` log lines; fills are that run's `backtest.executions` rows.
 
 | Pair | Predecessor held | Listed contract's scaled target | Rounded entry | `LC-` fill | `LO-` fill | Fill price |
@@ -698,15 +816,19 @@ MNQ.
 ### 8.5 The relabel list
 
 `portfolio.json` `instrument_id_relabels` declares vendor instrument-id changes that are not rolls (four
-entries dated 2026-02-22, one per equity index micro). From the date, a bar carrying the new id is read as
-carrying the old one, at the loader (`InstrumentIdRelabel`, `listing_dates.hpp`). No consumer sees a
-change: no change bar, no hold, no roll legs.
+entries dated 2026-02-22, one per equity index micro). With `per_contract_rolls` off, from the date a bar
+carrying the new id is read as carrying the old one, at the loader (`InstrumentIdRelabel`, `listing_dates.hpp`),
+and no consumer sees a change: no change bar, no hold, no roll legs. With `per_contract_rolls` on, as in the
+conservative template, the list is declared and not read (`relabels_read`, `listing_dates.cpp`; one
+`INSTRUMENT_ID_RELABELS not read` line is logged): the per-contract roll rule reads each of these id changes as
+a change of price source between two contracts of the same expiry (its alias trigger, `contract_roll_rule.hpp`),
+which books no legs and no cost. See [FUTURES_ROLLS.md](FUTURES_ROLLS.md).
 
 ---
 
 ## 9. Sleeves on BASE
 
-BASE is a placeholder test book with two sleeves: the trend sleeve at allocation 0.7 and tau 0.20, and the
+BASE has two sleeves: the trend sleeve at allocation 0.7 and tau 0.20, and the
 fast sleeve at 0.3 and tau 0.25. How the loop treats several sleeves:
 
 - **Sized on capital times allocation.** Each sleeve's N* is sized on E times its allocation
@@ -740,7 +862,7 @@ fast sleeve at 0.3 and tau 0.25. How the loop treats several sleeves:
 |---|---|
 | `trading.live_results.risk_scale` | the delivered scale: the stored book's gross weight over the gross weight of the capped target the overlay read, held rows counted in both, at the raw signal closes. It can exceed 1. A day with no sized rebalance, and a flat target, store 1. It is not the request (`delivered_scale_for_book`, `portfolio_manager.cpp`; written at `live_portfolio_conservative.cpp`) |
 | `trading.live_results.risk_detail` and `backtest.equity_curve.risk_detail` (jsonb, migration 020) | the loop's record of the rebalance, nine flat keys. Written on the row of a sized rebalance the overlay answered; NULL on a refused rebalance, a day with no session, a warm-up row and every equity row (`risk_detail_json`, `risk_detail.hpp`) |
-| `trading.signals.signal_value` | the ruled forecast F of each symbol |
+| `trading.signals.signal_value` | the forecast F of each symbol after the equity slow rule |
 | `trading.positions`, `trading.executions` | each sleeve's stored book and fills. A live forecast-sign close is its own fill with the id suffix `_SC` (`session_book_gate.hpp`), stored ahead of the symbol's other fill of the day |
 | `backtest.executions` | the same fills with ids `EX-<sleeve>-<n>`, and the switch fills `LC-` and `LO-` |
 
@@ -779,16 +901,18 @@ Every run records the constants it ran with. `PortfolioConfig::to_json`
 | `opt_config.sign_close_band` | 2 |
 | `opt_config.b_sigma_floor` | 0.05 |
 | `opt_config.max_iterations` | 100 |
-| `risk_config.R_max`, `R_jump_max`, `R_shock_max` | 2.25, 4.5, 4.0 (ratios to tau) |
-| `risk_config.max_gross_leverage`, `max_net_leverage` | 8.0, 6.0 |
+| `risk_config.R_max`, `R_jump_max`, `R_shock_max` | 1.75, 4.75, 3.0 (ratios to tau) |
+| `risk_config.max_gross_leverage`, `max_net_leverage` | 7.25, 5.5 |
 | `risk_config.per_name_cap` | 2 |
+| `risk_config.overlay_covariance` | `carver`; written only when it is `carver`, so a `sample` book stores the object it stored before the key existed |
 | `risk_config.trim_max` | 5 |
 | `sizing_mode` | `half_compounding` |
 | `equity_slow_rule` | the symbols and the pairs |
 | `oracle_hash_list` | a fixed string that the code writes on the record of every book that names an overlay sleeve (`portfolio_manager.hpp`). No code reads it and no config key sets it |
 
 The backtest adds `strategy_names`, `strategy_allocations` and, when the block is present,
-`trading_rule_removals` (`bt_portfolio_conservative.cpp`). Each sleeve's tau and IDM are recorded with
+`trading_rule_removals` (`bt_portfolio_conservative.cpp`), and the `carry` block only when carry is on
+(`carry_config_json`, `include/trade_ngin/strategy/sleeve_config.hpp`). Each sleeve's tau and IDM are recorded with
 the sleeve's own config, not here.
 
 ### 10.3 Logged
@@ -816,7 +940,7 @@ value of the pass at seventeen digits (`one_pass_record.hpp`). A production run 
 ## 11. One rebalance, end to end
 
 An example of the arithmetic, from the same run as section 3.7 (a replay of dated live runs of the
-conservative book, one run a day in date order, on its template configuration, which carries the
+conservative book, one run a day in date order, on the configuration of that time, which carried the
 listing-date, relabel and rule-removal blocks): run date 2026-04-30, signal bar 2026-04-29. Stored rows are
 `trading.live_results`, `trading.positions`, `trading.executions` and `trading.signals` of that run. Figures that no stored row carries are from the
 run's log lines and its one-pass record, and are marked so.
@@ -888,7 +1012,8 @@ The "Held" column equals the stored `trading.positions` of 2026-04-29 and the "S
 
 ### Step 4: the overlay
 
-Readings of the capped target, from the `OVERLAY` line. L_g and L_n are recomputed from the table above
+Readings of the capped target, from the `OVERLAY` line, against the limits this run used (on the sample
+covariance; the values in force are in section 6). L_g and L_n are recomputed from the table above
 (the sum of abs(N* x u) and of N* x u over the 35 free rows; HG adds 0) and agree to three decimals (the
 table's columns are rounded).
 
@@ -962,6 +1087,61 @@ The nine fills, all at the 2026-04-29 close and dated 2026-04-30 (`trading.execu
 MBT has two fills: the sign close to flat, then the move to -1. Every `netting_adjustment` is 0: the book
 has one sleeve.
 
+### A day the net leverage limit binds, on the template's present settings
+
+A two-year backtest of the conservative book on the template's present settings (per-contract rolls, the gold
+and silver micros, the overlay on the carver covariance at the limits of section 6): signal date 2026-06-10, cycle 2026-06-11, the only cycle of that run cut by net leverage.
+Every figure is from the run's one-pass record (`one_pass_record.hpp`). E = 447,895.51; the window is complete,
+252 dates of which 201 complete.
+
+**The overlay.**
+
+| Term | Reading of the capped target | Limit | min(1, limit / reading) |
+|---|---:|---:|---:|
+| R | 0.241677 | 0.35 | 1 |
+| R_jump | 0.561330 | 0.95 | 1 |
+| R_shock | 0.481710 | 0.60 | 1 |
+| L_g | 6.339650 | 7.25 | 1 |
+| L_n | -5.508971 (size 5.508971) | 5.50 | 0.99837164 |
+| m, binding | | | 0.99837164, `L_n` |
+
+Every free row's capped target is multiplied by 0.99837164 (6A: -0.360195 to -0.359608). The stored book reads
+L_n -3.867659 and L_g 5.081839, inside the limits, so the trim removes nothing. The cut moves no contract: the
+buffer and the rounding absorb a scaling this small.
+
+**The search and the buffer.** The search reached TE 0.058058 in 13 passes. TE_h = 0.122357 and B = 0.066929,
+set by SIL, so a = (0.12235664 - 0.06692875) / 0.12235664 = 0.453003 to six places (the stored a is 0.45300277, from the unrounded inputs). The rows with a holding, a
+search answer or a stored position:
+
+| Symbol | u = M P / E | Held h | N* | Capped N*c | Scaled m N*c | Search y | h + a (y - h) | Stored | Cost of one contract | Cost term 100 x cost / E |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 6A | 0.156152 | 0 | -0.360195 | -0.360195 | -0.359608 | -2 | -0.906006 | -1 | 4.5327 | 0.00101200 |
+| 6E | 0.321950 | -2 | -0.935367 | -0.935367 | -0.933844 | -2 | -2.000000 | -2 | 5.4839 | 0.00122437 |
+| M2K | 0.031482 | +2 | +1.094619 | +1.094619 | +1.092837 | +1 | +1.546997 | +2 | 1.0149 | 0.00022659 |
+| MBT | 0.013754 | -10 | -11.839523 | -11.839523 | -11.820244 | -11 | -10.453003 | -10 | 2.4335 | 0.00054332 |
+| MGC | 0.090858 | 0 | -1.314319 | -1.314319 | -1.312179 | -1 | -0.453003 | 0 | 1.6457 | 0.00036744 |
+| MNQ | 0.126656 | +2 | +0.165157 | +0.165157 | +0.164888 | 0 | +1.093994 | +1 | 0.9278 | 0.00020716 |
+| MYM | 0.055632 | +4 | +0.528218 | +0.528218 | +0.527358 | +2 | +3.093994 | +3 | 0.9705 | 0.00021668 |
+| SIL | 0.139151 | -1 | -0.327063 | -0.327063 | -0.326531 | -1 | -1.000000 | -1 | 4.9143 | 0.00109719 |
+| UB | 0.253477 | -1 | -0.941289 | -0.941289 | -0.939756 | -2 | -1.453003 | -1 | 10.0083 | 0.00223451 |
+| ZF | 0.237953 | -3 | -5.587177 | -5.587177 | -5.578079 | -4 | -3.453003 | -3 | 3.5581 | 0.00079441 |
+| ZM | 0.067493 | 0 | -0.678568 | -0.678568 | -0.677463 | -1 | -0.453003 | 0 | 9.2250 | 0.00205964 |
+| ZN | 0.243256 | -1 | -3.522592 | -3.522592 | -3.516856 | -2 | -1.453003 | -1 | 5.6443 | 0.00126018 |
+| ZT | 0.459911 | -4 | -2.989688 | -2.989688 | -2.984820 | -4 | -4.000000 | -4 | 3.9052 | 0.00087190 |
+| 6J, 6L, 6M, ZL | | | | | | at the held book | | unchanged | | |
+
+What the table shows:
+
+- The buffer moves every row 45.3 percent of the way. A row whose move is under half a contract rounds back to
+  the held book (M2K, MBT, MGC, UB, ZF, ZM, ZN). A row two contracts from its search answer moves 0.906 of a
+  contract and rounds to one (6A, MNQ, MYM).
+- The search answers for the book, not row by row: MNQ's target is +0.165 contract and the search takes it to 0;
+  MBT's is -11.82 and the search goes one contract further than the held -10, to -11.
+- No row reaches the cap (L / u is 4.35 contracts for ZT and 145.4 for MBT).
+- The cost term runs from 0.00021 (MNQ) to 0.00827 (GF) over the 36 rows, against a band of 0.0669: a one-contract
+  trade is worth making only when it removes more tracking error than its cost term.
+- The fills are 6A SELL 1, MNQ SELL 1 and MYM SELL 1, the stored book less the held.
+
 ---
 
 ## 12. Account size
@@ -981,48 +1161,49 @@ different books on the same day.
 ## 13. Where the loop departs from Carver
 
 Each row carries one of three labels, the same as in
-[TREND_FOLLOWING_SYSTEM.md](TREND_FOLLOWING_SYSTEM.md). CARVER AS WRITTEN: the engine does what the book
-describes, with the book's own numbers. CARVER, ADAPTED: the book's method with a stated difference. OURS:
-the book has no such rule. "Not adopted" marks a rule of the book the engine does not use. Departures that concern rolls and the adjusted
+[TREND_FOLLOWING_SYSTEM.md](TREND_FOLLOWING_SYSTEM.md). CARVER AS WRITTEN: the engine does what AFTS
+describes, with Carver's own numbers. CARVER, ADAPTED: Carver's method with a stated difference. OURS:
+AFTS has no such rule. "Not adopted" marks a rule of AFTS the engine does not use. Departures that concern rolls and the adjusted
 series are in [FUTURES_ROLLS.md](FUTURES_ROLLS.md), and those of the cost model in
 [COST_MODEL.md](COST_MODEL.md).
 
-| Topic | The book | The engine | Why | Kind |
+| Topic | Carver (AFTS) | The engine | Why | Kind |
 |---|---|---|---|---|
 | Forecast scalars | fixed per rule (strategy nine, table 29) | the same six values | | CARVER AS WRITTEN |
 | Forecast weights and multiplier | equal weights and a multiplier by the set of rules (strategy nine, table 36) | the same table, read by the number of pairs (BASE's fast sleeve reads the four-pair row for its four fastest pairs) | | CARVER AS WRITTEN |
 | Removing rules by cost | a rule is dropped from an instrument when its cost is over 0.15 Sharpe-ratio units (strategy nine, "Removing expensive trading rules"; turnovers of table 35) | the same procedure, limit and turnover table, with our cost inputs: the engine's cost of one contract, its sizing volatility, its confirmed rolls | the costs must be the ones this engine charges | CARVER, ADAPTED |
-| Asymmetric rules | advises against asymmetric adjustments to a forecast (strategy twelve) | the equity slow rule: an equity index short needs both slow pairs negative | a short against an equity index is taken only when the slow trend agrees: a short on the fast speeds alone against a slow uptrend is a bet against the drift the slow speeds measure | OURS |
+| Asymmetric rules | advises against asymmetric adjustments to a forecast (strategy twelve) | the equity slow rule: an equity index short needs both slow pairs negative | adopted on 2026-10-05 on this book's record: on the sixteen-year backtest 113 of 190 equity-index shorts were opened on the fast speeds alone, and equity shorts as a whole lost 121,403. That fits Carver's finding that equities are the weakest trend class (a median Sharpe of 0.03 for multiple-speed trend, strategy nine, table 37, p.206). The rule lets an equity index short open only when the slow trend agrees. It is a declared departure from Carver, who advises against asymmetric adjustments by asset class because those results are not statistically significant (strategy twelve, p.268). As an economic reading only: Carver finds that in equity indices a strong negative fast forecast is followed by a rally, a "bouncing cat" in the two fastest speeds (strategy twelve, figure 53), while this rule keys on the slow speeds agreeing | OURS |
 | Volatility estimate | EWMA standard deviation of span 32, centred on its EWMA mean, blended 0.7 with 0.3 of a ten-year average (strategy three, "Forecasting future volatility") | the same estimator and blend, with a seeded and floored variance and a long run of the trailing 2,520 values, on the adjusted change over the raw previous close | a series that starts or sits flat must not give a zero | CARVER, ADAPTED |
 | Annualisation | 16, the square root of 256 business days | the square root of the bars a year counted over the trailing 256 bars | a series with a Sunday session row has more than 256 bars a year | CARVER, ADAPTED |
 | Volatility attenuation | the quantile of volatility relative to its long-run average, a multiplier of 2 - 1.5 Q, a ten-day smooth (strategy thirteen) | the same multiplier and smooth, with Q the quantile of `sigma_short` in its own trailing 2,520 values | one estimator serves the quantile | CARVER, ADAPTED |
 | Instrument weights | a top-down method: equal shares by asset class, then by group, then by instrument (strategy four, "An algorithm for allocating instrument weights") | equal by sector in one layer, a symbol capped at half its sector | the metadata carries one sector field, and a one-contract sector must not take a whole share | CARVER, ADAPTED |
 | IDM | by the number of instruments (strategy four, table 16) | 2.5, the table's value for 30 or more | | CARVER AS WRITTEN |
-| Sizing capital | the book reports its backtests on fixed capital and offers two forms for a live account, full compounding and half compounding (Tactic three, "Half compounding") | half compounding in live and in the backtest alike, recomputed each run from the settled P&L | one sizing rule in both engines, so a backtest sizes as the live book will | CARVER, ADAPTED |
+| Sizing capital | Carver reports his backtests on fixed capital and offers two forms for a live account, full compounding and half compounding (Tactic three, "Half compounding") | half compounding in live and in the backtest alike, recomputed each run from the settled P&L | one sizing rule in both engines, so a backtest sizes as the live book will | CARVER, ADAPTED |
 | Minimum position, strategy buffer | buffering under dynamic optimisation belongs to the optimiser (strategy twenty-five, "Dealing with costs: buffering") | the strategy publishes N* unbuffered and unrounded | | CARVER AS WRITTEN |
 | Overlay: what is scaled | all positions are multiplied by the scalar | free rows are scaled; held rows are counted and not scaled; the trim bounds the stored book | a held row cannot trade that day | CARVER, ADAPTED |
-| Overlay: net leverage reading | none: the book's leverage reading is gross | a fifth reading, net leverage, with its own limit of 6.0, beside gross | the book is long and short, so its net exposure is limited as well as its gross | OURS |
-| Overlay: limits | the 99th percentile of each measure's own history on the book's portfolio, rounded: 1.5, 3.75 and 3.25 times the target, and 20 for leverage (Tactic four, "An exogenous risk overlay") | fixed values in `risk.json`: 2.25, 4.5 and 4.0 times the target, and 8.0 for gross leverage | the book sets each limit from the history of its own portfolio and notes that another set of instruments calls for other limits | CARVER, ADAPTED |
-| Overlay: jump reading | a jump risk multiplier from the 99th percentile of each instrument's volatility | on each symbol's jump volatility (the 99th percentile of its trailing 2,520 `sigma_short` values, each taken back to a daily figure, annualised by the gate window's factor), with the window's correlations | uses the engine's own estimator | CARVER, ADAPTED |
-| Overlay: thin windows | | below 21 complete dates the covariance readings are blind and leverage still applies; a participant with no return in the window is out of the three covariance readings and stays in leverage; one with fewer than 120 returns is left out of R and R_jump and stays in R_shock (on its own window volatility, once it has two returns) and in leverage | a new listing must not blind the book | OURS |
-| Covariance | EWMA volatility with correlations from six months of weekly returns (strategy twenty-five) | the sample covariance of daily adjusted returns: 252 dates for the overlay, 756 closes for the optimiser | one estimator and one annualisation rule for every reading | CARVER, ADAPTED |
+| Overlay: net leverage reading | none: Carver's leverage reading is gross | a fifth reading, net leverage, with its own limit of 5.5, beside gross | like Carver's gross reading it needs no volatility estimate (Tactic four, "An exogenous risk overlay"), here applied to direction. It is a plain signed sum of notional weights, so the low-volatility rates and FX positions dominate it, and it does not measure the book's one-way market risk; Carver's finer form, leverage limits by asset class (footnote 292), is not built. It is a limit enforced by a cut on the days it binds, never a target: the fifth term of the daily multiplier, its level set by his 99th-percentile method (section 6). On the conservative book's sixteen-year backtest at the limits in force it was the binding term on 54 of the 193 cut cycles (section 6) | OURS |
+| Overlay: limits | the 99th percentile of each measure's own history on Carver's portfolio, rounded: 1.5, 3.75 and 3.25 times the target, and 20 for leverage (Tactic four, "An exogenous risk overlay") | the same method on this book's own sixteen-year backtest with the limits out of play, each 99th percentile rounded to the nearest 0.25: 1.75, 4.75 and 3.0 times the target, 7.25 for gross leverage (section 6) | Carver sets each limit from the history of his own portfolio and notes that another set of instruments calls for other limits; the rounding is fixed so that the values follow from the run | CARVER, ADAPTED |
+| Overlay: jump reading | a jump risk multiplier from the 99th percentile of each instrument's volatility | on each symbol's jump volatility (the 99th percentile of its trailing 2,520 `sigma_short` values, each taken back to a daily figure, annualised by the gate window's factor), with the overlay's correlations | uses the engine's own estimator | CARVER, ADAPTED |
+| Overlay: thin windows | | below 21 complete dates the covariance readings are blind and leverage still applies; a participant with no return in the window is out of the three covariance readings and stays in leverage; one with fewer than 120 returns is left out of R and R_jump and stays in R_shock once it has two returns (on its sizing volatility with `carver`, its own window volatility with `sample`) and in leverage | a new listing must not blind the book | OURS |
+| Overlay covariance | EWMA volatility with correlations from six months of weekly returns (strategy twenty-five) | `carver`: each symbol's sizing volatility with exponentially weighted correlations of weekly returns, span 26 weeks, over each symbol's last 300 bars; membership and annualisation are the gate window's | Carver's own estimator for the overlay (Tactic four, footnote 289). The volatility is each symbol's sizing volatility (section 3.2), so the overlay reads risk on the estimate the position was sized on. The correlations come from weekly returns because daily closes taken hours apart give correlations that are too low (his reason), and the 26-week exponential weighting puts most weight on recent weeks, so a rise in correlations shows within weeks, where an equal-weight sample of the last 252 dates spreads it over a year. Carver notes that the method "isn't too sensitive to how the covariance matrix is estimated" (footnote 289, p.622); the limits of section 6 were set by his 99th-percentile method on this same estimator, so the estimator and the limits go together | CARVER, ADAPTED |
+| Optimiser covariance | the same covariance as above (strategy twenty-five) | the sample covariance of daily adjusted returns over each symbol's last 756 closes, dates intersected | the window length was set on 2026-09-21: an equal-weight sample's answer moves with its length, and 756 closes (`kOptimiserBars`) kept the optimiser on the same prices the trend sleeve then held for itself (its own history was capped at 756 prices). A three-year equal-weight sample of daily adjusted returns moves slowly, so the search's substitutions and the one-contract risks that set the buffer change little from day to day; Carver's estimator follows recent risk, so the substitutions and the buffer move with each change in volatility. Keeping the sample over Carver's estimator is a measured result, not a design reason. Data, paired by start over five windows (2, 5, 10 and 16 years and the last year): with Carver's optimiser covariance alone the Sharpe was about level on the 2-year, the 10-year and the last year, 0.13 lower on the 5-year and 0.15 lower on the 16-year | CARVER, ADAPTED |
 | Per-name cap | a position limit from a leverage ratio, with two as the worked example (Tactic four, "Setting position limits") | a cap of 2 on a position's weight on the sizing capital, applied to the target, in the search and on the rounded book | the overlay must never read a position the book cannot hold | CARVER, ADAPTED |
-| Position limit at the maximum forecast, open-interest limit | a per-instrument limit from the position at the maximum forecast, and one as a share of open interest | not applied | section 14 | Not adopted |
-| Starting point of the search | the greedy algorithm starts from a zero weight in every instrument (strategy twenty-five, "The greedy algorithm") | from the held book, one contract up or down per step, with the sign guard | the cost term then prices the trades the book would really make, and a holding is kept unless moving it lowers the objective | CARVER, ADAPTED |
-| Cost multiplier | 50, with the remark that anything from 10 to 100 behaves much the same (strategy twenty-five, "Dealing with costs: a cost penalty") | 100, the top of that range | on a book this small the cost weight governs how often it trades; the value is inside the book's stated range | CARVER, ADAPTED |
-| Forecast changes sign | the whole position is always closed | closed once the opposite forecast reaches 2; held while it is weaker | a forecast that has only just crossed zero does not close a position | OURS |
+| Position limit at the maximum forecast, open-interest limit | a per-instrument limit from the position at the maximum forecast, and one as a share of open interest | not applied | by design, not on its numbers: the per-name cap already bounds each name (section 14) | Not adopted |
+| Starting point of the search | the greedy algorithm starts from a zero weight in every instrument (strategy twenty-five, "The greedy algorithm") | from the held book, one contract up or down per step, with the sign guard | Carver's cost penalty is already measured from the held contracts, so the difference is where the path starts: from zero the greedy rebuilds a lumpy book each day and two nearly equal answers can flip from one day to the next; from the held book a holding is kept unless moving it lowers the objective | CARVER, ADAPTED |
+| Cost multiplier | 50, with the remark that anything from 10 to 100 behaves much the same (strategy twenty-five, "Dealing with costs: a cost penalty") | 100, the top of that range | the cost penalty is the one lever that reliably cuts this book's churn toward its bar of about 150 round trips a year, and it stops at 100, the top of Carver's range of 10 to 100 (p.428), because above it trading collapses onto the cheapest instruments, as Carver warns (p.430): on a reference model run outside the engine (2026-10-05), livestock was in a position on 2 percent of the sixteen years' days at 300, against 68 percent at 50. The bar is set near what the long-only book already traded (111 to 167 round trips a year), because the excess trading was resizes: the book's round trips per traded instrument (3 to 11 a year) were already in the range Carver expects. The weight is the price the search puts on cost against tracking error, the book's cost budget: at 100 the search trades only where a whole-contract step removes tracking error worth more than 100 times the trade's cost over the sizing capital, the most weight on cost Carver's range allows. The size of the book does not set it: a contract's tracking-error term and its cost term both scale as one over the capital. The data: fewer round trips at 100 than at 50 on the 2-, 5- and 16-year windows | CARVER, ADAPTED |
+| Forecast changes sign | the greedy search from zero closes the whole position; Carver names this a floor on turnover, and his tracking-error buffer then moves a wrong-signed position like any other (strategy twenty-five, "Dealing with costs: buffering") | closed once the opposite forecast reaches 2; held while it is weaker | a position held against its own forecast is a position the system expects to lose on. In Carver's full method the close at a sign change is the turnover floor his buffer solves, and his buffer moves a wrong-signed row toward zero like any other; here the buffer is one lumpy contract wide and the search starts from the held book, so without the close a wrong-signed row sat against its forecast a median of 4 cycles (longest 217) against 1 (longest 14) with it, on the earlier full-size book. Turnover did not rise with the close: 140 round trips a year without it on the sixteen-year backtest, 115 with it. The band waits while the opposite forecast is under 2, on a scale whose average absolute forecast is 10, a weak reading of a sign change; its measured effect on round trips is near zero | OURS |
 | Tracking-error buffer | 5 percent of the risk target, 1 percent at a 20 percent target | the larger of that figure and the risk of one contract of the lumpiest symbol in the book | on a 500,000 book one contract of many instruments is larger than a 1 percent band | CARVER, ADAPTED |
 | After the rounding | | the trim: up to five contracts removed when the rounded book is over a limit | whole contracts can land a book above a limit the target was inside | OURS |
 | Session logic | none | the classifier's holds, applied inside the pass | a bar that is not a usable print must not move the book | OURS |
 | A held symbol's target | | set to its holding, so no correlated symbol stands in for it | avoids hedging a held row with its neighbours | OURS |
-| Several sleeves in one book | one strategy per account | BASE's two sleeves: summed targets, one pass, a split by largest remainder | BASE is a placeholder test book | OURS |
+| Several sleeves in one book | one strategy per account | BASE's two sleeves: summed targets, one pass, a split by largest remainder | the account sends one order per symbol, so the sleeves' targets are summed and the book is searched once | OURS |
 | Netting between sleeves | | opposite sleeve fills in one symbol are credited the cost the account did not pay ([COST_MODEL.md](COST_MODEL.md)) | the account sends one order per symbol | OURS |
 | Listing dates and the switch | | a contract trades only from its listing date, the predecessor before it; on the switch the predecessor is exited and the listed contract entered at the day's scaled target | a backtest must not trade a contract before it existed | OURS |
 | The relabel list | | declared vendor id changes that are not rolls are read as no change | a relabel must not be booked as a roll | OURS |
 | Minimum volatility | an instrument whose volatility is below a minimum is left out of the universe (Tactic four, "Instruments that are too safe to trade") | no screen; the per-name cap bounds a low-volatility contract's position every day | the cap is the daily limit, and no contract is removed from the 36 | Not adopted |
 | A stopped sleeve | | its held rows are closed with one fill on the next session bar | a sleeve that no longer signals must not leave positions behind | OURS |
 | Order of the overlay and the optimiser | the multiplier is applied to the unrounded positions, then the buffering (Tactic four, "An exogenous risk overlay") | the same order, once: the overlay reads the capped target, the scalar is applied once and nothing feeds back into it; the trim follows the rounding | | CARVER AS WRITTEN |
-| Fast sleeve's volatility span | one span for every rule | BASE's fast sleeve uses 16 | a sleeve setting on the placeholder book | OURS |
+| Fast sleeve's volatility span | one span for every rule | BASE's fast sleeve uses 16 | by design (2025-12-21): BASE's fast sleeve is a sleeve meant to react and trade faster than the main one, so its volatility span is 16 days where the main sleeve's is 32; the conservative book's one sleeve uses one span | OURS |
 
 ---
 
@@ -1032,9 +1213,9 @@ Each of these is an option the design does not use, with the reason.
 
 | Option | What it is | Why it is not adopted |
 |---|---|---|
-| Carver's per-instrument position limit | a limit from the position at the maximum forecast, and a limit as a share of open interest (Tactic four, "Setting position limits") | the per-name cap already bounds every name, so the maximum-forecast limit would be a second, overlapping per-name bound on a chosen nominal weight. The open-interest limit needs data the engine does not have |
-| Switching other contracts to micro or mini sizes | trading the micro or mini of the contracts that have one, beyond the four equity index micros the book already trades | the book then holds several contracts where it holds none or one, so every one-lot adjustment becomes a trade |
+| Carver's per-instrument position limit | a limit from the position at the maximum forecast, and a limit as a share of open interest (Tactic four, "Setting position limits") | Not built, by design and not on its numbers (decided 2026-10-05). The per-name cap of 2, Carver's own example value for a leverage limit (Tactic four, "Setting position limits"), already bounds each name, so his limit at the maximum forecast, which he keeps under dynamic optimisation at a chosen nominal 10 or 20 percent weight (Tactic four, "Position limits and dynamic optimisation"), would be a second, overlapping per-name cap on a picked parameter. The two bound different things: the cap bounds a name's notional weight (at the cap of 2 a contract with 40 percent volatility carries 0.8 of risk against a target of 0.2), where Carver's limit bounds a name's share of the risk; the overlay's risk limits (section 6) bound the risk of the book as a whole. The open-interest limit does not bind at 500,000, and the book holds no open-interest data. As support, from a reference model run outside the engine: at a 10 percent weight the limit changed the held book once in sixteen years (heating oil, 2 to 1 contracts, 2022-03-08, which took that half-compounded run's worst day from -10.9 to -6.7 percent) and clipped three target rows; at 20 percent the 5- and 16-year results were identical with and without it |
+| Switching other contracts to micro or mini sizes | trading the micro or mini of the contracts that have one, beyond the four equity index micros and the gold and silver micros the book already trades | the book then holds several contracts where it holds none or one, so every one-lot adjustment becomes a trade. Gold and silver are the exception: one GC contract weighs about 0.9 of the sizing capital and one SI about 0.7 (section 11), so at full size the per-name cap let the book hold at most two contracts of either, each step a large share of the capital |
 | Sector caps | at most K names of a sector may hold a position | the cap changes the risk the book runs instead of how it trades |
 | Search hysteresis | the search pays an extra term, a multiple of a contract's own risk, to trade it | the term decides which groups of instruments the book can hold at all |
-| Blanket speed changes | removing the fastest rules from every contract | the six speeds are the design. The book's procedure removes a rule only where its cost on that contract is over the limit; a blanket cut also removes rules from contracts that can afford them. The per-contract removal of section 3.5 is what is in force |
-| The roll back-refusal | refusing a vendor switch back into the contract the series has just left | it cannot tell a whipsaw from the vendor's early look at the next contract, and in the second case it holds the symbol on the wrong contract. See [FUTURES_ROLLS.md](FUTURES_ROLLS.md) |
+| Blanket speed changes | removing the fastest rules from every contract | the six speeds are Carver's design, each catching trends of a different length. He removes a speed only on a contract where its cost is above his speed limit of 0.15 Sharpe a year, which is what section 3.5 applies; a blanket cut also removes speeds where they pay. On the unrounded target book over sixteen years the fast speeds earned 196k of the 270k; on a reference model's sixteen years outside the engine (long and short, fixed 500,000 sizing), cutting 2/8 and 4/16 on every contract saved 2,079 dollars a year of cost (0.4 percent of the account); and a speed set chosen on one half of the history did not hold on the other half |
+| A roll back-refusal on the vendor's series (`per_contract_rolls` off) | refusing a vendor switch back into the contract the series has just left | on the vendor's series it cannot tell a whipsaw from the vendor's early look at the next contract, and in the second case it holds the symbol on the wrong contract. With `per_contract_rolls` on, as in the templates, the roll rule itself never rolls back and ignores one-bar strays, so this case does not arise. See [FUTURES_ROLLS.md](FUTURES_ROLLS.md) |

@@ -7,7 +7,7 @@ Corporate actions are handled by **mechanical effect**, not by the vendor's 19
 labels, because each effect has a different data source with a different
 coverage window. The taxonomy lives in
 `include/trade_ngin/live/corporate_actions_classification.hpp`; this document
-records what each class's source can and cannot tell us today.
+records what each class's source can and cannot tell us.
 
 For the wider question of which table and column any equity path should read,
 including why the vendor `adj_*` columns must never be read back in, and why
@@ -58,13 +58,14 @@ events do not come from it.
 
 Nothing in the code. `apply_terminations()` already takes `contra_ticker` and
 `ratio` and rolls the position over at a basis-preserving ratio when they are
-present; the query that populates them runs today against the full vendor
+present; the query that populates them runs against the full vendor
 schema and simply returns no rows. Pinned by
 `CorpActionClass3.RevivedFeedActivatesTheRolloverPathWithNoCodeChange`.
 
 To restore full coverage the data owner needs to provide a live source of deal
-terms and backfill from 2025-08-29 to the present (tracked as AlgoGators/data-ngin
-issue #108, the corporate-actions data issue).
+terms and backfill from 2025-08-29 to the present (tracked as AlgoGators/algogators#27,
+the corporate-actions deal-terms issue; the engine's side of reading the terms is
+AlgoGators/algogators#147).
 
 ## Dividend cash is never double-counted
 

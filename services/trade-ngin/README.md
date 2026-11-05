@@ -28,9 +28,12 @@ This section provides step-by-step instructions to get trade-ngin running from a
 
 ### Step 1: Clone the Repository
 
+The engine is the `services/trade-ngin/` folder of the AlgoGators repository; every command below
+runs from that folder.
+
 ```bash
-git clone https://github.com/AlgoGators/trade-ngin.git
-cd trade-ngin
+git clone https://github.com/AlgoGators/algogators.git
+cd algogators/services/trade-ngin
 ```
 
 ### Step 2: Install System Dependencies
@@ -86,6 +89,15 @@ cmake --build . -j
 cd ..
 ```
 
+The build options, all on unless noted: `TRADE_NGIN_BUILD_TESTS` (the test binary),
+`TRADE_NGIN_BUILD_APPS` (the runners, the tools and the benchmarks), `TRADE_NGIN_STATIC_LIB`
+(off; the library static, for the Python wheel) and `BUILD_PYTHON_WRAPPER` (off; needs
+`git submodule update --init extern/pybind11`). For example `cmake .. -DCMAKE_BUILD_TYPE=Release
+-DTRADE_NGIN_BUILD_TESTS=OFF` builds the runners without the tests, as the engine image does.
+With gcc and clang, compiler warnings are printed and never stop the build. CI configures with the CMake presets of
+the repository root instead (`cmake --preset ci-gcc13`, which needs vcpkg and `VCPKG_ROOT`); see
+[docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md), section 4.9.
+
 ### Step 5: Verify Installation
 
 ```bash
@@ -104,7 +116,7 @@ ls -la build/bin/Release/
 ### Step 6: Run Your First Backtest
 
 A backtest needs a database with market data and the migrations in `migrations/` applied. Run it
-from the repository root (the runners read `./config`):
+from the engine's folder, `services/trade-ngin/` (the runners read `./config`):
 
 ```bash
 ./build/bin/Release/bt_portfolio_conservative
@@ -119,6 +131,7 @@ runners must never run against the same database at once.
 
 | Document | Purpose |
 |----------|---------|
+| [Knowledge set](docs/knowledge/README.md) | Why the books are built as they are: settings and reasons, departures from Carver, levers, results, warnings, runbooks |
 | [Config Template](config_template/README.md) | Setting up `config/` from the templates, the placeholder list |
 | [Config Guide](docs/CONFIG_GUIDE.md) | Every configuration file and key |
 | [System Architecture](docs/SYSTEM_ARCHITECTURE.md) | The module map, the runners, what reads and writes what |
@@ -126,7 +139,7 @@ runners must never run against the same database at once.
 | [Optimizer and Risk Design](docs/OPTIMIZER_AND_RISK_DESIGN.md) | How a futures rebalance turns targets into the stored book |
 | [Risk Modules](docs/RISK_MODULES.md) | The risk modules, the overlay and `risk.json` |
 | [Cost Model](docs/COST_MODEL.md) | What a fill costs, fees, netting between sleeves |
-| [Futures Rolls](docs/FUTURES_ROLLS.md) | The adjusted series, change bars, roll fills |
+| [Futures Rolls](docs/FUTURES_ROLLS.md) | Per-contract rolls: the roll rule, the roll bar and its split, roll fills |
 | [Live Run Cycle](docs/LIVE_RUN_CYCLE.md) | What a live run does on a date, the P&L frame, the stored tables |
 | [Performance & Upkeep](docs/performance_upkeep.md) | Operations: the schedule, the wrapper, the watchdog, migrations |
 | [Data Sources of Truth](docs/DATA_SOURCES_OF_TRUTH.md) | Which table is the source of each fact and how to read it |
@@ -163,7 +176,7 @@ runners must never run against the same database at once.
 - ✅ **Whole-contract rebalance** from the held book with a cost penalty, a no-trade buffer and a per-name cap
 - ✅ **Risk overlay and risk modules** configured per book in `risk.json`
 - ✅ **Sizing on half-compounded capital**
-- ✅ **Roll handling** on a back-adjusted series, with roll fills and their costs booked apart
+- ✅ **Per-contract rolls**: the book rolls each contract on its own rule, with roll fills and their costs booked apart
 - ✅ **Transaction cost model** (per-contract fees, tick-based spread, square-root impact), with netting between sleeves
 - ✅ **Fixed-point arithmetic** with a custom Decimal class
 - ✅ **PostgreSQL integration** with Apache Arrow and connection pooling
@@ -280,8 +293,8 @@ The repository carries three books, each with its own `portfolio_id`, its own di
 
 Stored rows are separated by `portfolio_id` and each book has its own email report. The two futures
 books each write their position CSV files under `apps/strategies/results/<portfolio_id>/`; the
-equity book writes no CSV. The books are independent, but the runners are run one at a time, never
-in parallel.
+equity book writes the day's positions file there only with `--send-email`, to attach it to the
+e-mail. The books are independent, but the runners are run one at a time, never in parallel.
 
 ### Key Parameters Explained
 
@@ -294,10 +307,11 @@ the file and key of each, is in [docs/CONFIG_GUIDE.md](docs/CONFIG_GUIDE.md).
 | **Sizing mode** | `half_compounding` | `portfolio.json` `sizing_mode` |
 | **Risk target** | 0.20 | `portfolio.json` sleeve `risk_target` |
 | **IDM** | 2.5 | `portfolio.json` sleeve `idm` |
-| **Gross leverage limit** | 8.0 | `risk.json` carver module `max_gross_leverage` |
-| **Net leverage limit** | 6.0 | `risk.json` carver module `max_net_leverage` |
-| **Risk limits (ratios to the risk target)** | 2.25, 4.5, 4.0 | `risk.json` `R_max`, `R_jump_max`, `R_shock_max` |
+| **Gross leverage limit** | 7.25 | `risk.json` carver module `max_gross_leverage` |
+| **Net leverage limit** | 5.5 | `risk.json` carver module `max_net_leverage` |
+| **Risk limits (ratios to the risk target)** | 1.75, 4.75, 3.0 | `risk.json` `R_max`, `R_jump_max`, `R_shock_max` |
 | **Per-name cap** | 2 | `risk.json` `per_name_cap` |
+| **Overlay covariance** | `carver` | `risk.json` `overlay_covariance` |
 | **Cost multiplier of the rebalance** | 100 | `defaults.json` `optimization.cost_penalty_scalar` |
 
 ---
@@ -309,8 +323,10 @@ trade-ngin/
 ├── apps/
 │   ├── backtest/                   # bt_portfolio.cpp, bt_portfolio_conservative.cpp,
 │   │                               #   bt_equity_mean_reversion.cpp, bt_equity_validation.cpp
-│   └── strategies/                 # live_portfolio.cpp, live_portfolio_conservative.cpp,
-│                                   #   live_equity_mean_reversion.cpp
+│   ├── strategies/                 # live_portfolio.cpp, live_portfolio_conservative.cpp,
+│   │                               #   live_equity_mean_reversion.cpp
+│   ├── tools/                      # qt_settings_check.cpp, contract_rolls_dump.cpp
+│   └── test_database_extensions.cpp  # old test program; no CMake target builds it
 │
 ├── include/trade_ngin/             # Public headers, one directory per module
 │   ├── backtest/                   # coordinator, data loader, execution, P&L, metrics, CSV export
@@ -337,7 +353,7 @@ trade-ngin/
 ├── src/                            # Implementations, the same module directories as include/
 ├── tests/                          # Unit tests, one directory per module, plus tests/scripts/
 ├── benchmarks/                     # Benchmark harness
-├── migrations/                     # Numbered SQL migrations, each with a rollback
+├── migrations/                     # Numbered SQL migrations, each with a rollback except 024
 ├── docs/                           # Reference documents (see Quick Reference)
 ├── scripts/                        # run_live_portfolio.sh (the scheduled wrapper),
 │                                   #   docker-entrypoint.sh, check_live_trading.py (the watchdog),
@@ -352,8 +368,10 @@ trade-ngin/
 ├── cmake/                          # CMake modules
 ├── CMakeLists.txt
 ├── Makefile
-├── Dockerfile
-├── build_docker.sh
+├── CMakePresets.json               # includes the repository root's presets (CI)
+├── Dockerfile                      # the engine image
+├── build_docker.sh                 # old, unused: installs neither Eigen3 nor NLopt, so its build
+│                                   #   fails; build the image from the Dockerfile
 └── live_portfolio.cron             # the scheduled job
 ```
 
@@ -644,7 +662,7 @@ ctest --output-on-failure --verbose
 
 ## 🚀 Running the System
 
-Run every runner from the repository root, and run one at a time: never start two runners (backtest
+Run every runner from the engine's folder, `services/trade-ngin/`, where `config/` is, and run one at a time: never start two runners (backtest
 or live) in parallel against the same database.
 
 ### Running Backtests
@@ -662,8 +680,11 @@ or live) in parallel against the same database.
 
 ### Running Live Trading
 
-A live run takes an optional date, `YYYY-MM-DD`, and an optional `--send-email`. Always pass the
-date:
+A live run takes a date, `YYYY-MM-DD`, and an optional `--send-email`. The date is required: a
+run with none prints the usage, runs nothing, sends nothing and exits 2
+(`include/trade_ngin/live/run_args.hpp`). The futures runners also take the date as `--date
+YYYY-MM-DD` and refuse two different dates with exit 1; the equity runner takes it only
+positionally and, given two, keeps the later one.
 
 ```bash
 # A run for a date, no email
@@ -677,21 +698,18 @@ python -m algogators_rpc.services.report --portfolio-id CONSERVATIVE_PORTFOLIO -
     --preview-dir /path/to/dir
 ```
 
-- **Run modes.** A live run is in one of three modes, by its arguments and by the host's date: no
-  date; a date equal to the host's date (the scheduled run); a past date (a replay or a catch-up).
-  With a date, the run clock is midnight of that date, the bar window ends the day before, a stale
-  or incomplete feed is a warning, and the email is sent only with `--send-email`. With no date the
-  run clock is the wall clock with its time of day, a bar dated the run day is read if the feed has
-  already loaded it, a stale or incomplete feed stops the run with exit 1, and the email is always
-  sent. A held symbol with no bar for more than `live.data_staleness_tolerance_days` stops a futures
-  run for the host's date or with no date, and is a warning on a past date. No code refuses a run
-  with no date; the scheduled run always passes one. The full table is in
-  [docs/LIVE_RUN_CYCLE.md](docs/LIVE_RUN_CYCLE.md).
+- **Run modes.** A dated run is in one of two modes, by the host's date: a date equal to the
+  host's date (the scheduled run) or a past date (a replay or a catch-up); a later date behaves as
+  a past date. In both, the run clock is midnight of the date, the bar window ends the day before,
+  and the email is sent only with `--send-email`. A held symbol with no bar for more than
+  `live.data_staleness_tolerance_days` stops a futures run for the host's date with exit 1, and is
+  a warning on a past date. The full table is in [docs/LIVE_RUN_CYCLE.md](docs/LIVE_RUN_CYCLE.md),
+  section 1.2.
 - **The date and the host.** The two futures runners read the date as midnight in the host's local
   time and the equity runner as midnight UTC; every stored key is rendered in UTC. On a host
   whose clock is UTC the two are the same instant. The image in this repository sets
-  `TZ=America/New_York` (`Dockerfile:85`); [docs/LIVE_RUN_CYCLE.md](docs/LIVE_RUN_CYCLE.md) says what
-  that changes.
+  `TZ=America/New_York` (the runtime stage of the `Dockerfile`);
+  [docs/LIVE_RUN_CYCLE.md](docs/LIVE_RUN_CYCLE.md) says what that changes.
 - **The book e-mail.** The e-mail is built and sent by the Python report module
   `services/rpc/algogators_rpc/services/report`, not by the C++ runner. With `--send-email` each
   of the three live runners, after storing the day, runs
@@ -700,7 +718,8 @@ python -m algogators_rpc.services.report --portfolio-id CONSERVATIVE_PORTFOLIO -
   risk-module failure text. The module reads the stored day from the database, renders the HTML
   (charts by matplotlib) with a plain-text part and sends it over SMTP with the portfolio's
   `email.json`. `QT_MAIL_PYTHON`, `QT_MAIL_APP` and `QT_MAIL_TIMEOUT` set the interpreter, the
-  application directory and the time limit (`include/trade_ngin/live/python_mail.hpp`). To look at a
+  application directory and the time limit in seconds, 300 by default
+  (`include/trade_ngin/live/python_mail.hpp`). To look at a
   report without mailing it, run the module with `--preview-dir`.
 - **Exit codes.** A futures live run exits 0 when it reaches the end of the run with the book not
   refused, 3 when it reaches the end with the book held because the risk step refused it or the
@@ -712,8 +731,12 @@ python -m algogators_rpc.services.report --portfolio-id CONSERVATIVE_PORTFOLIO -
   `live_run_metadata` row is marked `risk_refusal` and the run ends at 3, whether a module could not
   answer or a sleeve module decided to refuse, or at 1 when the refused book has no stored previous
   positions to be held at. Exit 1 stores nothing when the run refuses before its `live_run_metadata`
-  row is written, and can leave that row, the signals or a half-written day when it stops later. The
-  equity runner returns 0, 1 or 4, the backtest runners only 0 or 1.
+  row is written, and can leave that row, the signals or a half-written day when it stops later.
+  Exit 2 is a run with no date; on a futures runner started by the QT desk (`--desk`,
+  `--override`, `--publish` or `--fallback`, each with or without `--send-now`, and `--send`) it is
+  also a refused desk command. `--finalize-system` is started only by the model run, never by the desk. The equity
+  runner returns 0, 1, 2 or 4, the backtest runners only 0 or 1. Every code is in
+  [docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md), section 4.5.
 - **Re-runs.** A lone re-run of an older date is not supported and is not refused: the runner
   accepts it, rewrites that day and the day before, and leaves every later day as it was. A replay
   runs every date forward in order. See [docs/performance_upkeep.md](docs/performance_upkeep.md).
@@ -723,7 +746,7 @@ python -m algogators_rpc.services.report --portfolio-id CONSERVATIVE_PORTFOLIO -
 | Output Type | Location | Description |
 |-------------|----------|-------------|
 | Logs | `logs/<prefix>_YYYYMMDD_HHMMSS_partN.log` | One set of files per run |
-| CSV Exports | `apps/strategies/results/<portfolio_id>/` | Live position files of the futures books (the day's positions and the finalized positions of the day before) |
+| CSV Exports | `apps/strategies/results/<portfolio_id>/` | Live position files: the futures books' day's positions and the finalized positions of the day before; the equity book's day's positions, written only with `--send-email` |
 | Backtest CSV | `apps/backtest/results/<portfolio_id>/` | Backtest output: `positions.csv`, `position_changes.csv`, `equity_curve.csv`, `portfolio_summary.csv` |
 | Database | `trading` and `backtest` schemas | See [docs/LIVE_RUN_CYCLE.md](docs/LIVE_RUN_CYCLE.md) |
 
@@ -875,10 +898,16 @@ docker run -d \
 
 ### Docker Configuration
 
-The container includes:
-- All system dependencies
+The `Dockerfile` has three stages: `builder` compiles the engine (Release, tests off),
+`rpc-build` builds the Python environment of the gRPC server and the book e-mail, and the runtime
+stage takes both. The container includes:
+- The runtime libraries, the built runners and the Python environment `/opt/rpc`
 - The scheduled job (`live_portfolio.cron`), which calls `scripts/run_live_portfolio.sh`
 - Timezone set to America/New_York
+
+Started with no command it runs cron; started with the command `rpc` it is `engine-rpc`, the
+engine's gRPC server and the QT desk (`deploy/engine-rpc.compose.yml`,
+[docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md), section 4.8).
 
 Mount your local `config/` directory (created from `config_template/`) into the container so it has
 database and email credentials. See [docs/README.Docker.md](docs/README.Docker.md) and
@@ -888,16 +917,12 @@ database and email credentials. See [docs/README.Docker.md](docs/README.Docker.m
 
 ## 🔧 CI/CD Pipeline
 
-The project uses GitHub Actions for continuous integration. See [docs/CI_CD_README.md](docs/CI_CD_README.md) for details.
-
-### Pipelines
-
-| Workflow | Trigger | Purpose |
-|----------|---------|---------|
-| `ci-cd-pipeline.yml` | Push to `main`, `develop`, `main-hd`, `prod` or `staging`; every pull request | Lint, build (Debug and Release), test, coverage, security scan, image |
-| `svc-trade-ngin.watchdog.yml` | Daily schedule, manual, pull requests that touch the watchdog | Checks that the live run wrote its rows |
-| `dependency-review.yml` | Pull requests onto `main` | Dependency review |
-| `sbom.yml`, `scorecard.yml`, `branch-protection.yml` | Push to `main`, schedules | Supply-chain and repository settings |
+The engine's workflows are the `svc-trade-ngin.*.yml` files in the AlgoGators repository's
+`.github/workflows/`: the build and unit tests on pull requests and pushes to `main`, the gRPC
+server's tests with the schema ownership guard, the Python wheels, the deploy of `engine-rpc`, the
+release image and the daily watchdog. The table of what each does is in
+[docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md), section 4.9, and each trigger is in
+[docs/performance_upkeep.md](docs/performance_upkeep.md), sections 2 and 8.
 
 ### Local Pre-commit Checks
 
@@ -914,9 +939,9 @@ find src include -name "*.cpp" -o -name "*.hpp" | xargs clang-format -i
 
 ### Coverage Requirements
 
-- **Threshold enforced by CI**: 10 percent line coverage (`COVERAGE_THRESHOLD` in `ci-cd-pipeline.yml`), checked in the Debug build
-- **Tools**: lcov, gcovr
-- **Reports**: lcov, XML (Cobertura), text
+No workflow measures coverage or enforces a threshold. The team's rules (coverage above 80 percent, CI green
+before a merge) are checked by hand, with a local Debug build with coverage
+flags (below) and lcov or gcovr.
 
 ---
 
