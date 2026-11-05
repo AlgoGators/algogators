@@ -3,8 +3,8 @@
 This is the one document that explains the futures trend following strategy end to end: what each stage does, its
 formula, every setting in force and where it lives, a worked example with real numbers, where the code is, and where
 each piece comes from. The strategy is the trend following of Robert Carver's *Advanced Futures Trading Strategies*
-(Harriman House, 2023), long and short, on 36 futures, sized to a 20 percent annual risk target on a 500,000 book.
-Section 1 walks the method in the order the engine runs it. Section 2 lists every place we depart from the book.
+(Harriman House, 2023; AFTS below), long and short, on 36 futures, sized to a 20 percent annual risk target on a 500,000 book.
+Section 1 walks the method in the order the engine runs it. Section 2 lists every place we depart from Carver.
 Section 3 lists what was tried and not adopted. Section 4 says how to read a result.
 
 Deeper mechanics live in the companion documents: `OPTIMIZER_AND_RISK_DESIGN.md` (the daily rebalance for an
@@ -15,25 +15,33 @@ engineer), `RISK_MODULES.md` (the overlay as a module), `COST_MODEL.md` (costs a
 ## How to read this document
 
 **The book.** CONSERVATIVE is the futures book: one trend sleeve (`TREND_FOLLOWING`) on 36 contracts with 500,000
-of capital. BASE is a placeholder test book with a second, faster sleeve; it runs the same engine and is named only
+of capital. BASE, the repository's base template (`config_template/portfolios/base/`), adds a second, faster sleeve; it runs the same engine and is named only
 where it behaves differently.
 
 **The Source line.** Every stage ends with a Source line. Each part of a stage carries one of exactly three labels (a stage
 with two parts names both):
 
-- CARVER AS WRITTEN: the engine does what the book says. The book is cited by strategy number, section title and
+- CARVER AS WRITTEN: the engine does what AFTS says. AFTS is cited by strategy number, section title and
   table number. No page numbers are given.
-- CARVER, ADAPTED: the book's method with a stated difference. The line says what differs and why.
-- OURS: not in the book. The line says so and gives the reason.
+- CARVER, ADAPTED: Carver's method with a stated difference. The line says what differs and why.
+- OURS: not in AFTS. The line says so and gives the reason.
 
 **The worked examples.** Each table is an example of the arithmetic of its stage. All but the two illustrations
 named below use real numbers and say which of three sources the numbers come from:
 
 | Name used below | What it is |
 |---|---|
-| the chain | a replay of dated live runs of the conservative book, one run a day in date order, for run dates 2026-04-24 to 2026-05-03, on its template configuration (`config_template/portfolios/conservative/` plus `config_template/defaults.json`), which carries the listing-date, relabel and rule-removal blocks. A run dated T reads the bars up to T-1 (the signal bar) and stores its rows under date T |
-| the backtest | a sixteen-year backtest of the conservative book (2010-10-07 to 2026-10-07) on its template configuration, which carries the listing-date, relabel and rule-removal blocks |
+| the chain | a replay of dated live runs of the conservative book, one run a day in date order, for run dates 2026-04-24 to 2026-05-03, on the conservative configuration of that time (`config_template/portfolios/conservative/` plus `config_template/defaults.json`, before the template took its present form, below), which carried the listing-date, relabel and rule-removal blocks. A run dated T reads the bars up to T-1 (the signal bar) and stores its rows under date T |
+| the backtest | a sixteen-year backtest of the conservative book (2010-10-07 to 2026-10-07) on the conservative configuration of that time, which carried the listing-date, relabel and rule-removal blocks |
 | the stored bars | the daily bars of `futures_data.ohlcv_1d` with the vendor ids of `futures_data.ohlcv_1d_raw`. No run is involved |
+
+The chain and the backtest were made before the template took its present form. They read the vendor's
+continuous series (`per_contract_rolls` off), traded GC and SI full size rather than the gold and silver micros MGC
+and SIL, and read the overlay on the sample covariance with the limits of that time (2.25, 4.5 and 4.0 times tau,
+gross leverage 8.0, net 6.0). The arithmetic of every stage is the same today, and each stage's settings table
+gives the values in force. Where a rule itself has changed since (the overlay's covariance and limits, rolls),
+the stage says so. A day worked on the template's present settings is in `OPTIMIZER_AND_RISK_DESIGN.md`, the last
+part of section 11.
 
 Two tables come from none of the three and say so: the removal table of section 1.6 is the recipe tool's output
 on the sixteen-year run of the conservative book the list is computed from, which is made without the rule-removal block, and
@@ -79,11 +87,12 @@ trim (1.14). The ROLL legs of a confirmed roll (1.15) are booked ahead of the da
 
 ### 1.1 The instrument universe
 
-**What it does.** The book trades the 36 continuous futures series stored in `futures_data.ohlcv_1d`, each under a
-symbol such as `ZN.v.0`. Every contract's size, tick, fee, sector and margin come from one row of
-`metadata.contract_metadata`. A contract trades only from its listing date: the four equity index micros were listed
-on 2019-05-06, and before that date the book trades the E-mini of the same index on the same price history. A
-vendor relabel of the same contract is told apart from a roll by a short list in the config.
+**What it does.** The book trades 36 futures, each under a symbol such as `ZN.v.0`. With `per_contract_rolls` on,
+as in the template, each bar is the bar of the contract the roll rule holds, read from `futures_data.contract_ohlcv_1d`
+on the dates of the vendor's series (section 1.3). Every contract's size, tick, fee, sector and margin come from one
+row of `metadata.contract_metadata`. A contract trades only from its listing date: the four equity index micros were
+listed on 2019-05-06, micro gold (MGC) on 2010-10-04 and micro silver (SIL) on 2013-06-17, and before its date the
+book trades the full-size contract on the same price history.
 
 **The 36 contracts.** Weight is the instrument weight of section 1.8. "Pairs not run" is the removal list of
 section 1.6; every other contract runs all six trend speeds.
@@ -122,51 +131,67 @@ section 1.6; every other contract runs all six trend speeds.
 | ZF | 5-year US Treasury note | Interest Rates | 1,000 | 0.0078125 | 1.510 | 0.038690 | none |
 | ZN | 10-year US Treasury note | Interest Rates | 1,000 | 0.015625 | 1.660 | 0.038690 | none |
 | ZT | 2-year US Treasury note | Interest Rates | 2,000 | 0.00390625 | 1.510 | 0.038690 | none |
-| GC | Gold | Metals | 100 | 0.10 | 2.510 | 0.038690 | none |
 | HG | Copper | Metals | 25,000 | 0.0005 | 2.510 | 0.038690 | none |
+| MGC | Micro gold | Metals | 10 | 0.10 | 0.960 | 0.038690 | none |
 | PL | Platinum | Metals | 50 | 0.1 | 2.510 | 0.038690 | none |
-| SI | Silver | Metals | 5,000 | 0.005 | 2.510 | 0.038690 | none |
+| SIL | Micro silver | Metals | 1,000 | 0.005 | 0.860 | 0.038690 | none |
 
-The four contracts traded before a micro's listing date (they have metadata rows and no price series of their own):
+The six contracts traded before a micro's listing date:
 
-| Symbol | Contract | Multiplier | Tick | Fee per contract | Replaced on 2019-05-06 by |
+| Symbol | Contract | Multiplier | Tick | Fee per contract | Replaced by |
 |---|---|---|---|---|---|
-| ES | E-mini S&P 500 | 50 | 0.25 | 2.247 | MES (10 MES = 1 ES) |
-| NQ | E-mini Nasdaq 100 | 20 | 0.25 | 2.247 | MNQ (10 MNQ = 1 NQ) |
-| YM | E-mini Dow | 5 | 1 | 2.240 | MYM (10 MYM = 1 YM) |
-| RTY | E-mini Russell 2000 | 50 | 0.1 | 2.247 | M2K (10 M2K = 1 RTY) |
+| ES | E-mini S&P 500 | 50 | 0.25 | 2.247 | MES on 2019-05-06 (10 MES = 1 ES) |
+| NQ | E-mini Nasdaq 100 | 20 | 0.25 | 2.247 | MNQ on 2019-05-06 (10 MNQ = 1 NQ) |
+| YM | E-mini Dow | 5 | 1 | 2.240 | MYM on 2019-05-06 (10 MYM = 1 YM) |
+| RTY | E-mini Russell 2000 | 50 | 0.1 | 2.247 | M2K on 2019-05-06 (10 M2K = 1 RTY) |
+| GC | Gold | 100 | 0.10 | 2.510 | MGC on 2010-10-04 (10 MGC = 1 GC) |
+| SI | Silver | 5,000 | 0.005 | 2.510 | SIL on 2013-06-17 (5 SIL = 1 SI) |
 
-**Listing dates.** The vendor stores the E-mini's bars under the micro's symbol for the years before the micro
-existed (MES, MNQ and MYM from 2010-06-07, M2K from 2017-07-09). The price is right and the size would be fiction,
-so a backtest whose window trades before 2019-05-06 runs the E-mini as a symbol of its own on those bars, with its
-own multiplier, fee and margin, and the micro only from the listing date. The two contracts of a pair count as one
+The weights' universe leaves out a predecessor whose listed contract is stored (`ListingDates::run_universe`),
+so GC and SI never take a weight of their own; MGC's listing comes before the first traded day of a sixteen-year
+window, so such a window never trades GC.
+
+**Listing dates.** The listed contract's symbol carries a price history from before the contract existed: the
+vendor stores the E-mini's bars under the micro's symbol (MES, MNQ and MYM from 2010-06-07, M2K from 2017-07-09),
+and for MGC and SIL the per-contract source takes the bars before the listing from GC's and SI's contracts. The
+price is right and the size would be fiction, so a backtest whose window trades before a listing date runs the
+full-size contract as a symbol of its own on those bars, with its own multiplier, fee and margin, and the micro
+only from the listing date. The two contracts of a pair count as one
 instrument: one weight, one forecast history, the same rules. On the first signal bar on or after the listing date
 the switch rule `open_at_target` runs before the day's pass: a held E-mini is closed with one fill (id `LC-...`)
 and the micro is opened at that day's capped, scaled target rounded to the nearest whole contract (id `LO-...`); a
 pair whose E-mini traded earlier in the run and is flat that day is opened at its rounded target the same way. Both
 fills are STRATEGY fills priced by the cost model. Three exceptions: an E-mini held inside the deferral band
-(section 1.12) is carried instead, q E-minis becoming ten times q micros, and the pass holds them; if either
+(section 1.12) is carried instead, q full-size contracts becoming the pair's ratio times q micros (10, or 5 for
+SIL), and the pass holds them; if either
 contract is in the hold set or has no bar that day, or the micro does not signal, the switch waits for the next
 rebalance on which both can trade and the E-mini stays held; a pair whose E-mini never traded in the run has no
 switch, and the micro is opened by the day's pass. The day's search, buffer and trim then run from that book. A
-window that trades before 2019-05-06 therefore holds four symbols that are not among the 36. A live run trades no
+window that trades before a listing date therefore holds symbols that are not among the 36 (GC is never one in
+the standard windows, as above). A live run trades no
 predecessor and refuses one in its universe or its stored book on or after the listing date.
 
-**The relabel list.** The engine detects a roll from a change of the vendor's instrument id on the bars
-(section 1.3). On the bar dated 2026-02-22 the vendor relabelled the same quarter's contract of the four equity
-micros with a new id. That is not a roll. `instrument_id_relabels` names the four changes; from the listed date a
-bar carrying the new id is read as carrying the old one, so no change bar is held, no ROLL legs are booked and that
-day's move is booked as on any day. The stored `instrument_id` stays the old id until the next real roll.
+**The relabel list.** On the bar dated 2026-02-22 the vendor relabelled the same quarter's contract of the four
+equity micros with a new id. That is not a change of contract. `instrument_id_relabels` names the four changes.
+With `per_contract_rolls` off (the vendor's series, section 1.3), the engine detects a roll from a change of the
+vendor's id, so the list is read: from the listed date a bar carrying the new id is read as carrying the old one, no
+change bar is held, no ROLL legs are booked and that day's move is booked as on any day; the stored `instrument_id`
+stays the old id until the next real roll. With `per_contract_rolls` on, as in the template, the list is declared
+and not read (`relabels_read`, `src/data/listing_dates.cpp`; an `INSTRUMENT_ID_RELABELS not read` line is logged):
+the per-contract roll rule reads each change as a change of price source between two contracts of the same expiry
+(its alias trigger), which books no legs and no cost (`SOURCE_CHANGE`, `include/trade_ngin/core/types.hpp`). The
+worked example below is from the backtest, which read the vendor's series.
 
 **Settings in force.**
 
 | Setting | Value | Where |
 |---|---|---|
-| Universe | every symbol of `futures_data.ohlcv_1d` (36) | `apps/backtest/bt_portfolio_conservative.cpp`, `apps/strategies/live_portfolio_conservative.cpp` |
+| Universe | every symbol of `futures_data.ohlcv_1d`, less ES and a predecessor whose listed contract is stored (36) | `apps/backtest/bt_portfolio_conservative.cpp`, `apps/strategies/live_portfolio_conservative.cpp`; `ListingDates::run_universe` |
+| `per_contract_rolls`, `per_contract_switch_bar` | true, `held` (section 1.3) | `config_template/portfolios/conservative/portfolio.json` |
 | Contract size, tick, fee, sector, margins | one row per contract | `metadata.contract_metadata` (`Contract Size`, `Tick Size`, `Fee Per Contract`, `Sector`, `Overnight Initial Margin`, `Overnight Maintenance Margin`) |
-| `listing_dates.contracts` | MES, MNQ, MYM, M2K listed 2019-05-06; before: ES, NQ, YM, RTY; ratio 10 | `config_template/portfolios/conservative/portfolio.json` |
-| `listing_dates.switch_rule` | `open_at_target` | same file |
-| `instrument_id_relabels` | date 2026-02-22: MES 42140878 to 42003800, MNQ 42002475 to 42004946, MYM 42005850 to 42001953, M2K 42005017 to 42002147 | same file |
+| `listing_dates.contracts` | MES, MNQ, MYM, M2K listed 2019-05-06, before them ES, NQ, YM, RTY, ratio 10; MGC listed 2010-10-04, before it GC, ratio 10; SIL listed 2013-06-17, before it SI, ratio 5 | `config_template/portfolios/conservative/portfolio.json` |
+| `listing_dates.switch_rule` | `open_at_target` | the portfolio file above |
+| `instrument_id_relabels` | date 2026-02-22: MES 42140878 to 42003800, MNQ 42002475 to 42004946, MYM 42005850 to 42001953, M2K 42005017 to 42002147; not read while `per_contract_rolls` is on | the portfolio file above |
 | Engine position guard | 1,000 contracts in a backtest, 500 live (a guard that does not bind at this size) | `config_template/defaults.json` `execution.position_limit_backtest`, `execution.position_limit_live` |
 
 **Worked example: the listing switch.** The backtest, signal bar 2019-05-06 (rows stamped 2019-05-07). Held
@@ -206,9 +231,9 @@ The move across the relabel (-99.00 = 1 x (49,581 - 49,680)) is booked like any 
 rebalance: `PortfolioManager::rebalance_one_pass`, `src/portfolio/portfolio_manager.cpp`. The
 config blocks are read in `src/core/config_loader.cpp` (`instrument_id_relabels`, `listing_dates`). The design comment is the header `include/trade_ngin/data/listing_dates.hpp`.
 
-**Source.** OURS. The book does not trade one contract before another's listing date: its appendix C notes that some
-micro and mini futures in its data set have their history backfilled with the prices of the larger contract, and it
-sizes the micro throughout. We trade what was listed at the time, because a position of a few tenths of an E-mini
+**Source.** OURS. AFTS does not trade one contract before another's listing date: its appendix C notes that some
+micro and mini futures in its data set have their history backfilled with the prices of the larger contract, and
+Carver sizes the micro throughout. We trade what was listed at the time, because a position of a few tenths of an E-mini
 could not have been held. The relabel list is ours as well: a vendor id change that is not a change of contract
 is read as no change, because booking it as a roll would charge two legs and drop a day's move.
 
@@ -229,6 +254,10 @@ that were themselves sessions:
 | NO_BAR (closure) | no bar, and none expected (a named holiday; a Saturday or Sunday that is the eve of a fixed-date holiday; a day of the week the symbol printed on in none of the 8 preceding weeks) | held at its last mark |
 | NO_BAR (feed hole) | no bar, on a day of the week the symbol printed on in at least one of the 8 preceding weeks | held at its last mark; an error is logged and counted |
 | SESSION | any other bar | the signal updates and the position may change at that bar's close |
+
+A change of price source restarts the symbol's norm from the change, so a micro is judged on its own bars from its
+change of source (MGC and SIL at their listing dates, the four equity index micros from the vendor's change of
+2026-02-22), as a new symbol is, and not against the full-size contract's volume (`src/data/session_classifier.cpp`).
 
 **Settings in force.** They are constants of the code; nothing reads them from a config file.
 
@@ -256,18 +285,34 @@ that were themselves sessions:
 `SessionClassifier::classify_symbol_day`, `k01_consumed_bars`. The verdicts and the rule's
 numbers are documented in `include/trade_ngin/data/session_classifier.hpp`.
 
-**Source.** OURS. The book has no session logic: it assumes one usable daily price per business day. Our feed
+**Source.** OURS. AFTS has no session logic: Carver assumes one usable daily price per business day. Our feed
 carries Sunday session rows, holiday stubs and occasional corrupt prints, and a position sized or traded on such a
 bar is an error.
 
 ### 1.3 Prices: back-adjusted for returns, real for levels
 
-**What it does.** A continuous series splices one contract onto the next, and on the bar where the vendor switches
-contract the close jumps by the price gap between two contracts. That jump is not a return. The engine marks those
-bars from the vendor's instrument id and builds a back-adjusted series. Everything that is a return or a difference
-reads the back-adjusted series; everything that is a level reads the real contract price.
+**What it does.** A series that moves from one contract to the next jumps on the roll by the price gap between
+the two contracts. That jump is not a return. The engine marks the roll bars and builds a back-adjusted series.
+Everything that is a return or a difference reads the back-adjusted series; everything that is a level reads the
+real contract price.
 
-**The rule.**
+Which bars the engine reads is set by `portfolio.json`'s `per_contract_rolls`:
+
+- **On, as in the template.** Each bar is the held contract's own bar, on the dates of the vendor's series, and the
+  contract rolls by the per-contract roll rule, on the first of: the vendor's confirmed switch forward, whenever it
+  comes; the first bar inside the window of the five trading days before the first notice or last trading day where
+  the next cycle contract's volume is greater than the held one's; or the last bar that can still be traded. It
+  never rolls back to an earlier contract (`include/trade_ngin/data/contract_roll_rule.hpp`). A roll bar carries the contract it left. On it the
+  step in the adjusted level is the new contract's close minus the old contract's close on the same bar, and the
+  return is the old contract's own move over the bar, so the return is not 0. A crossover or deadline roll is known
+  on its own bar and is not held; a vendor switch waits for the next bar to confirm it, and the switch bar is the
+  held contract's own bar, held. `per_contract_switch_bar` `held` keeps that bar the held contract's own
+  (`include/trade_ngin/data/roll_series.hpp`; `include/trade_ngin/data/per_contract_source.hpp`). The rule and its
+  cases are in `FUTURES_ROLLS.md`.
+- **Off.** The bars are the vendor's continuous series, and the rule below applies. The worked example is of this
+  case.
+
+**The rule on the vendor's series.**
 
 - A CHANGE bar is the first consumed bar whose instrument id differs from the last known id. Its status is decided
   on the next consumed bar: the id is kept (a ROLL, confirmed) or it reverts (a FLIP: no roll, both bars excluded).
@@ -283,8 +328,9 @@ reads the back-adjusted series; everything that is a level reads the real contra
 | The moving averages of the trend rules | adjusted level A (differences only) |
 | Sizing, notional, the weight per contract, costs, margin, marks, P&L | raw close P |
 
-**Settings in force.** None: the rule has no parameter. The instrument id comes from `futures_data.ohlcv_1d_raw`,
-joined to each kept bar on the bar's own print.
+**Settings in force.** `per_contract_rolls` true and `per_contract_switch_bar` `held`
+(`config_template/portfolios/conservative/portfolio.json`). The vendor's-series rule has no parameter; its
+instrument id comes from `futures_data.ohlcv_1d_raw`, joined to each kept bar on the bar's own print.
 
 **Worked example.** The stored bars, MBT (Micro Bitcoin, multiplier 0.1); the adjusted level and return are
 computed here with the formulas above, as the engine holds them on signal bar 2026-04-28.
@@ -308,13 +354,14 @@ a gain nobody holding the contract made.
 for each symbol in `TrendFollowingStrategy::on_data` (`src/strategy/trend_following.cpp`). The design comment
 is `include/trade_ngin/data/roll_series.hpp`.
 
-**Source.** CARVER, ADAPTED. The split is the book's: strategy one, "Back-adjusting futures price", and appendix B,
+**Source.** CARVER, ADAPTED. The split is Carver's: strategy one, "Back-adjusting futures price", and appendix B,
 "Back-adjusting a futures price series", build the back-adjusted series; strategy two states that position sizing
 uses the price of the contract held, not the back-adjusted price; appendix B, "Standard deviation estimation",
-divides the adjusted change by the price of the contract held. What differs is how the series is built. The book
-back-adjusts from the prices of each dated contract, taking the gap on a day when both contracts have a price. We
-have one continuous series per symbol, so the gap is the whole close-to-close step across the vendor's switch and
-the change bar's own move is not known: its return is set to 0.
+divides the adjusted change by the price of the contract held. With per-contract rolls the series is built as
+Carver builds it, from each dated contract's own prices, with the gap taken between the two contracts' closes on the
+roll bar; what differs is when and into which contract it rolls, which our roll rule sets (the front of the root's
+cycle, `FUTURES_ROLLS.md`). On the vendor's series we have one continuous series per symbol, so the gap is the whole close-to-close
+step across the vendor's switch and the change bar's own move is not known: its return is set to 0.
 See `FUTURES_ROLLS.md`.
 
 ### 1.4 Volatility
@@ -379,11 +426,13 @@ factor the variance recursion the long-run mean and the blend. The design commen
 **Source.** CARVER, ADAPTED. The estimator is strategy three, "Forecasting future volatility": an exponentially
 weighted standard deviation with a span of 32 days, blended with a long-run estimate at weights 0.7 on the current
 and 0.3 on the long run, on percentage returns formed as appendix B, "Standard deviation estimation", forms them.
-The estimator is centred on its exponentially weighted mean, as the book's is. Three things differ. The annual
-factor is counted from the bars instead of the book's fixed 16, because our series has Sunday rows. The variance is
-seeded and floored, so a series that starts or sits flat cannot give a zero. And the book's long-run measure is a
+The estimator is centred on its exponentially weighted mean, as Carver's is. Three things differ. The annual
+factor is counted from the bars instead of Carver's fixed 16, because our series has Sunday rows. The variance is
+seeded and floored, so a series that starts or sits flat cannot give a zero. And Carver's long-run measure is a
 ten-year average; ours is the mean of the trailing 2,520 consumed bars,
-about 8.4 years on our bar count.
+about 8.4 years on our bar count. The blend is kept for Carver's reason: volatility clusters in the short run but
+mean-reverts in the long run, and an estimate on recent returns alone builds very large positions in the quiet
+periods just before a crisis (strategy three, pp.89-90).
 
 ### 1.5 The trend rules: EWMAC, scaling, capping
 
@@ -413,6 +462,12 @@ volatility regime, and capped at plus or minus 20.
 
 A pair without a fixed scalar is refused at start-up (`TrendFollowingStrategy::validate_config`,
 `src/strategy/trend_following.cpp`).
+
+A combined forecast (section 1.6) that is not a finite number, or whose absolute value is above the cap of 20, is
+treated as invalid: the position calculation logs a WARN and sizes that contract at 0
+(`TrendFollowingStrategy::calculate_position`, `src/strategy/trend_following.cpp`; an earlier check in
+`TrendFollowingStrategy::on_data` replaces a forecast that is not a finite number with 0, also with a WARN). A broken
+input therefore leaves one contract without a target instead of sizing it on a number that means nothing.
 
 **Worked example.** The chain, ZN on signal bar 2026-04-27 (the run dated 2026-04-28), recomputed from the stored
 bars. P = 111.0625, forecast_sigma = 0.04807733, so the denominator is 111.0625 x 0.04807733 / 16 = 0.333724. The
@@ -446,9 +501,9 @@ the six pairs and table 29 the scalars 12.1, 8.53, 5.95, 4.10, 2.79 and 1.91; th
 "A maximum forecast value".
 The attenuation is strategy thirteen, "Adjusting forecasts for volatility regimes": a multiplier of 2 minus 1.5
 times a quantile, smoothed over ten days, applied to the raw forecast with the scalars unchanged. Two things
-differ in the attenuation. The book takes the quantile of the relative volatility (the blended estimate over its
+differ in the attenuation. Carver takes the quantile of the relative volatility (the blended estimate over its
 ten-year average) across the instrument's whole history; we take the quantile of sigma_short against its own
-trailing 2,520 values, which needs no second average and has a fixed window. And the book introduces the
+trailing 2,520 values, which needs no second average and has a fixed window. And Carver introduces the
 attenuation as a variation on its trend and carry strategy; we apply it to the trend rules alone.
 
 ### 1.6 Forecast weights, the diversification multiplier, and rules removed by cost
@@ -478,7 +533,7 @@ The removal rule, applied contract by contract and speed by speed:
 | Multiplier table | 1.26 for six pairs, 1.19 for five, 1.13 for four, 1.08 for three, 1.03 for two, 1.00 for one | `TrendFollowingConfig::fdm`, `include/trade_ngin/strategy/trend_following.hpp` (the table in force; `config_template/defaults.json` `strategy_defaults.fdm` carries the same six rows) |
 | `trading_rule_removals` | no 2/8 on 6M, GF, HE, LE, NG, ZL, ZS; no 2/8 or 4/16 on 6L, KE, ZC, ZW; no 2/8, 4/16 or 8/32 on ZR (twelve contracts, eighteen rules) | `config_template/portfolios/conservative/portfolio.json` |
 | Cost limit for one rule on one contract | 0.15 Sharpe-ratio units a year | `LIMIT`, `scripts/trading_rule_costs.py` |
-| Turnover of each speed | 98.5, 50.2, 25.4, 13.2, 7.6, 5.2 times a year for fast spans 2 to 64 (the book's table 35) | `TABLE_35`, `scripts/trading_rule_costs.py` |
+| Turnover of each speed | 98.5, 50.2, 25.4, 13.2, 7.6, 5.2 times a year for fast spans 2 to 64 (AFTS table 35) | `TABLE_35`, `scripts/trading_rule_costs.py` |
 | Cost per trade | the median, over every signal day of the 16-year run the list is computed from, of the engine's cost of one contract over its notional and its sizing volatility | `scripts/trading_rule_costs.py` |
 | Rolls a year | the rolls the engine confirmed on the contract's series in that run | same |
 
@@ -528,20 +583,78 @@ block is read at `src/core/config_loader.cpp` and handed to the sleeve by `hand_
 (`include/trade_ngin/strategy/sleeve_config.hpp`).
 
 **Source.** CARVER AS WRITTEN for the equal weights and the multiplier table; CARVER, ADAPTED for the removal of
-rules by cost. The procedure is the book's. Strategy nine, "Putting it together: a method for
+rules by cost. The procedure is Carver's. Strategy nine, "Putting it together: a method for
 allocating forecast weights", says that forecast weights are set instrument by instrument in two steps: first
 drop, for that instrument, every rule whose cost is over the limit, then give the rules left the same weight. "Removing expensive trading rules"
 sets the limit for a rule at 0.15 Sharpe-ratio units of cost a year, counts two trades for each roll, and gives the
 turnover of each speed in table 35. "Top down method for choosing forecast weights" gives the equal weights, and
 "Accounting for forecast diversification" with table 36 gives the multiplier for each set of speeds left (1.26,
-1.19, 1.13, 1.08, 1.03, 1.00) and the second cap at 20. The book applies the removal as the first step of setting
+1.19, 1.13, 1.08, 1.03, 1.00) and the second cap at 20. Carver applies the removal as the first step of setting
 forecast weights from strategy nine onward, with the same method in strategies ten and eleven, and its own test of
 dynamic optimisation on a 500,000 account (strategy twenty-five, "Testing and understanding dynamic optimisation",
 table 124) runs on forecasts whose weights were set by the cost of each instrument. What differs is the inputs.
 The cost per trade is our engine's cost of one contract (the IBKR fee plus our spread and impact model, section
-1.16), taken as a 16-year median; the rolls are the ones our engine confirms; the turnovers are the book's table
+1.16), taken as a 16-year median; the rolls are the ones our engine confirms; the turnovers are Carver's table
 35; and the list is fixed in the config and reviewed, not recomputed each day. The costs are ours because they
 must be the ones this engine charges.
+
+The list was computed with GC and SI full size and was not recomputed when MGC and SIL took their places, so the
+micros run all six speeds; the recipe tool's `--check` on a run with the micros shows whether their costs change the
+list.
+
+### 1.6a Carry: built, switched off
+
+**What it does.** The trend sleeve also holds Carver's carry rules. With carry on, each contract's forecast blends
+its trend speeds with carry speeds that read the price difference between the held contract and its neighbour in
+the root's roll cycle. No template switches it on, so the book trades the trend forecast alone.
+
+**The formula.** At each signal bar, on the same window of consumed bars as the trend rules:
+
+- raw carry = the nearer contract's close minus the held contract's (when the neighbour is nearer), or the held
+  contract's close minus the further contract's (when the held contract is the front); both closes are real contract
+  prices of the same date, never the adjusted series (`src/data/carry_quote.cpp`)
+- annualised raw carry = raw carry / (the months between the two contracts / 12)
+- carry forecast = annualised raw carry / (P x forecast_sigma), the trend forecast's own divisor at that bar
+- for each span of 5, 20, 60 and 120 business days: an EWMA of the carry forecast, times the scalar 30, kept inside
+  [-20, +20]
+- blended forecast = FDM x ((1 - weight) x the mean of the contract's trend speeds + weight x the mean of its carry
+  spans), kept inside [-20, +20], with weight 0.4 (table 51: carry 0.4, trend 0.6) and the FDM of table 52 for the
+  contract's number of rules (7 to 10)
+- a bar with no neighbour price keeps the last known annualised raw carry; a contract with no carry quote yet in its
+  window trades its trend forecast alone
+- the equity slow rule acts on the trend part only (section 1.7)
+
+**Settings in force.** None: `portfolio.json` carries no `carry` block, and with the block absent, or a weight of 0,
+the forecast is the trend forecast to the last stored digit. The block, when present, is
+`"carry": {"weight": 0.4, "spans": [5, 20, 60, 120], "scalar": 30}` (`CarryConfig`,
+`include/trade_ngin/core/config_loader.hpp`; `config_template/README.md`, section on `carry`).
+
+What is refused when carry is on (`TrendFollowingStrategy::validate_config`, `src/strategy/trend_following.cpp`;
+the loader): a book that is not one enabled trend sleeve, or that has `per_contract_rolls` off (the quotes come from
+the per-contract source); a weight outside 0 to 1; spans that are not positive and fastest first, or a scalar that
+is not positive; a number of rules for which table 52 prints no multiplier; a span with no turnover in table 40; and
+the speed limit: on every contract, the fastest carry span must turn over no faster than the fastest trend speed the
+contract keeps after the removals of section 1.6, since that speed passed the 0.15 limit. A span the speed limit does
+not bound is refused until its cost is measured (`scripts/trading_rule_costs.py`).
+
+**Where in the code.** `carry_estimator::estimate` and `carry_estimator::blend` (`src/strategy/carry_estimator.cpp`;
+the design comment in `include/trade_ngin/strategy/carry_estimator.hpp`); the blend and the refusals in
+`TrendFollowingStrategy` (`src/strategy/trend_following.cpp`); the quote in `src/data/carry_quote.cpp`; the hand-over
+of the block in `hand_over_carry` (`include/trade_ngin/strategy/sleeve_config.hpp`). Each signal bar logs one `CARRY`
+line with the trend part and the carry part.
+
+**Source.** CARVER AS WRITTEN for the rules, the scalar, the spans and the weights: strategy ten gives the carry
+forecast and its smoothing spans, strategy eleven the blend of trend and carry, table 51 the style weights and
+table 52 the multiplier. Carry is built and shipped off because it has not yet been tuned on the data the book
+trades. It needs two real contract prices of the same date, which only the per-contract bars give, and the second
+contract is missing on many dates: over the sixteen years UB has one on 55.4 percent of dates and 6M on 66.0
+percent, and 6L's longest gap is 78 dates. When carry was measured (2026-10-26 and 10-27), the continuous series
+still had holes (AlgoGators/algogators#36) and the gold and silver micros were stand-ins, and the final retune ran
+with carry off (AlgoGators/algogators#186). Known from those runs: carry alone, on the unrounded book over the
+sixteen years before costs, earned a Sharpe of 0.02; on the gold and silver micro book of the
+2026-10-27 grid (12 runs a cell), carry roughly halved the round trips (76 to 110 a year against 152 to 216) and
+the mean after-cost Sharpe fell (0.04 against 0.34); why it falls was not measured. The measurements are in the
+knowledge set ([knowledge/03_tuning_and_results/CARRY.md](knowledge/03_tuning_and_results/CARRY.md)).
 
 ### 1.7 The equity-index slow rule
 
@@ -554,6 +667,9 @@ and the value stored in `trading.signals`.
 
 - if combined_i < 0 and not (scaled_32/128 < 0 and scaled_64/256 < 0): F_i = 0
 - otherwise F_i = combined_i
+
+With carry on (section 1.6a; off in the book), the rule acts on the trend part of the blend only, so an equity index
+can go short on carry; such shorts are counted and logged (`include/trade_ngin/strategy/carry_log.hpp`).
 
 A held short whose forecast the rule sets to 0 is not closed by rule. A zero forecast has no sign, so the contract
 is a free row with a target of 0 that may only step toward zero, and the short leaves the book as fast as the
@@ -582,10 +698,15 @@ so the short is not taken. On the fourth the average is positive and the rule do
 `TrendFollowingStrategy::on_data` (`src/strategy/trend_following.cpp`). The block is read at
 `src/core/config_loader.cpp`.
 
-**Source.** OURS. It is not in the book, and it goes against the book's advice: strategy twelve, in its discussion
-of forecast adjustments by asset class, recommends avoiding any adjustment that treats long and short
-differently. The reason for it: an equity index short taken on the fast speeds alone, against a slow uptrend,
-is a bet against the drift the slow speeds measure. The runner sets the rule on the book's first sleeve only
+**Source.** OURS. The rule was adopted on 2026-10-05 on this book's record: on the sixteen-year backtest 113 of 190
+equity-index shorts were opened on the fast speeds alone, and equity shorts as a whole lost 121,403. That fits
+Carver's finding that equities are the weakest trend class (a median Sharpe of 0.03 for multiple-speed trend,
+strategy nine, table 37, p.206). The rule lets an equity index short open only when the slow trend agrees. It is a
+declared departure from Carver's advice: in his discussion of forecast adjustments by asset class he declines any
+adjustment that treats long and short differently, because those results are not statistically significant
+(strategy twelve, p.268). As an economic reading only: Carver finds that in equity indices a strong negative fast
+forecast is followed by a rally, a "bouncing cat" in the two fastest speeds (strategy twelve, figure 53), while this
+rule keys on the slow speeds agreeing. The runner sets the rule on the book's first sleeve only
 (CONSERVATIVE's one sleeve; BASE's faster sleeve runs neither slow pair;
 `include/trade_ngin/strategy/trend_following.hpp`).
 
@@ -599,14 +720,14 @@ half of its sector's share. The instrument diversification multiplier (IDM) then
 **The formula.**
 
 - the universe of the weights is every metadata symbol that has a bar in `futures_data.ohlcv_1d` at any date, less
-  ES. It is computed once per run and is the same on every date, so in a backtest that starts before a contract's
+  ES and less a predecessor whose listed contract is stored (GC while MGC is, SI while SIL is). It is computed once per run and is the same on every date, so in a backtest that starts before a contract's
   first bar the contract carries its weight from the first day and the other weights are not rescaled for the
   dates it has no bar: MBT, whose first bar is dated 2021-05-03, holds 0.071429 on every date of a window that
   starts in 2010
 - sector weight = 1 / (number of sectors with a contract in that universe) = 1/7
 - w_i = sector weight / (contracts in the sector), capped at 0.50 x sector weight
 - the weights are brought back to a sum of 1 by scaling only the contracts that were not capped
-- the E-mini of a listing-date pair takes the weight of its micro
+- the predecessor of a listing-date pair (an E-mini, GC, SI) takes the weight of its micro
 
 **Settings in force.**
 
@@ -638,7 +759,7 @@ read with no date filter (`src/data/postgres_database.cpp`) and
 cached; the weight of an E-mini.
 
 **Source.** CARVER, ADAPTED for the weights; CARVER AS WRITTEN for the IDM. Strategy four, "An algorithm for
-allocating instrument weights", is the book's top-down method: equal shares to each asset class, then to groups
+allocating instrument weights", is Carver's top-down method: equal shares to each asset class, then to groups
 within a class, then to instruments within a group. We use one layer (the metadata's sector, then the contracts in
 it) and add the 50 percent cap so that a sector with a single contract cannot take a whole sector share. The IDM
 is the value of strategy four's table 16 for 30 or more instruments, 2.50, which is also the ceiling appendix B
@@ -672,9 +793,9 @@ stored value: it is recomputed, logged on the `SIZING_CAPITAL` line and written 
 | Setting | Value | Where |
 |---|---|---|
 | `risk_target` | 0.20 | `config_template/portfolios/conservative/portfolio.json`, `strategies.TREND_FOLLOWING.config.risk_target` |
-| `initial_capital` | 500,000 | same file |
-| `sizing_mode` | `half_compounding` (the one value accepted; required on a futures book) | same file |
-| `starting_capital` | 500,000 (must equal `initial_capital`) | same file |
+| `initial_capital` | 500,000 | the portfolio file above |
+| `sizing_mode` | `half_compounding` (the one value accepted; required on a futures book) | the portfolio file above |
+| `starting_capital` | 500,000 (must equal `initial_capital`) | the portfolio file above |
 
 **Worked example.** The chain, stored `trading.live_results` rows. The row dated D holds the day's net P&L and the
 sizing capital the run of D sized its book on; the next sized row's capital must equal min(500,000, E + net).
@@ -705,11 +826,13 @@ to `PortfolioManager::set_sizing_capital` (`src/portfolio/portfolio_manager.cpp`
 `src/core/config_loader.cpp`.
 
 **Source.** CARVER AS WRITTEN for the risk target; CARVER, ADAPTED for the sizing capital. The 20 percent target
-is the book's standard risk target (derived in strategy two and used throughout). Half compounding is Tactic
+is Carver's own risk target, a relatively conservative value under the 23 percent his half-Kelly calculation gives
+(strategy two, p.72), and used throughout AFTS. At 500,000 a lower target rounds more contracts to zero, so
+drawdown is lowered through the way the book is built, not by a smaller target. Half compounding is Tactic
 three, "Cash and compounding", section "Half compounding": the capital used for sizing never rises above the
-amount the account began with, gains beyond that are set aside, and a loss reduces it straight away. The book
+amount the account began with, gains beyond that are set aside, and a loss reduces it straight away. Carver
 offers two forms of capital for a live account, full compounding and half compounding, and warns against running
-real money on fixed capital; we use half compounding. What differs is where it runs: the book reports its
+real money on fixed capital; we use half compounding. What differs is where it runs: Carver reports his
 backtests on fixed capital with non-compounded returns, and we size the backtest on the same half compounding as
 the live book, so the two engines size on the same capital.
 
@@ -724,7 +847,7 @@ afterwards, on the whole book at once.
 
 N*_i = (F_i / 10) x (E x IDM x w_i x tau) / (M_i x P_i x sigma_i)
 
-A negative forecast gives a short target. All 36 contracts are in US dollars, so the exchange rate in the book's
+A negative forecast gives a short target. All 36 contracts are in US dollars, so the exchange rate in Carver's
 formula is 1. The engine's guards: sigma is kept inside [0.01, 1.0] for sizing; a forecast outside [-20, +20] or
 not a number sizes at 0; a contract outside its tradeable window (section 1.1) publishes no target. Also floored:
 ten times the formula's denominator at 1.0, the capital at 1,000, the IDM and the exchange rate at 0.1, with tau kept inside
@@ -755,7 +878,7 @@ work on the whole book and not contract by contract.
 formula), called from `on_data`.
 
 **Source.** CARVER AS WRITTEN for the formula; OURS for the guards. The engine keeps the sizing volatility inside
-[0.01, 1.0] and sizes a forecast that is not a number at 0, which the book's formula does not do, because a
+[0.01, 1.0] and sizes a forecast that is not a number at 0, which Carver's formula does not do, because a
 volatility near zero would give an unbounded target. The position formula with the forecast
 over 10 is strategy seven, "Position scaling
 with forecasts"; the instrument weight and IDM enter it in strategy four; and strategy twenty-five, "Optimising for
@@ -777,22 +900,27 @@ free contract at its capped target, every held contract at its held quantity.
 
 | Reading | Formula | Limit | Multiplier |
 |---|---|---|---|
-| R, portfolio risk | sqrt(x' Sigma x) | 2.25 x tau = 0.45 | min(1, 0.45 / R) |
-| R_jump, jump risk | sqrt(x' Sigma_jump x), Sigma_jump built from each contract's jump volatility (the 99th percentile of its trailing 2,520 sigma_short values, each taken back to a daily figure by its own bar's factor, then annualised by the gate window's bars a year) and the same correlations | 4.5 x tau = 0.90 | min(1, 0.90 / R_jump) |
-| R_shock, correlation shock | the sum of abs(x_i) x sqrt(Sigma_ii), the contract's own volatility in the gate window and not the sizing volatility of section 1.4 (every correlation at its worst) | 4.0 x tau = 0.80 | min(1, 0.80 / R_shock) |
-| L_g, gross leverage | the sum of abs(x_i) | 8.0 | min(1, 8.0 / L_g) |
-| L_n, net leverage | abs(the sum of x_i) | 6.0 | min(1, 6.0 / abs(L_n)) |
+| R, portfolio risk | sqrt(x' Sigma x) | 1.75 x tau = 0.35 | min(1, 0.35 / R) |
+| R_jump, jump risk | sqrt(x' Sigma_jump x), Sigma_jump built from each contract's jump volatility (the 99th percentile of its trailing 2,520 sigma_short values, each taken back to a daily figure by its own bar's factor, then annualised by the gate window's bars a year) and the same correlations | 4.75 x tau = 0.95 | min(1, 0.95 / R_jump) |
+| R_shock, correlation shock | the sum of abs(x_i) x sigma_i, every correlation at its worst; sigma_i is the contract's sizing volatility of section 1.4 (with `overlay_covariance` `sample`, its own volatility in the gate window) | 3.0 x tau = 0.60 | min(1, 0.60 / R_shock) |
+| L_g, gross leverage | the sum of abs(x_i) | 7.25 | min(1, 7.25 / L_g) |
+| L_n, net leverage | abs(the sum of x_i) | 5.5 | min(1, 5.5 / abs(L_n)) |
 
 - m = the smallest of the five multipliers; the binding term is the reading that set it, or "none" when m is 1
 - the scaled target of a free contract: N~_i = m x N*c_i; a held contract is counted in the readings and not scaled
 
-Sigma is the sample covariance of the participants' adjusted daily returns over the gate window: the last 252
-dates on which any participant has a return, ending at the signal date, using the dates on which every participant
-has one, annualised by the bars a year those dates themselves show. The window's rules: a participant with no
+`overlay_covariance` chooses Sigma; the conservative template sets `carver` and the BASE template `sample`.
+With `carver`, Sigma is Carver's covariance: sigma_i x sigma_j x rho_ij, with sigma_i each
+contract's sizing volatility (section 1.4) and rho_ij the exponentially weighted correlation of the two contracts'
+weekly returns (the sum of the daily adjusted returns of a Saturday-to-Friday week), span 26 weeks, over the weeks
+both have a return in each contract's last 300 consumed bars. Which contracts take part, and the annualisation, come
+from the gate window: the last 252 dates on which any participant has a return, ending at the signal date, annualised
+by the bars a year of the dates on which every participant has one. With `overlay_covariance` `sample`, Sigma is the
+sample covariance of the adjusted daily returns over those complete dates instead. The window's rules: a participant with no
 return in the window is out of R, R_jump and R_shock and stays in leverage; one with fewer than 120 returns is
-left out of R and R_jump and stays in R_shock (on its own window volatility, once it has two returns) and in
-leverage; with fewer than 120
-complete dates the covariance is taken over every window date with missing returns as zeros; with fewer than 21
+left out of R and R_jump and stays in R_shock once it has two returns (on its sizing volatility with `carver`, on its
+own window volatility with `sample`) and in leverage; with fewer than 120
+complete dates the sample covariance is taken over every window date with missing returns as zeros; with fewer than 21
 complete dates the three covariance readings are not computed (the day is marked blind) and the two leverage
 readings still apply. If the overlay cannot produce m for any other reason the rebalance is refused: no search, no
 fill, the held book kept.
@@ -801,15 +929,18 @@ fill, the held book kept.
 
 | Setting | Value | Where |
 |---|---|---|
-| `per_name_cap` (L) | 2 | `config_template/portfolios/conservative/risk.json`, `modules[0]` (the `carver` module) |
-| `R_max`, `R_jump_max`, `R_shock_max` | 2.25, 4.5, 4.0, as ratios to tau (the pass multiplies them by tau, `src/portfolio/portfolio_manager.cpp`) | same |
-| `max_gross_leverage`, `max_net_leverage` | 8.0, 6.0 | same |
+| `per_name_cap` (L) | 2 (BASE: 2) | `config_template/portfolios/conservative/risk.json`, `modules[0]` (the `carver` module); BASE's in `config_template/portfolios/base/risk.json` |
+| `R_max`, `R_jump_max`, `R_shock_max` | 1.75, 4.75, 3.0, as ratios to tau (the pass multiplies them by tau, `src/portfolio/portfolio_manager.cpp`); BASE: 2.25, 4.5, 4.0 | same |
+| `max_gross_leverage`, `max_net_leverage` | 7.25, 5.5 (BASE: 8.0, 6.0) | same |
+| `overlay_covariance` | `carver` (`sample` is the other value; required); BASE: `sample` | same |
+| Correlation span, bars handed to the overlay | 26 weeks, 300 bars | `kCarverCorrelationWeeks`, `include/trade_ngin/risk/overlay.hpp`; `kOverlayBars`, `src/strategy/trend_following.cpp` |
 | Gate window, blind floor | 252 dates, 21 complete dates | `kWindowDates`, `kBlindBelow`, `include/trade_ngin/risk/overlay.hpp` (code constants; `risk.json` carries `lookback_period` 252 and `min_gate_dates` 21 with the same values, which are validated only: changing them does not change the window) |
 | Complete-date floor, participant floor | 120, 120 | `kCompleteDatesFloor`, `kParticipantReturnsFloor`, `include/trade_ngin/risk/overlay.hpp` |
 | Jump percentile | 99, over the trailing 2,520 values of sigma_short, each taken back to a daily figure by its own bar's factor | `kJumpPercentile`, `src/strategy/trend_estimator.cpp`; taken annualised at `src/optimization/one_pass.cpp` |
 
-**Worked example: the readings.** The chain, every sized rebalance. The readings are the values on each run's
-`OVERLAY` log line; the multipliers are computed here. L_g and L_n were also recomputed from the capped targets and
+**Worked example: the readings.** The chain, every sized rebalance, on the sample covariance and against the
+limits the chain ran with (0.45, 0.90, 0.80, 8.0, 6.0). The readings are the values on each run's `OVERLAY` log
+line; the multipliers are computed here. L_g and L_n were also recomputed from the capped targets and
 the held rows and agree to the last digit.
 
 | Signal bar | E | R | R_jump | R_shock | L_g | L_n | Smallest of limit over reading | m | Binding |
@@ -827,26 +958,26 @@ Check on 2026-04-27: 0.45 / 0.1029 = 4.37, 0.90 / 0.2890 = 3.11, 0.80 / 0.2961 =
 6.0 / 0.4034 = 14.87. Every ratio is above 1, so m = 1 and nothing is cut. On that day the window held 252 dates
 from 2025-07-08, of which 184 were complete for all 36 participants.
 
-**Worked example: a cut.** An illustration with invented inputs: every number is invented and round, and none is a
-stored row or the output of a run. A book that started with 500,000 has the cumulative settled net P&L C below on
+**Worked example: a cut.** An illustration with invented inputs, at the limit in force: every number is invented
+and round, and none is a stored row or the output of a run. A book that started with 500,000 has the cumulative settled net P&L C below on
 four consecutive rebalances; its sizing capital is E = 500,000 - (P - C), with P the running peak of C (section
 1.9). The net notional is that of the book the overlay reads (free contracts at their capped targets, held
 contracts at their holdings), so L_n = abs(net notional) / E. The other four readings are taken as inside their
 limits, so m is the multiplier of L_n.
 
-| Rebalance | C | Peak P | E | Net notional | L_n | 6.0 / L_n | m | Binding |
+| Rebalance | C | Peak P | E | Net notional | L_n | 5.5 / L_n | m | Binding |
 |---|---|---|---|---|---|---|---|---|
-| 1 | +10,000 | 10,000 | 500,000 | 2,400,000 | 4.8000 | 1.2500 | 1 | none |
-| 2 | -10,000 | 10,000 | 480,000 | 3,000,000 | 6.2500 | 0.9600 | 0.960000 | L_n |
-| 3 | -15,000 | 10,000 | 475,000 | 3,040,000 | 6.4000 | 0.9375 | 0.937500 | L_n |
-| 4 | -5,000 | 10,000 | 485,000 | 2,910,000 | 6.0000 | 1.0000 | 1 | none |
+| 1 | +10,000 | 10,000 | 500,000 | 2,400,000 | 4.8000 | 1.1458 | 1 | none |
+| 2 | -10,000 | 10,000 | 480,000 | 3,000,000 | 6.2500 | 0.8800 | 0.880000 | L_n |
+| 3 | -15,000 | 10,000 | 475,000 | 3,040,000 | 6.4000 | 0.8594 | 0.859375 | L_n |
+| 4 | -5,000 | 10,000 | 485,000 | 2,667,500 | 5.5000 | 1.0000 | 1 | none |
 
-Check on rebalance 2: E = 500,000 - (10,000 - (-10,000)) = 480,000; 3,000,000 / 480,000 = 6.25; 6.0 / 6.25 = 0.96.
-On rebalances 2 and 3 the net exposure of the target book is more than six times the sizing capital, and every free
-target is scaled by m before the search: a free capped target of 8.000000 contracts becomes 7.680000 on rebalance
-2 and 7.500000 on rebalance 3. On rebalance 4 the reading is at its limit, not above it: the multiplier is 1 and
-nothing is cut. The same net notional is a larger reading on a smaller sizing capital: 3,000,000 on 500,000 is
-6.0000, at the limit.
+Check on rebalance 2: E = 500,000 - (10,000 - (-10,000)) = 480,000; 3,000,000 / 480,000 = 6.25; 5.5 / 6.25 = 0.88.
+On rebalances 2 and 3 the net exposure of the target book is more than five and a half times the sizing capital, and
+every free target is scaled by m before the search: a free capped target of 8.000000 contracts becomes 7.040000 on
+rebalance 2 and 6.875000 on rebalance 3. On rebalance 4 the reading is at its limit, not above it: the multiplier is
+1 and nothing is cut. The same net notional is a larger reading on a smaller sizing capital: 2,750,000 on 500,000 is
+5.5000, at the limit; on 480,000 it would be 5.7292, and cut.
 
 **Worked example: the cap.** An illustration with invented inputs, none of them a stored row or the output of a
 run: one contract with a multiplier of 2,000, a close of 100.00, a sizing volatility of 0.016 and an instrument
@@ -880,16 +1011,34 @@ each limit set at the 99th percentile of its own history and rounded, never abov
 optimal positions before the dynamic optimisation. The per-name cap is the same chapter's "Position limit for
 maximum leverage", whose example uses a leverage ratio of two for a single instrument, and "Position limits and
 dynamic optimisation" allows such limits to be applied as constraints inside the optimisation. What differs from
-the book's method: (1) the values of the limits are ours, fixed in `risk.json` (0.45, 0.90, 0.80 and 8.0 where the
-book's portfolio gives 0.30, 0.75, 0.65 and 20); the book's values come from the history of the author's own
-portfolio, and it notes that another set of instruments calls for other limits; (2) the covariance is a sample
-covariance of 252 dates of daily adjusted returns where the book combines its 32-day volatility with correlations
-from weekly returns, one estimator from the series the engine already holds; (3) the jump volatility is taken over
-the trailing 2,520 values of the engine's own short estimate; (4) the readings are taken on the capped target, and
-a held row is counted and not scaled, because it cannot trade that day; (5) of the book's three position limits
-only the leverage limit is applied, because the other two overlap it or do not bind at this size. Two things are
-not in the book: a fifth reading, net leverage, with its own limit of 6.0, because the book is long and short and
-its net exposure is limited as well as its gross; and the rule for thin windows (below 21 complete dates the
+Carver's method: (1) the values of the limits are ours, set by his method on this book's history:
+the 99th percentile of each reading over the conservative book's sixteen-year backtest with the limits out of play,
+rounded to the nearest 0.25 (0.35, 0.95, 0.60 and 7.25 where his portfolio gives 0.30, 0.75, 0.65 and 20;
+the percentiles are in `OPTIMIZER_AND_RISK_DESIGN.md`, section 6), because his values come from the history
+of his own portfolio and he notes that another set of instruments calls for other limits; (2) the
+covariance is Carver's own estimator for the overlay (footnote 289 of the same chapter), volatility with
+exponentially weighted correlations of weekly returns over 26 weeks, on the engine's own sizing volatility, so the
+overlay reads risk on the estimate each position was sized on, and with the weeks taken from each contract's last
+300 bars. Weekly returns avoid the low correlations that daily closes taken hours apart give (his reason), and the
+26-week weighting puts most weight on recent weeks, so a rise in correlations shows within weeks, where an
+equal-weight sample of the last 252 dates spreads it over a year. Carver notes that the method "isn't too sensitive to
+how the covariance matrix is estimated" (footnote 289, p.622), and the limits of (1) were set on this same estimator, so the two go together; (3) the jump
+volatility is taken over the trailing 2,520 values of the engine's own short estimate; (4) the readings are taken
+on the capped target, and a held row is counted and not scaled, because it cannot trade that day; (5) of Carver's
+three position limits only the leverage limit is applied, by design and not on its numbers (decided 2026-10-05):
+the per-name cap of 2, Carver's own example value for a leverage limit, already bounds each name, so his limit at
+the maximum forecast, at a chosen nominal 10 or 20 percent weight, would be a second, overlapping per-name cap on a
+picked parameter. The cap bounds a name's notional where Carver's limit bounds a name's share of risk, and the
+overlay's risk limits bound the risk of the book as a whole. The open-interest limit does not bind at 500,000, and
+the book holds no open-interest data. As support, on a reference model run outside the engine, at a 10 percent
+weight the limit changed the held book once in sixteen years and clipped three target rows, and at 20 percent the
+5- and 16-year results were identical with and without it (section 3). Two things are not in AFTS. A fifth reading, net leverage, with its
+own limit of 5.5: like Carver's gross reading it needs no volatility estimate, here applied to direction; it is a
+plain signed sum of notional weights, so the low-volatility rates and FX positions dominate it, and it does not
+measure the book's one-way market risk (Carver's finer form, leverage limits by asset class, footnote 292, is not
+built); it is a limit enforced by a cut on the days it binds, never a target, its level set by his
+99th-percentile method, and on the conservative book's sixteen-year backtest at the limits in force it was the
+binding term on 54 of the 193 cut cycles. And the rule for thin windows (below 21 complete dates the
 covariance readings are blind and the leverage readings still apply, and a contract with fewer than 120 returns is
 left out of the two covariance readings), so that a new listing does not blind the book.
 
@@ -936,11 +1085,18 @@ reached -3.41, and the same rebalance opened the short.
 (`src/optimization/one_pass.cpp`); the sign close. The hold set handed in by the
 runners is described in `include/trade_ngin/optimization/one_pass.hpp`.
 
-**Source.** OURS. The book has neither a hold set nor a band. Its dynamic optimisation starts from a book of zero
+**Source.** OURS. AFTS has neither a hold set nor a band. Carver's dynamic optimisation starts from a book of zero
 every day and only ever takes positions in the direction of the forecast, so, as strategy twenty-five, "Dealing
-with costs: buffering", observes, a forecast that crosses zero takes the whole position off. Our search
-starts from the held book (section 1.13), so the close has to be a rule of its own, and we defer it while the
-opposite forecast is weaker than 2 so that a forecast hovering around zero does not close and reopen a position.
+with costs: buffering", observes, a forecast that crosses zero takes the whole position off. Carver presents that
+full close as a floor on turnover, and his tracking-error buffer is the remedy: under the buffer a wrong-signed
+position moves part of the way toward zero like any other, with no separate close. The separate close here is our
+own departure. A position held against its own forecast is a position the system expects to lose on, and our
+buffer is one lumpy contract wide while our search starts from the held book (section 1.13): without the close a
+wrong-signed row sat against its forecast a median of 4 cycles (longest 217) against 1 (longest 14) with it, on the
+earlier full-size book. Turnover did not rise with the close: 140 round trips a year without it on the
+sixteen-year backtest, 115 with it. The band defers the close while the opposite forecast is weaker than 2, on a
+scale whose average absolute forecast is 10, a weak reading of a sign change; its measured effect on round trips
+is near zero.
 The holds exist because our bars need them (sections 1.2 and 1.3). The band reads the first sleeve's forecast
 (`src/optimization/one_pass.cpp`).
 
@@ -973,7 +1129,7 @@ dates show. A contract whose last close is more than five dates behind the newes
 | `cost_penalty_scalar` (the cost weight) | 100 | `config_template/defaults.json`, `optimization.cost_penalty_scalar` (required on a futures book) |
 | Smallest improvement a step must make | 1e-6 | a constant of the code, `src/optimization/one_pass.cpp` (the config key `optimization.convergence_threshold` is not read by this search) |
 | `max_iterations` (floor on the pass cap) | 100 | `optimization.max_iterations` |
-| Closes behind the covariance | 756 | `kOptimiserBars`, `src/strategy/trend_following.cpp` |
+| Closes behind the covariance | 756 | `kOptimiserBars`, a literal in `src/strategy/trend_following.cpp` (`portfolio.json`'s `covariance_history_prices` and `covariance_stale_dates` do not reach this search) |
 | Stale rule, minimum common returns, filled variance | 5 dates, 20, 0.01 | `src/optimization/one_pass.cpp` |
 | Cost of one contract c_i | the cost model's price of a one-contract fill at the signal close (section 1.16) | `src/portfolio/portfolio_manager.cpp` |
 
@@ -1004,13 +1160,32 @@ The design comment is `include/trade_ngin/optimization/one_pass.hpp`. See
 portfolio" defines the tracking error between the whole-contract book and the unrounded one in portfolio weights;
 "The greedy algorithm" adds or removes one contract at a time and keeps the best step; "Dealing with costs: a cost
 penalty" adds the cost of trading from the held book, multiplied by 50, and says of that multiplier that "any
-number between 10 and 100 will give very similar results". Three things differ. The cost weight is 100, the top of
-that range, because on a book this small the cost weight is the setting that governs how often the book trades.
-The search starts from the held book and can step either way, where the book starts each day
-from a book of zero and only adds in the direction of the target; from the held book a holding that is already
-right costs nothing to keep. And the covariance is a sample covariance
-of 756 daily closes where the book uses its 32-day volatility with correlations from six months of weekly returns:
-one estimator from the series the engine already holds.
+number between 10 and 100 will give very similar results" (p.428). Three things differ. The cost weight is 100, the
+top of that range. The cost penalty is the one lever that reliably cuts this book's churn toward its bar of about
+150 round trips a year, and it stops at 100 because above Carver's range trading collapses onto the cheapest
+instruments, as he warns (p.430): on a reference model run outside the engine (2026-10-05), livestock was in a
+position on 2 percent of the sixteen years' days at 300, against 68 percent at 50. The bar is set near what the
+long-only book already traded (111 to 167 round trips a year), because the excess trading was resizes: the book's
+round trips per traded instrument (3 to 11 a year) were already in the range Carver expects. The weight is the price the search puts on cost against tracking error, the book's cost budget: at 100
+the search trades only where a whole-contract step removes tracking error worth more than 100 times the trade's cost
+over the sizing capital, the most weight on cost Carver's range allows. The size of the book does not set it: a
+contract's tracking-error term and its cost term both scale as one over the capital, so the trade-off does not depend
+on it. The data: fewer round trips at 100 than at 50 on the 2-, 5- and 16-year windows.
+The search starts from the held book and can step either way, where Carver's starts each day
+from a book of zero and only adds in the direction of the target. Carver's cost penalty is already measured from
+the held contracts, so the difference is where the greedy path starts: from zero it rebuilds a lumpy book each day,
+and two nearly equal answers can flip from one day to the next; from the held book a holding stays unless moving it
+lowers the objective. And the covariance is a sample covariance
+of 756 daily closes where Carver uses his 32-day volatility with correlations from six months of weekly returns.
+The window length was set on 2026-09-21: an equal-weight sample's answer moves with its length, and 756 closes kept
+the optimiser on the same prices the trend sleeve then held for itself (its own history was capped at 756 prices).
+The three-year equal-weight sample moves slowly, so the search's substitutions and the one-contract risks that set
+the buffer change little from day to day; Carver's estimator follows recent risk, so the substitutions and the
+buffer move with each change in volatility. Keeping the sample over Carver's estimator is a measured result, not a
+design reason. Data, paired
+by start over five windows (2, 5, 10 and 16 years and the last year): with Carver's optimiser covariance alone the
+Sharpe was about level on the 2-year, the 10-year and the last year, 0.13 lower on the 5-year and 0.15 lower on the
+16-year.
 
 ### 1.14 The buffer, the rounding, the clip and the trim
 
@@ -1045,8 +1220,8 @@ a band narrower than one contract's risk would trade on every rounding flip.
 | Setting | Value | Where |
 |---|---|---|
 | `b_sigma_floor` | 0.05, a ratio to tau | `config_template/defaults.json`, `optimization.b_sigma_floor` (required on a futures book) |
-| `trim_max` | 5 | `config_template/portfolios/conservative/risk.json`, `modules[0]` |
-| `per_name_cap` | 2 | same |
+| `trim_max` | 5 (BASE: 5) | `config_template/portfolios/conservative/risk.json`, `modules[0]`; BASE's in `config_template/portfolios/base/risk.json` |
+| `per_name_cap` | 2 (BASE: 2) | same |
 | Rounding | nearest, a half away from zero | `one_pass::round_half_away`, `src/optimization/one_pass.cpp` |
 
 **Worked example.** The chain, the same rebalance as section 1.13. From the run's `OPTIMISER` line: TE_h =
@@ -1091,20 +1266,31 @@ rounded back to the held book, so the run dated 2026-05-02 stored no fill (`one_
 the rounded book; OURS for the trim. The buffer's shape is strategy
 twenty-five, "Dealing with costs: buffering": measure the tracking error of the held book against the optimised
 one without the cost term, do nothing inside a band, otherwise trade the fraction (T - B) / T of the way and round;
-the book sets the band at 5 percent of the risk target, 1 percent, which is our floor. What differs is the second
+Carver sets the band at 5 percent of the risk target, 1 percent, which is our floor. What differs is the second
 term: the band is never narrower than the risk of the largest single contract in the book. The reason is contract
-size on a 500,000 book, where one contract of a large future carries many times the 1 percent band. The clip is the
+size on a 500,000 book, where one contract of a large future carries many times the 1 percent band; at full size
+the fixed 1 percent band made 337 to 454 round trips a year. The clip is the
 cap read once more after the rounding, because rounding can put a row over a cap its target was under. The trim
-is not in the book, whose overlay scales every position and stops there; ours exists because rounding and held
+is not in AFTS, whose overlay scales every position and stops there; ours exists because rounding and held
 rows can leave the stored book over a limit the target was under.
 
 ### 1.15 Rolls
 
-**What it does.** When the vendor's series moves to the next contract, the position is rolled: it is held through
-the change bar, and once the next bar confirms the switch, two ROLL fills are booked, one closing the old contract
-and one opening the new. The price gap between the two contracts is never booked as profit or loss.
+**What it does.** When the book moves from one contract to the next, the position is rolled: two ROLL fills are
+booked, one closing the old contract and one opening the new. The price gap between the two contracts is never
+booked as profit or loss.
 
-**The rule.**
+**The rule with `per_contract_rolls` on, as in the template.** The roll rule of section 1.3 names the roll bar. A
+crossover or deadline roll is known on its own bar: on it each sleeve holding the contract gets the two ROLL fills
+at its held quantity, both priced at that bar's two closes (the old contract's and the new one's), and the bar's
+P&L is the old contract's own move. A vendor switch waits for its confirming bar: the switch bar is held, and if the
+next bar confirms it, the two legs are booked on the confirming bar's cycle (live ids dated the confirming bar),
+priced at the switch bar's two closes; if not, nothing rolled. The gap is
+stored beside the roll (migration 040) and never booked. Each leg is priced by the cost model as an outright trade,
+an upper bound, and ROLL fills are counted, netted and reported as below. The full rule, its cases and worked rolls
+are in `FUTURES_ROLLS.md`.
+
+**The rule on the vendor's series (`per_contract_rolls` off).** The worked example below is of this case.
 
 - On a change bar the contract is held (section 1.12) and its P&L for that bar is 0: the step is the gap between
   two contracts, and the held contract's own move that day is not known from a continuous series.
@@ -1150,10 +1336,11 @@ in all, which is that day's stored `daily_roll_costs`. With the one STRATEGY fil
 `src/live/live_pnl_manager.cpp`. See `FUTURES_ROLLS.md`.
 
 **Source.** CARVER, ADAPTED for the cost; OURS for the mechanics. Counting a roll as two separate trades, each
-paying its own costs, is the book's own conservative assumption in its cost arithmetic (strategy nine, "Removing
+paying its own costs, is Carver's own conservative assumption in its cost arithmetic (strategy nine, "Removing
 expensive trading rules"), and Tactic one, "Contract selection and rolling", section "How to roll to a new expiry
-date", describes rolling with individual legs and says a spread trade is cheaper. The mechanics are ours, because
-the book chooses its own roll dates from the prices of each dated contract and we follow the vendor's switch on a
+date", describes rolling with individual legs and says a spread trade is cheaper. The mechanics are ours. With
+per-contract rolls the book holds each dated contract's own bars, as Carver's method does, and our roll rule sets the roll
+bar and the target contract (`FUTURES_ROLLS.md`). On the vendor's series we follow the vendor's switch on a
 continuous series: the hold through the change bar, the confirmation on the next bar, the zero P&L on the change
 bar and the legs' prices.
 
@@ -1173,7 +1360,8 @@ the size of the trade against that day's volume. The same model prices the one-c
   minimum and maximum ticks) x tick size, where share is the part of the quoted spread paid: 0.25 on the four rate
   contracts and the nine FX contracts, 0.5 on every other contract
 - participation = abs(q) / V, at most 0.10, where V is the volume of the signal bar itself (with the weekend's
-  thin bars merged into the session beside them)
+  thin bars merged into the session beside them); with `per_contract_rolls` on, the held contract's own volume, so
+  MGC and SIL, which take GC's and SI's spread and impact cap, pay impact on their own thinner volume
 - impact, in basis points = k x sqrt(participation), with k = 10 when V is above 1,000,000, 20 above 200,000,
   40 above 50,000, 60 above 20,000, else 80; capped at the contract's maximum impact
 - impact, in price units = impact in basis points / 10,000 x P
@@ -1232,11 +1420,12 @@ on is described in `include/trade_ngin/live/futures_cost_feed.hpp`. The cost aft
 `transaction_cost::net_cost` (`include/trade_ngin/transaction_cost/netting.hpp`) and
 `transaction_cost::add_net_costs` (`src/transaction_cost/netting.cpp`).
 
-**Source.** OURS. The book costs a trade as the commission plus half the bid-ask spread, turned into Sharpe-ratio
-units for its speed limits (strategy three, "Risk adjusted costs"), and notes that a large trader must also
-estimate market impact. Our model keeps those two parts, takes the commission from the broker's schedule per
-contract, widens the spread with volatility and adds an impact term on the day's own volume, so that a thin bar
-costs more to trade than a full session. The fee is the broker's own schedule per contract, so the fee charged is
+**Source.** OURS. Carver costs a trade as the commission plus half the bid-ask spread, turned into Sharpe-ratio
+units for his speed limits (strategy three, "Risk adjusted costs"); his backtest charges the current cost per
+contract, adjusted for the volatility of each historical period (strategy five), and he notes that a large trader
+must also estimate market impact. Our model keeps the commission and the spread, takes the commission from the
+broker's schedule per contract and widens the spread with volatility; what it adds is the impact term, on the day's
+own volume, so that a thin bar costs more to trade than a full session. The fee is the broker's own schedule per contract, so the fee charged is
 the one paid, and cost totals are after netting between the sleeves of one book because that is what the account
 pays.
 
@@ -1326,7 +1515,7 @@ and the curve by `save_equity_curve`. Live: `LiveHistoricalMetricsCalculator::ca
 `build_statistics_series`; the row is first written by `LiveResultsManager::save_live_results` (`src/storage/live_results_manager.cpp`) and finalised by the next
 day's run (`LIVE_RUN_CYCLE.md`). The `risk_detail` column is `migrations/020_risk_detail.sql`.
 
-**Source.** OURS. These are the engine's own reporting conventions. The book reports its strategies on fixed
+**Source.** OURS. These are the engine's own reporting conventions. Carver reports his strategies on fixed
 capital with non-compounded
 percentage returns, annualises by 256 business days and reads the Sharpe ratio on that base; the stored columns
 are compounded returns of the account on the statistics grid, annualised by K (311.0574 futures, 252 equities).
@@ -1334,32 +1523,33 @@ Section 4 says which base to read each measure on.
 
 ---
 
-## 2. Where we depart from the book
+## 2. Where we depart from Carver
 
-One row per departure: what the book does, what we do, why, and whether it changes live trading. The Source line
-of the section named in each row gives the book's citation.
+One row per departure: what Carver does in AFTS, what we do, why, and whether it changes live trading. The Source
+line of the section named in each row gives the citation.
 
-| # | Stage | What the book does | What we do | Why | Changes live trading |
+| # | Stage | What Carver does | What we do | Why | Changes live trading |
 |---|---|---|---|---|---|
-| 1 | Universe (1.1) | Sizes each contract over its whole price history; its data set backfills some micro contracts with the larger contract's prices | The E-mini is traded before 2019-05-06, the micro from it, with a switch at the day's target | Only contracts that were listed could be held | No (a live run trades no predecessor) |
-| 2 | Universe (1.1) | No such case | A vendor id change that is not a roll is read as the old id | A relabel booked as a roll charges two legs and drops a day's move | Yes |
+| 1 | Universe (1.1) | Sizes each contract over its whole price history; its data set backfills some micro contracts with the larger contract's prices | The full-size contract is traded before a micro's listing date (the E-minis before 2019-05-06, GC before 2010-10-04, SI before 2013-06-17), the micro from it, with a switch at the day's target | Only contracts that were listed could be held | No (a live run trades no predecessor) |
+| 2 | Universe (1.1) | No such case | On the vendor's series, a vendor id change that is not a roll is read as the old id; with per-contract rolls the list is not read and the roll rule reads the change as a change of price source between two contracts of the same expiry, with no legs and no cost | A relabel booked as a roll on the vendor's series charges two legs and drops a day's move | No, while `per_contract_rolls` is on |
 | 3 | Bars (1.2) | One usable price per business day | A per-symbol session classifier; junk bars withheld, missing bars held | Our feed has Sunday rows, stubs and corrupt prints | Yes |
-| 4 | Prices (1.3) | Back-adjusts from the prices of each dated contract and trades through the roll | Back-adjusts a continuous series at the vendor's switch; the change bar's return is 0 | No per-contract bars | Yes |
+| 4 | Prices (1.3) | Back-adjusts from the prices of each dated contract and trades through the roll | With per-contract rolls (the template), the same: each dated contract's own bars, the gap taken between the two contracts' closes on the roll bar, on the roll bar our rule sets. On the vendor's series, back-adjusts at the vendor's switch and the change bar's return is 0 | The roll bar and target are our rule's (`FUTURES_ROLLS.md`) | Yes |
 | 5 | Volatility (1.4) | Mean-centred daily standard deviation x 16; no seed or floor stated; a ten-year long-run average | Annual factor counted from the bars; the same centring, with a seeded and floored variance; a long run of 2,520 consumed bars | Sunday rows make about 300 bars a year; a flat series must not give zero | Yes |
 | 6 | Trend rules (1.5) | Attenuation from the quantile of relative volatility over the whole history, on a trend and carry strategy | Quantile of the short volatility against its trailing 2,520 values, on trend alone | One fixed window, no second average | Yes |
-| 7 | Rule removal (1.6) | Removes a rule where its cost exceeds 0.15, from its own costs and its table of turnovers | The same rule, limit and table of turnovers; our engine's 16-year median cost per contract and the rolls it confirms; a fixed, reviewed list | The procedure is the book's; the costs must be the ones this engine charges | Yes |
-| 8 | Slow rule (1.7) | Advises against adjustments that treat long and short differently | An equity index short needs both slow speeds negative | A fast-only short against a slow uptrend bets against the drift | Yes |
+| 6a | Carry (1.6a) | Trend and carry blended at table 51's weights | The same rules and blend, built and switched off | Not yet tuned on the data the book trades: carry needs two real contract prices of the same date, which only the per-contract bars give, and the second contract is missing on many dates (UB has one on 55.4 percent of dates, 6M on 66.0 percent); it was measured while the continuous series still had holes and with stand-in gold and silver micro prices, and the final retune ran with carry off (section 1.6a) | No (off) |
+| 7 | Rule removal (1.6) | Removes a rule where its cost exceeds 0.15, from its own costs and its table of turnovers | The same rule, limit and table of turnovers; our engine's 16-year median cost per contract and the rolls it confirms; a fixed, reviewed list | The procedure is Carver's; the costs must be the ones this engine charges | Yes |
+| 8 | Slow rule (1.7) | Advises against adjustments that treat long and short differently | An equity index short needs both slow speeds negative | Adopted on 2026-10-05 on this book's record: 113 of 190 equity-index shorts were opened on the fast speeds alone, and equity shorts as a whole lost 121,403 over sixteen years, which fits Carver's finding that equities are the weakest trend class (median Sharpe 0.03, strategy nine, table 37); a declared departure, since Carver declines asymmetric adjustments as not statistically significant (strategy twelve, p.268) | Yes |
 | 9 | Weights (1.8) | Equal shares by asset class, then by group, then by instrument | One layer by metadata sector, with a 50 percent cap on one contract's share of its sector | The metadata carries one sector field; a one-contract sector must not take a whole share | Yes |
-| 10 | Sizing capital (1.9) | Reports its backtests on fixed capital; for a live account offers full compounding and half compounding | Half compounding, in the backtest as in live | The backtest and the live book size on the same capital | No (the difference is in the backtest; a live run sizes by one of the book's two forms) |
+| 10 | Sizing capital (1.9) | Reports its backtests on fixed capital; for a live account offers full compounding and half compounding | Half compounding, in the backtest as in live | The backtest and the live book size on the same capital | No (the difference is in the backtest; a live run sizes by one of Carver's two forms) |
 | 10a | Target (1.10) | The position formula with no bound on the volatility | The sizing volatility is kept inside [0.01, 1.0]; a forecast that is not a number sizes at 0 | A volatility near zero would give an unbounded target | Yes |
-| 11 | Overlay (1.11) | Four readings; limits 1.5, 3.75 and 3.25 times the target and leverage 20, each the rounded 99th percentile of the reading's history on its own portfolio; scales every position | Five readings (net leverage added); limits 2.25, 4.5 and 4.0 times the target, 8.0 and 6.0, fixed in `risk.json`; held rows not scaled; the covariance is a sample covariance of 252 dates of daily returns where the book uses its 32-day volatility with correlations from weekly returns; the jump volatility is taken over the trailing 2,520 values of the engine's short estimate; a contract with fewer than 120 returns is out of the two covariance readings; a blind day keeps the two leverage readings | The book sets each limit from the history of its own portfolio and notes that another set of instruments calls for other limits; our book holds rows it may not trade | Yes |
-| 12 | Per-name cap (1.11) | Three position limits: at the maximum forecast, at a maximum leverage, and by open interest | The leverage limit only, at 2, on the target, in the search and on the rounded book | The other two overlap it or do not bind at this size | Yes |
-| 13 | Holds and the sign close (1.12) | No holds; a position closes in full when its forecast changes sign | Non-session, missing and change bars are held; a held contract's target is set to its holding, so no other contract stands in for it; the sign close waits until the opposite forecast reaches 2; a contract that stops signalling is closed with one fill | Our bars need the holds; a forecast near zero should not close and reopen | Yes |
-| 14 | Search (1.13) | Greedy from a book of zero each day; cost multiplier 50 | Greedy from the held book, steps either way; cost multiplier 100 | A holding that is already right costs nothing to keep; the cost weight governs how often a small book trades | Yes |
-| 15 | Search covariance (1.13; the overlay's covariance is in row 11) | 32-day volatility with correlations from six months of weekly returns | Sample covariance of 756 daily closes | One estimate from the series the engine already holds | Yes |
+| 11 | Overlay (1.11) | Four readings; limits 1.5, 3.75 and 3.25 times the target and leverage 20, each the rounded 99th percentile of the reading's history on its own portfolio; scales every position | Five readings (net leverage added); limits 1.75, 4.75 and 3.0 times the target, 7.25 and 5.5, fixed in `risk.json` and set by Carver's method on this book's own sixteen-year history, rounded to the nearest 0.25; held rows not scaled; the covariance is Carver's own form (volatility with weekly correlations over 26 weeks) on the engine's sizing volatility, with the weeks from each contract's last 300 bars; the jump volatility is taken over the trailing 2,520 values of the engine's short estimate; a contract with fewer than 120 returns is out of the two covariance readings; a blind day keeps the two leverage readings | Carver sets each limit from the history of his own portfolio and notes that another set of instruments calls for other limits; the covariance is his estimator for the overlay (section 1.11); our book holds rows it may not trade | Yes |
+| 12 | Per-name cap (1.11) | Three position limits: at the maximum forecast, at a maximum leverage, and by open interest | The leverage limit only, at 2, on the target, in the search and on the rounded book | By design, not on its numbers (decided 2026-10-05): the cap of 2, Carver's own example value, already bounds each name, so the maximum-forecast limit at a chosen 10 or 20 percent weight would be a second, overlapping per-name cap. The cap bounds notional where Carver's limit bounds a name's share of risk; the overlay's risk limits bound the book's risk as a whole. The open-interest limit does not bind at 500,000, and the book holds no open-interest data. As support, on a reference model run outside the engine the limit changed the held book once in sixteen years (section 3) | Yes |
+| 13 | Holds and the sign close (1.12) | No holds; the greedy search from zero closes a position in full when its forecast changes sign, and the tracking-error buffer then moves a wrong-signed position like any other, with no separate close | Non-session, missing and change bars are held; a held contract's target is set to its holding, so no other contract stands in for it; the sign close waits until the opposite forecast reaches 2; a contract that stops signalling is closed with one fill | Our bars need the holds. A position against its own forecast is one the system expects to lose on, and under a buffer one contract wide a wrong-signed row sat against its forecast a median of 4 cycles without the close against 1 with it, with no rise in turnover; the band waits while the opposite forecast is under 2, a weak reading of a sign change (section 1.12) | Yes |
+| 14 | Search (1.13) | Greedy from a book of zero each day; cost multiplier 50 | Greedy from the held book, steps either way; cost multiplier 100 | From zero the greedy rebuilds a lumpy book each day and two nearly equal answers can flip; from the held book a holding stays unless moving it lowers the objective. The cost penalty is the one lever that reliably cuts this book's churn toward its bar of about 150 round trips a year; it stops at 100, the top of Carver's range, because above it trading collapses onto the cheapest instruments, as he warns (livestock in a position on 2 percent of days at 300 against 68 percent at 50). Fewer round trips at 100 than at 50 on the 2-, 5- and 16-year windows | Yes |
+| 15 | Search covariance (1.13; the overlay's covariance is in row 11) | 32-day volatility with correlations from six months of weekly returns | Sample covariance of 756 daily closes | The length, set on 2026-09-21: an equal-weight sample's answer moves with its length, and 756 kept the optimiser on the prices the trend sleeve then held. A three-year sample moves slowly, so the search's substitutions and the buffer's one-contract risks change little from day to day. Keeping the sample over Carver's estimator is a measured result (section 1.13) | Yes |
 | 16 | Buffer (1.14) | A band of 5 percent of the risk target (1 percent) | The larger of that and the risk of the largest single contract in the book | One contract of a large future is many times 1 percent of a 500,000 book | Yes |
 | 17 | Trim (1.14) | None | The rounded book, once clipped to the per-name cap (row 12), is trimmed, at most 5 contracts a day, when a reading is over | Rounding and held rows can put the stored book over a limit | Yes |
-| 18 | Rolls (1.15) | Chooses its roll dates; recommends spread trades; counts two trades a roll in its cost arithmetic | Follows the vendor's switch; holds the change bar; books two outright legs at full cost on the confirming bar | No per-contract bars; an upper bound on the cost | Yes |
+| 18 | Rolls (1.15) | Chooses its roll dates; recommends spread trades; counts two trades a roll in its cost arithmetic | With per-contract rolls, our roll rule sets the roll bar and the target; two outright legs at full cost, both at the roll bar's two closes. On the vendor's series, follows the vendor's switch, holds the change bar and books the legs on the confirming bar | No per-contract spread data, so an upper bound on the cost; the roll rule is in `FUTURES_ROLLS.md` | Yes |
 | 19 | Costs (1.16) | Commission plus half the spread, risk adjusted | Per-contract broker fee, a spread widened by volatility, an impact term on the day's volume | A thin bar costs more to trade; the fee must be the one paid | Yes |
 | 20 | Netting (1.16) | One strategy per account | Cost totals after netting between the sleeves of one book | It is what the account pays | BASE only |
 | 21 | Statistics (1.17) | Non-compounded returns on fixed capital, 256 business days | Stored columns are compounded account returns on the statistics grid, annualised by K (311.0574 futures, 252 equities) | The engine's reporting convention | No (reporting only) |
@@ -1372,27 +1562,27 @@ These options are not part of the design. Each row says what the option is and w
 
 | Tried | Why not adopted |
 |---|---|
-| Blanket speed cuts: dropping the fastest one, two or three speeds on every contract | The six speeds are the design. A rule is removed only from a contract on which it is too expensive to trade, which is the book's own procedure and what section 1.6 does |
-| Equity index shorts off | The system is long and short by design. The slow rule of section 1.7 is the form in force: it conditions an equity index short on the slow speeds and does not forbid it |
+| Blanket speed cuts: dropping the fastest one, two or three speeds on every contract | The six speeds are Carver's design, each catching trends of a different length. He removes a speed only on a contract where its cost is above his speed limit of 0.15 Sharpe a year, which is what section 1.6 does; a blanket cut also removes speeds where they pay. On the unrounded target book over sixteen years the fast speeds earned 196k of the 270k; on a reference model's sixteen years outside the engine (long and short, fixed 500,000 sizing), cutting 2/8 and 4/16 on every contract saved 2,079 dollars a year of cost (0.4 percent of the account); a speed set chosen on one half of the history did not hold on the other half |
+| Equity index shorts off | Carver's trend strategies are long and short from strategy six on ("Strategy six: Slow trend following, long and short"); turning one asset class's shorts off leaves a standing long bet on that class. The slow rule of section 1.7 is the form in force: it conditions an equity index short on the slow speeds and does not forbid it |
 | A contract-size guard: a contract is not held while one contract's own risk exceeds a set share of the risk target | It takes a contract out of the book when its volatility is highest, and it has no hysteresis, so a contract near the threshold enters and leaves. The per-name cap (1.11) and the one-contract term of the buffer (1.14) are the design's account of contract size |
 | A buffer twice as wide | A wider band lets the held book stand further from its target than the design allows, so the book no longer holds its risk target |
-| Other cost weights in the search: 50 and 200 against 100 | The weight sets how often the book trades. 100 is the top of the range the book gives and is chosen because the book is small; 50 trades more by construction, and a value above 100 is outside the book's range |
-| Sizing capital, proportional drawdown: E = 500,000 x account / the account's peak | Compelling, and not adopted: it is not in the book, we did not want to differ from Carver, and we chose the conservative route |
-| Sizing capital, capped account: E = min(500,000, account) | It is not the book's rule: under half compounding a loss from the high-water mark comes off the sizing capital at once, and this form takes nothing off while the account is above the start |
-| Sizing capital, half rate: only half of the drawdown comes off the start | A tuned number with no source in the book |
-| Sizing capital, floor at 75 percent of the start | A tuned number with no source in the book, whose rule lets the capital fall with every loss |
-| Sizing capital, yearly reset to the start | A tuned rule with no source in the book: it restores size on a calendar date and not on recovered profit |
-| Sizing capital, fixed 500,000 | The book warns against running real money on fixed capital, because size must fall after a loss |
+| Other cost weights in the search: 50 and 200 against 100 | The weight is the price the search puts on cost against tracking error, the book's cost budget, and the one lever that reliably cuts this book's churn toward its bar of about 150 round trips a year. 50 puts less weight on cost and trades more: on a reference model run outside the engine, 316 round trips a year over sixteen years against 250 at 100. A value above 100 is outside Carver's range of 10 to 100, and there trading collapses onto the cheapest instruments, as he warns: on the same model livestock was in a position on 2 percent of the days at 300, against 68 percent at 50 (section 1.13) |
+| Sizing capital, proportional drawdown: E = 500,000 x account / the account's peak | It cuts the sizing capital by the drawdown's share of the peak account, where half compounding cuts it by the full dollar loss, so after a large gain it keeps more risk on through a drawdown; Carver's form for a live account is half compounding (Tactic three). Over eighteen 5-year windows its account drawdown was deeper in 13 (median +1.9 points), and its Sharpe was higher in 8 of the 18 (median difference -0.01) |
+| Sizing capital, capped account: E = min(500,000, account) | It is not Carver's rule: under half compounding a loss from the high-water mark comes off the sizing capital at once, and this form takes nothing off while the account is above the start |
+| Sizing capital, half rate: only half of the drawdown comes off the start | A tuned number with no source in AFTS |
+| Sizing capital, floor at 75 percent of the start | A tuned number with no source in AFTS, whose rule lets the capital fall with every loss |
+| Sizing capital, yearly reset to the start | A tuned rule with no source in AFTS: it restores size on a calendar date and not on recovered profit |
+| Sizing capital, fixed 500,000 | Carver warns against running real money on fixed capital, because size must fall after a loss |
 | A flat fee of 1.50 per contract in place of the per-contract fees | Fees follow the broker's per-contract schedule. The fee is an input to the trade decision, and a flat 1.50 prices an equity index micro at more than twice its fee and every other contract below its fee |
-| Other account sizes | The book is built for 500,000 |
-| Switching other contracts to micro or mini sizes | The contract set of section 1.1 is the design. With small contracts the no-trade band falls toward its floor, because it is sized by the risk of one contract, and the book trades every small change in its targets. The four equity index micros are a different matter: they are in the universe, from their listing date |
-| The book's per-instrument position limit at the maximum forecast | The per-name cap already bounds each contract, so this would be a second, overlapping per-name bound on a chosen weight |
-| The book's own overlay limits (1.5, 3.75 and 3.25 times the target) | They are the limits of the book's own portfolio, and the book notes that another set of instruments calls for other limits (section 2, row 11) |
+| Other account sizes | The book is sized on the account it trades, 500,000 |
+| Switching other contracts to micro or mini sizes | The contract set of section 1.1 is the design. With small contracts the no-trade band falls toward its floor, because it is sized by the risk of one contract, and the book trades every small change in its targets. The four equity index micros and the gold and silver micros are the exceptions in the universe, from their listing dates: one GC contract weighs about 0.9 of the sizing capital and one SI about 0.7, so at full size the per-name cap let the book hold at most two of either |
+| Carver's per-instrument position limit at the maximum forecast | Not built, by design and not on its numbers (decided 2026-10-05). The per-name cap of 2, Carver's own example value for a leverage limit, already bounds each name, so his limit, which he keeps under dynamic optimisation at a chosen nominal 10 or 20 percent weight (Tactic four, "Position limits and dynamic optimisation"), would be a second, overlapping per-name cap on a picked parameter. The two bound different things: the cap bounds a name's notional weight (at the cap of 2 a contract with 40 percent volatility carries 0.8 of risk against a target of 0.2), where Carver's limit bounds a name's share of the risk; the overlay's risk limits (1.11) bound the risk of the book as a whole. The open-interest limit does not bind at 500,000, and the book holds no open-interest data. As support, from a reference model run outside the engine: at a 10 percent weight the limit changed the held book once in sixteen years (heating oil, 2 to 1 contracts, 2022-03-08, which took that half-compounded run's worst day from -10.9 to -6.7 percent) and clipped three target rows; at 20 percent the 5- and 16-year results were identical with and without it |
+| Carver's own overlay limits (1.5, 3.75 and 3.25 times the target) | They are the limits of his own portfolio, and he notes that another set of instruments calls for other limits (section 2, row 11) |
 | Sector caps: a limit on the number of contracts held per sector | A cap on the count lowers the risk held, so the book no longer holds its risk target. The balance between sectors is already in the instrument weights (1.8) |
 | Search hysteresis: the search pays a multiple of a contract's own risk to trade it | A second trading threshold on top of the cost term and the buffer, and one under which a contract whose own risk is large against the account is seldom or never traded |
-| The book's own buffer width: a fixed 1 percent (0.05 x the risk target) with no one-contract term | One contract of a large future is many times 1 percent of a 500,000 book, so a band that narrow trades on rounding flips |
+| Carver's own buffer width: a fixed 1 percent (0.05 x the risk target) with no one-contract term | One contract of a large future is many times 1 percent of a 500,000 book, so a band that narrow trades on rounding flips: at full size it made 337 to 454 round trips a year |
 | A one-step trim: a reduction of two or more contracts is delivered in one trade and a one-contract gap is held | A second, per-contract delivery rule on top of the whole-book buffer |
-| A roll back-refusal: refuse a vendor switch back into the contract just rolled out of | The rule cannot tell a whipsaw from an early switch, and a refused switch leaves a contract held under an id the vendor's series has left. The engine follows the vendor's switch (1.15) |
+| A roll back-refusal on the vendor's series: refuse a vendor switch back into the contract just rolled out of | The rule cannot tell a whipsaw from an early switch, and a refused switch leaves a contract held under an id the vendor's series has left. With per-contract rolls the roll rule never rolls back and ignores one-bar strays (1.3) |
 | Other switch-day rules for a listing date: close and let the pass reopen; carry ten for one; carry only held pairs to target | Opening at the day's target shows one exit and one entry at the signal's own size |
 
 ---
@@ -1402,7 +1592,7 @@ These options are not part of the design. Each row says what the option is and w
 **The book is built for 500,000.** At that size most targets are a fraction of a contract, so the book is limited
 to the contracts that fit, and the no-trade band is sized by the risk of one contract (section 1.14).
 
-**One backtest is one path.** A whole-contract book at 500,000 is a sequence of single-contract decisions, and
+**A result depends on its start date.** A whole-contract book at 500,000 is a sequence of single-contract decisions, and
 moving the start of a window by a month or two deals those decisions differently. A result is therefore read
 across the standard windows and across start dates, never from one run. A difference between two settings that is
 smaller than the difference between two start dates of the same setting is not a finding.
@@ -1421,7 +1611,7 @@ clock when the key is absent; `src/core/config_loader.cpp`), and the first 256 r
 
 A result is labelled with the window's first traded day and its end date (for the backtest used in this document:
 first sized signal bar 2011-08-04, stored on the row dated 2011-08-05; end 2026-10-07). A window that trades before
-2019-05-06 holds E-minis before that date (section 1.1).
+2019-05-06 holds E-minis before that date, and one that trades before 2013-06-17 holds SI (section 1.1).
 
 **Which base each measure is read on.**
 

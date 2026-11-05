@@ -2,32 +2,36 @@
 
 What this folder does: it takes production from the old futures setup to the released one. It loads micro gold (MGC) and
 micro silver (SIL), fills the missing continuous rows, and re-seeds the CONSERVATIVE book's stored backtests and live
-history on the merged engine. It runs once, at the release (AlgoGators/trade-ngin#270), by one operator, in one sitting.
+history on the merged engine. It runs once, at the release (AlgoGators/algogators#180), by one operator, in one sitting.
 
-**Already done on production (2026-10-30):** step 03 (migration 040) and step 05 (part A: 47,790 MGC and SIL contract
-rows to 2026-10-26, and 2 metadata rows), and the rewording of those 2 rows' notes, which `load/load_micro_metals.sql`
-now writes as stored. Do not run them again: part A refuses a second run.
+**Not in the order below:** step 03 (migration 040) and step 05 (part A: 47,790 MGC and SIL contract rows to 2026-10-26,
+and 2 metadata rows, with those rows' notes as `load/load_micro_metals.sql` writes them) are applied to production ahead of
+the release. Do not run them again: part A refuses a second run.
 
 ## Prerequisites
 
 Run `zsh scripts/futures_release/00_prerequisites.sh` first. It checks everything in this list that a machine can check.
 
-- AlgoGators/trade-ngin#282 is merged, and it reached this repository in #98. `REF` below is the commit on `main` of AlgoGators/algogators that the daily image is built from at the release. Use one `REF` for the image and the seed, so the seed's engine is the daily engine. It must hold this folder as audited. A commit id from AlgoGators/trade-ngin does not exist here.
+- AlgoGators/trade-ngin#282 is merged, and it reached this repository in AlgoGators/algogators#98. `REF` below is the commit on `main` of AlgoGators/algogators that the daily image is built from at the release. Use one `REF` for the image and the seed, so the seed's engine is the daily engine. It must hold this folder as audited. A commit id from AlgoGators/trade-ngin does not exist here.
 - `config/defaults.json` has the production login. It is read at run time and never printed.
 - `config/databento.env` has the Databento key (the pull).
-- macOS or Linux (on Windows, WSL), with zsh, `zstd`, `curl`, `git`, `shasum`, cmake and the engine's build tools.
+- macOS or Linux (on Windows, WSL), with zsh, `zstd`, `curl`, `git`, `shasum`, cmake and the engine's build tools. One
+  line is macOS-only: the engine record that 09 and 11 write (`engine.txt`) hashes `libtrade_ngin.dylib` (`engine_line`,
+  `lib.zsh`). On Linux the library is `libtrade_ngin.so`, so `shasum` reports the file missing and the record holds the
+  runner's hash with no library hash.
 - Python 3 with **pandas** and **numpy** (the live report imports both; tested with pandas 3.0.0 and numpy 2.4.1). Every
   other Python file uses the standard library only.
 - `psql`, `pg_dump` and `pg_restore` matching the server, found on `PATH` or in `PGBIN`.
 - `RUN_DIR`, default `<repository>/futures_release_run`, not tracked: every log, archive and result goes there. It holds
-  bought bars (the pull, the built rows, each run's ledger): never commit it. Set it once with `export RUN_DIR=<folder>` if
+  licensed vendor bars (the pull, the built rows, each run's ledger): never commit it. Set it once with `export RUN_DIR=<folder>` if
   you want another place, and keep it for every step.
 - `S=scripts/futures_release` in your shell, and every command run from `services/trade-ngin/`.
 
 ## Before the seed: the fees
 
-SIL's exchange fee is still to confirm (0.60, so 0.86 per contract, is a value from an older notice; MGC's 0.96 is confirmed).
-Confirm it from CME's fee schedule or the charge on a SIL fill **before step 13**. The search reads the fee, so a different
+MGC's fee, 0.96 per contract, is Interactive Brokers' schedule. SIL's, 0.86, carries an exchange fee of 0.60 from CME notice
+SER-8425, because the broker's schedule lists no SIL row (`load/load_micro_metals.sql`). Check SIL's exchange fee against
+CME's fee schedule or the charge on a SIL fill **before step 13**. The search reads the fee, so a different
 fee makes a different whole-contract book from the first traded day. It also sits in the metadata row, so it changes the
 metadata fingerprint. If the fee changes, the reference anchors must be remeasured first, and `EXPECTED.md`,
 `sql/expected_fingerprint.txt` and the live reference in `11_live_chain.sh` rewritten from the new runs. Do not pass
@@ -50,9 +54,9 @@ takes MGC and SIL in beside GC and SI.
 | 6 | **Stop the QT runs** (below), then read the QT lines | QT desk's owner, then operator | `zsh $S/01_readonly_checks.sh production before_07` |
 | 7 | Part B: MGC.v.0 and SIL.v.0, once, with every day | operator | `ROWS="<folder>/rows" BACKFILL="<folder>" zsh $S/07_micros_part_B.sh production` |
 | 8 | The micros' 8 holes | operator | `zsh $S/08_fill_micros.sh production` (type 8, or more if the list shows holes after 2026-10-23) |
-| 9 | AlgoGators/algogators#85 merges (daily MGC.v.0 and SIL.v.0) | data owner | only after part B: part B refuses once #85 has stored those rows |
+| 9 | AlgoGators/algogators#85 merges (daily MGC.v.0 and SIL.v.0) | data owner | only after part B: part B refuses once AlgoGators/algogators#85 has stored those rows |
 | 10 | The listing pairs in every production futures config, QT's included | QT desk's owner, operator | below |
-| 11 | The merged build on production; `per_contract_rolls` on; **the QT runs restart** | deployment owner, QT desk's owner | below |
+| 11 | `REF` on production: engine-rpc deployed by CI, the cron container's image built by hand; `per_contract_rolls` on; **the QT runs restart** | deployment owner, QT desk's owner | below |
 | 12 | Check the data | operator | `zsh $S/01_readonly_checks.sh production after_data` (`EXPECTED.md`: must equal the fingerprints) |
 | 13 | The backtests: 2y, 5y, 10y, 16y, all on one last bar | operator | `TARGET=production REF=<sha> zsh $S/09_backtests.sh prepare`, then `... run` |
 | 14 | The live reset, archive first | operator | `TARGET=production zsh $S/10_live_reset.sh reset` (type the database name) |
@@ -77,7 +81,7 @@ target also stops when `PGHOST` and `PGPORT` are the server of `config/defaults.
 | 13 or 15 before the data steps, or on other data | 09 and 11 refuse, exit 3 (`sql/expected_fingerprint.txt`) |
 | 15 before 14 | 11 refuses: the book is not empty |
 | Any data step a second time | it refuses, exit 1 or 4 |
-| #84's first daily run before 07 | 07 refuses if the bars pass the backfill (below); nothing prevents the run itself |
+| AlgoGators/algogators#84's first daily run before 07 | 07 refuses if the bars pass the backfill (below); nothing prevents the run itself |
 | 10 or 11 skipped or wrong | **nothing refuses** here; the runners refuse at run time |
 
 **Step 5, the holes after 2026-10-23.** Run it with `476` only. If a hole dated after 2026-10-23 exists, the fill stops at the
@@ -89,13 +93,27 @@ zsh $S/04_fill_holes.sh production 476 <count printed>
 
 Such a hole has no tested ledger behind it; it passes the rule's checks only. 08 takes such holes the same way.
 
+**What the fill writes.** A hole is a missing `<ROOT>.v.0` row inside that symbol's own span, never a Saturday, on a date
+the per-contract table can rebuild. Each filled row is one contract's own bar on that date, chosen by rule B (the
+bracket: the rows before and after the hole name the same contract), else rule C (carry: the contract the row before
+names, when it has a bar), else rule V (volume: the busiest contract of the root, and the raw row's instrument id left
+NULL so the roll rule never reads a vendor switch on that day). The header of `fill/sql/fill_core.sql` states the rule
+in full; `docs/FUTURES_ROLLS.md`, section "2.2a Missing continuous rows: the hole fill", describes the same rule.
+
+**The dry run proves it writes nothing.** 04 and 08 first run the fill's selection, its checks and its counts in one
+transaction that ends with `fill/sql/fill_dryrun_guard.sql`: it sums the rows the session inserted, updated or deleted
+in any permanent table (`pg_stat_xact_user_tables`), raises an error unless the sum is 0, and rolls back. A rule check
+that fails, or a guard that finds a written row, stops the step with nothing written. The insert then runs in its own
+transaction, rebuilds the selection, and rolls back if its rows differ from the dry run's, so data that moved in between
+is never written.
+
 ## Steps 3 to 7 and the daily pull
 
-Steps 3 to 7 must finish before #84's first daily run. Ask the data owner when it runs, and keep clear of it. If a daily pull
+Steps 3 to 7 must finish before AlgoGators/algogators#84's first daily run. Ask the data owner when it runs, and keep clear of it. If a daily pull
 lands during 04 or 07, its fingerprint check can read FAIL after the commit: the step's own rows are in; read the log, and
 do not run the step again.
 
-**If #84's first daily run lands before step 7**, part B refuses with `the continuous rows end before the stored contract
+**If AlgoGators/algogators#84's first daily run lands before step 7**, part B refuses with `the continuous rows end before the stored contract
 rows`, and nothing is written. The way on:
 
 1. Find the last stored contract day: the `last bar` line of `01_readonly_checks.sh`, the `contract` date.
@@ -107,7 +125,7 @@ rows`, and nothing is written. The way on:
 
 The same refusal fires if the pull's last day has a contract bar and no `.v.0` bar. Then delete that root's contract rows of that
 day, which is A2's undo for that one day, and run step 7. The daily pull stores those bars again, and the holes are then 08's or
-#87's.
+AlgoGators/algogators#87's.
 
 ## The QT runs
 
@@ -151,18 +169,40 @@ its own values. To read one back, on that host:
 python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d.get('per_contract_rolls'), [c['symbol'] for c in d.get('listing_dates',{}).get('contracts',[]) if c['symbol'] in ('MGC','SIL')])" config/portfolios/<book>/portfolio.json
 ```
 
-It must print `True ['MGC', 'SIL']`. Steps 13 to 15 do not read these files: they write their own config from
+It must print `True ['MGC', 'SIL']`. Steps 13 and 15 do not read these files: they write their own config from
 `config_reference/`.
 
-**Step 11, the build.** It is `REF`. Build it from a linked worktree, not by checking out `REF` here: that would swap this folder for the one at `REF` while you are running it. The daily jobs then move to `new_algo_data` as AlgoGators/trade-ngin#275 says (its dry run first):
+**Step 11, the build.** It is `REF`. Two containers run the engine in production, from the same `Dockerfile`, and only one
+is deployed by CI.
+
+- **engine-rpc**, the QT path (the QT desk, the catch-up scheduler and every QT model run). Main's quality run builds and
+  tests each commit's engine image, `ghcr.io/algogators/trade-ngin-engine:sha-<commit>`. When `REF` reaches the `prod`
+  branch (a fast-forward of `main`), `.github/workflows/svc-trade-ngin.deploy.yml` takes that image once main's quality run
+  for `REF` has passed (or builds and tests it there when there is none), and runs `deploy/deploy.sh` on the production
+  host with the image's digest. `deploy/deploy.sh` changes only `QT_ENGINE_IMAGE` in engine-rpc's compose project: it
+  checks the image holds the engine, then waits, checking every 30 seconds, while an engine run is going or the New York
+  time is inside 09:00 to 10:15 (the window of the send and the cutoff), and gives up with nothing changed after 45
+  minutes; then it switches the image, and switches back if the new container never becomes healthy. It prints the
+  command that rolls back (`deploy/deploy.sh <previous image>`).
+- **The cron container**, which runs the CONSERVATIVE book's daily run. engine-rpc does not run cron
+  (`deploy/engine-rpc.compose.yml`), and the deploy does not touch this container. Its image is built from `REF` by hand,
+  from a linked worktree, not by checking out `REF` here, which would swap this folder for the one at `REF` while you are
+  running it:
 
 ```
 git worktree add --detach <worktree> <REF>
 docker build -t trade-ngin -f <worktree>/services/trade-ngin/Dockerfile <worktree>/services/trade-ngin
 ```
 
-The QT runs restart on that build, with step 10's configs. Until #275 is done the CONSERVATIVE book has no daily run on
-`new_algo_data`, so the seed's rows stay as they are, and the `first CONSERVATIVE cron day` line of `EXPECTED.md` waits for it.
+The daily jobs then move to the new production database on that image as AlgoGators/algogators#185 says (a new
+production image built from `main`, its dry run first).
+
+The seed uses neither image: steps 13 and 15 build `REF` themselves in a linked worktree, so the seed's engine and the
+daily engine are the same commit.
+
+The QT runs restart on the deployed image, with step 10's configs. Until AlgoGators/algogators#185 is done the
+CONSERVATIVE book has no daily run on the new production database, so the seed's rows stay as they are, and the `first
+CONSERVATIVE cron day` line of `EXPECTED.md` waits for it.
 
 ## Steps 15 and 16: one END
 
@@ -170,6 +210,15 @@ The QT runs restart on that build, with step 10's configs. Until #275 is done th
 `$RUN_DIR/chain_end_production.txt`, and `run`, `check`, `export` and `12_package.sh live` all read it, so a daily bar landing in
 the 3 hours of the chain moves nothing. An `END=` that differs refuses. After a stop, resume with the printed `FROM=<date>` line.
 `12_package.sh backtests` takes the newest finished set, so it is safe across UTC midnight.
+
+## One engine run at a time
+
+09 and 11 take a run lock before each engine run (each backtest window, each live day) and release it after
+(`lock_run` and `unlock_run`, `lib.zsh`). The lock is a file, `$RUN_DIR/locks/RUN_LOCK` unless `RUNLOCK` names another,
+created only if it does not exist, so one run holds it at a time. Each run writes its config into the worktree's
+`config/` while it holds the lock, so two runs never write over each other's config. A second run waits, says once
+whom it is waiting for, and never breaks the lock. A reboot or a killed shell can leave the file behind: if no run is
+going, remove it by hand. An interrupted 09 or 11 removes the config's login file and its own lock.
 
 ## What each step changes and how to undo it
 
@@ -192,7 +241,7 @@ Every script says at its top what it changes, what it reads, how long it takes a
 | `00_prerequisites.sh` | the machine's check |
 | `01_readonly_checks.sh`, `sql/`, `EXPECTED.md` | the read-only checks and the answer each must give; `sql/expected_fingerprint.txt` is what 09 and 11 compare |
 | `03_apply_040.sh` | migration 040 (done) |
-| `04_fill_holes.sh`, `fill/` | the hole fill, with its tested ledger (keys and a hash of each bar; the bought bars are not in the repository) |
+| `04_fill_holes.sh`, `fill/` | the hole fill, with its tested ledger (keys and a hash of each bar; the licensed vendor bars are not in the repository) |
 | `05_preflight.sh`, `05_micros_part_A.sh` | part A (done) |
 | `06_build_backfill.sh`, `06_micros_part_A2.sh`, `07_micros_part_B.sh`, `07_undo_part_B.sh`, `micros_part.zsh`, `load/` | the MGC and SIL load |
 | `08_fill_micros.sh` | the micros' 8 holes (`fill/LEDGER_fill_micros.csv`) |

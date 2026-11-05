@@ -3,9 +3,10 @@
 ## Overview
 
 The data module (`src/data/`) holds the database layer, the connection pool, the credential store,
-the market data bus and the Arrow conversions, and the three pieces that decide what a futures bar
-is: the session classification of a symbol's bar on a date, the futures roll series and the listing
-dates. Headers are in `include/trade_ngin/data/`.
+the market data bus and the Arrow conversions, and the pieces that decide what a futures bar is:
+the session classification of a symbol's bar on a date, the futures roll series, the listing
+dates and, with `per_contract_rolls` on, the per-contract roll rule and the bar source built on it.
+Headers are in `include/trade_ngin/data/`.
 
 ---
 
@@ -22,11 +23,21 @@ data/
 ├── market_data_utils.cpp            # The bar queries (one futures row per symbol and day)
 ├── session_classifier.cpp           # What a symbol's bar, or its absence, is on a date
 ├── roll_series.cpp                  # Contract switches, the back-adjusted series, roll legs
-└── listing_dates.cpp                # Listing dates and vendor id relabels
+├── listing_dates.cpp                # Listing dates and vendor id relabels
+├── contract_bars.cpp                # Reads futures_data.contract_ohlcv_1d (one bar per listed contract)
+├── contract_roll_rule.cpp           # The per-contract roll rule: which contract is held on each date
+├── roll_cycle.cpp                   # The delivery months the rule holds, per root
+├── roll_calendar.cpp                # The futures exchanges' trading calendars (futures_holidays.json)
+├── contract_rolls.cpp               # The roll series of one root, the one call callers make
+├── per_contract_source.cpp          # The bar source with per_contract_rolls on: the held contract's bars
+├── carry_quote.cpp                  # Carry's second contract on each date
+├── report_roll_view.cpp             # What the daily report says about rolls
+├── market_data_source.cpp           # The data-source seam the Python module's backtest uses
+└── postgres_strategy_config.cpp     # The QT desk's settings row (trading.strategy_config)
 ```
 
-The session classifier, the roll series and the listing dates are described in
-[docs/FUTURES_ROLLS.md](../../docs/FUTURES_ROLLS.md) and
+The session classifier, the roll series, the listing dates and the per-contract rolls are described
+in [docs/FUTURES_ROLLS.md](../../docs/FUTURES_ROLLS.md) and
 [docs/DATA_SOURCES_OF_TRUTH.md](../../docs/DATA_SOURCES_OF_TRUTH.md); the design comments at the
 top of their headers are the reference.
 
@@ -57,20 +68,22 @@ Result<std::shared_ptr<arrow::Table>> get_market_data(
     DataFrequency freq = DataFrequency::DAILY,
     const std::string& data_type = "ohlcv");
 
-// Storage operations
+// Storage operations (book is the portfolio_type of the rows: "system", "qt_proposal" or "qt")
 Result<void> store_executions(
     const std::vector<ExecutionReport>& executions,
     const std::string& strategy_id,
     const std::string& strategy_name,
     const std::string& portfolio_id,
-    const std::string& table_name);
+    const std::string& table_name = "trading.executions",
+    const std::string& book = kDefaultBook);   // "system"
 
 Result<void> store_positions(
     const std::vector<Position>& positions,
     const std::string& strategy_id,
     const std::string& strategy_name,
     const std::string& portfolio_id,
-    const std::string& table_name);
+    const std::string& table_name = "trading.positions",
+    const std::string& book = kDefaultBook);
 
 Result<void> store_signals(
     const std::unordered_map<std::string, double>& signals,
@@ -97,16 +110,19 @@ Result<std::unordered_map<std::string, Position>> load_positions_by_date(
     const std::string& strategy_name,
     const std::string& portfolio_id,
     const Timestamp& date,
-    const std::string& table_name = "trading.positions");
+    const std::string& table_name = "trading.positions",
+    const std::string& book = kDefaultBook);
 
 // Metadata
 Result<std::shared_ptr<arrow::Table>> get_contract_metadata() const;
 ```
 
 `data_type` is the base name of the table. The table read is `<schema>.<data_type>_<frequency>`
-(`build_table_name`, `include/trade_ngin/core/types.hpp:586`), so `AssetClass::FUTURES`,
+(`build_table_name`, `include/trade_ngin/core/types.hpp`), so `AssetClass::FUTURES`,
 `DataFrequency::DAILY` and `"ohlcv"` read `futures_data.ohlcv_1d`. Futures symbols are stored with
-the continuous suffix, for example `MES.v.0`.
+the continuous suffix, for example `MES.v.0`. With `per_contract_rolls` on, the futures query hands
+out the held contract's own bar on each of those dates instead, from
+`futures_data.contract_ohlcv_1d` (`include/trade_ngin/data/per_contract_source.hpp`).
 
 `get_market_data` also publishes one `BAR` event per returned row on the `MarketDataBus` unless
 publishing is switched off.
@@ -187,7 +203,10 @@ MarketDataBus::instance().publish(event);
 auto unsubscribed = MarketDataBus::instance().unsubscribe("my_subscriber");   // Result<void>
 ```
 
-`set_publish_enabled(false)` switches publishing off; the backtest does this while it loads data.
+`set_publish_enabled(false)` switches publishing off; the backtest does this while it loads data, and so do the two
+futures live runners while they load bars (`apps/strategies/live_portfolio_conservative.cpp`,
+`apps/strategies/live_portfolio.cpp`), because a bar published during the load would reach the strategies a second time
+when the runner feeds the day itself. The equity runner does not call it.
 
 ---
 
@@ -204,6 +223,77 @@ auto bars = DataConversionUtils::arrow_table_to_bars(arrow_table);   // Result<s
 
 There is no conversion from bars back to a table. The class also carries the type-checked cell
 readers `safe_get_double`, `safe_get_int64` and `safe_get_string`, each returning a `Result`.
+
+---
+
+## Writes: what lands together and what is refused
+
+### Several writes in one transaction
+
+Every write method opens and commits its own transaction. Where two writes must land together or
+not at all, a caller opens a unit of work, passes it to the overloads that take a `DbTransaction`,
+and commits it (`include/trade_ngin/data/postgres_database.hpp`):
+
+```cpp
+auto unit = db->begin_unit_of_work();                       // Result<std::unique_ptr<DbTransaction>>
+if (unit.is_error()) return 1;
+DbTransaction& txn = *unit.value();
+db->store_positions(txn, positions, strategy_id, strategy_name, portfolio_id, "trading.positions");
+audit_log.save_in(txn);                                      // the corporate-action dedup rows
+txn.commit();                                                // destroyed without commit: rolled back
+```
+
+The equity runner uses it twice: the positions a corporate action restated go in with the rows
+that stop the action being applied again (`CorporateActionsAuditLog::save_in`,
+`include/trade_ngin/live/corporate_actions_audit_log.hpp`, which writes them through
+`store_applied_corp_actions`), and the positions a lifecycle event changed with theirs
+(`apps/strategies/live_equity_mean_reversion.cpp`). Split across two transactions, a failure
+between them would leave the positions adjusted with no record, and the next run would apply the
+split or dividend a second time. While a unit is open, a call to a method that opens its own
+transaction on the same connection is refused with an error that says so, instead of failing
+inside the database library. No futures caller opens a unit; the futures runners replace a day's
+executions in one transaction of their own (`replace_roll_day_executions`).
+
+### Names the writers refuse
+
+The methods check the names they are given before any SQL is built
+(`src/data/postgres_database.cpp`, the `validate_*` functions):
+
+| Argument | Refused when |
+|---|---|
+| table name | empty or over 100 characters; any character other than a letter, a digit, `_` or `.`; or it contains, anywhere and in any case, one of `drop`, `delete`, `insert`, `update`, `alter`, `create`, `union`, `select`, `script`, `--`, `/*`, `*/` |
+| symbol | empty or over 20 characters; any character other than a letter, a digit, `_`, `.` or `-`; more than 1,000 symbols in one call |
+| strategy id | empty or over 100 characters; any character other than a letter, a digit, `_` or `-`; two dashes in a row |
+| book (`portfolio_type`) | anything but `system`, `qt_proposal` or `qt` (migration 021) |
+
+The table-name check is a substring match, so an ordinary name that contains one of the words is
+refused: `trading.position_updates` or `backtest.created_runs` cannot be written through these
+methods. Name a new table without them.
+
+### Numbers that are not finite, and typed cells
+
+A number is written as the shortest text that reads back as the same double (15 to 17 significant
+digits), so a stored cell holds the value the engine held (`round_trip_number`,
+`include/trade_ngin/data/finite_statement.hpp`). A NaN or an infinity is never written into a
+statement:
+
+- on a column that may be NULL it is stored NULL, and the writer logs which cells;
+- on a NOT NULL column the whole row is refused, no statement is sent, and the log names the
+  column and the value. The NOT NULL number columns are `daily_roll_costs` and `total_roll_costs`
+  on `trading.live_results`, and `transaction_costs`, `roll_costs` and `total_roll_fills` on
+  `backtest.results`.
+
+The statistics cells of `trading.live_results` (migration 036) travel as text cast to their type,
+which must be one of `numeric`, `integer`, `date`, `text` or `jsonb`
+(`include/trade_ngin/data/live_results_cell.hpp`). The overlay cells of `backtest.equity_curve`
+(migration 037) are written in one multi-row insert, so every point must carry the same columns
+and types in the same order, or none; any other shape refuses the curve
+(`include/trade_ngin/data/backtest_curve_cells.hpp`).
+
+`backtest.final_positions` stores a row with a quantity always; a row closed to zero only on a
+book that keeps closed rows (a cash book) and only when it carries a realised P&L
+(`backtest_position_row_is_stored`, `include/trade_ngin/data/backtest_position_row.hpp`). A
+futures row of a symbol that printed no bar that date carries `row_mark` `NO_BAR` (migration 038).
 
 ---
 
@@ -242,8 +332,8 @@ the placeholders):
 
 ## Usage Example
 
-This is how the runners open the database and read bars (run from the repository root, with
-`./config` in place):
+This is how the runners open the database and read bars (run from the engine's folder,
+`services/trade-ngin/`, with `./config` in place):
 
 ```cpp
 #include "trade_ngin/core/config_loader.hpp"

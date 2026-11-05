@@ -51,7 +51,7 @@ needs step 8 to have run first, and it must run before any persistence or basis-
 | `mean_reversion.cpp` (stop-loss) | COST BASIS | Yes: reads the strategy's own `positions_`, never the day-T map |
 | `LivePnLManager::unrealized_from_cost_basis` | COST BASIS | Yes: guards `average_price <= 0` |
 | `risk_manager.cpp` | MARK | Intended on the target map (see §5). The equity runner's metrics snapshot also reaches it with the day-T rows and no price map (`live_equity_mean_reversion.cpp`), after step 9, so the printed leverage values a position at its cost basis |
-| `margin_manager.cpp` | MARK | Yes on the equity path: the runner passes the T-1 close map (`live_equity_mean_reversion.cpp`) and `average_price` is read only for a symbol absent from it |
+| `margin_manager.cpp` | COST BASIS for the margin line; MARK for the notional | Yes on the equity path: the runner calls it on the day-T rows after step 9 (`live_equity_mean_reversion.cpp`). The margin line is priced at `average_price`, the cost basis, because the margin a cash-account position posts is the cash paid for it; the T-1 close is used only when the basis is not positive. The notional is priced from the T-1 close map the runner passes, and reads `average_price` only for a symbol absent from it (`calculate_margin_requirements`) |
 | `execution_manager.cpp` under `MARK_FALLBACK` | FILL PRICE | Not reached by any runner: the equity and the futures runners all pass `STRICT` |
 
 ---
@@ -100,12 +100,13 @@ needs step 8 to have run first, and it must run before any persistence or basis-
 
 - `RiskManager` reads `average_price` as a mark on the **target map**: `MeanReversionStrategy::get_target_positions()` writes `current_price` there deliberately (`mean_reversion.cpp`), and the stored backtest `average_price` is a mark for the same reason. That is a live, intended reader; the seeded `positions_` are what must never reach it.
 
-Seeding makes `positions_` non-empty in live. Risk and margin read `average_price` as a
-**mark**, so a seeded book reaching them would be valued at cost. It is contained only because:
+Seeding makes `positions_` non-empty in live. Risk reads `average_price` as a
+**mark**, so a seeded book reaching it would be valued at cost. It is contained only because:
 
-- `portfolio_manager.cpp` `get_positions_internal()` has two callers, **both dead**:
-  is documented in-tree as having no production consumer sits inside
-  `get_portfolio_value(const map&)`, which has no callers anywhere.
+- `portfolio_manager.cpp` `get_positions_internal()` has two callers, **both dead**: one, in
+  `process_market_data`, builds a portfolio-level execution diff that is documented in-tree as
+  having no production consumer; the other sits inside `get_portfolio_value(const map&)`, which
+  has no callers anywhere.
 - `MeanReversionStrategy` **overrides** `get_target_positions()`, building from
   `inst_data.target_position`. The base returns `positions_`; had it not overridden,
   seeding would have become the day's targets directly.
