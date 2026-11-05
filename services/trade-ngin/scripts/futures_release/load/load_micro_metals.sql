@@ -75,7 +75,7 @@ SELECT instrument_id, date, root, raw_symbol, expiration, open, high, low, close
 
 -- Metadata: the contract's own size, tick, tick value and fee; everything else as its full-size twin's row, the
 -- margins the twin's divided by the ratio (10, 5). Fees: IBKR's pages of 2026-10-26 as read on that date:
--- 0.25 commission + exchange + 0.01 regulatory; SIL's exchange fee 0.60 is CME SER-8425 (IBKR lists no SIL row).
+-- 0.25 commission + exchange + 0.01 regulatory; SIL's exchange fee 1.10 is NYMEX Submission 26-196, CME SER 9676 (IBKR lists no SIL row).
 INSERT INTO metadata.contract_metadata
   ("Databento Symbol", "IB Symbol", "Name", "Exchange", "Intraday Initial Margin", "Intraday Maintenance Margin",
    "Overnight Initial Margin", "Overnight Maintenance Margin", "Asset Type", "Sector", "Contract Size", "Units",
@@ -97,12 +97,12 @@ FROM (VALUES
    'Fee: IBKR 0.25 commission + 0.70 exchange + 0.01 regulatory (IBKR pages of 2026-10-26).\n'
    'Rolls: GC''s cycle G J M Q Z (V lists but is never the busiest); before 2010-10-04 the book trades GC.\n'
    'CONSUMERS: position sizing, daily P&L, notional, transaction cost.'),
-  ('SIL', 'SI', 5, 'Micro Silver', '1000', '5.00', '0.005', 'JAN, FEB, MAR, APR, MAY, JUN, JUL, AUG, SEP, OCT, NOV, DEC', '0.860',
+  ('SIL', 'SI', 5, 'Micro Silver', '1000', '5.00', '0.005', 'JAN, FEB, MAR, APR, MAY, JUN, JUL, AUG, SEP, OCT, NOV, DEC', '1.360',
    E'[QUOTE=USD_PER_OZ]\nPhysical contract: 1,000 troy ounces (COMEX SIL, Micro Silver; 1/5 of SI), listed 2013-06-17 (CME SER-6658).\n'
    'OHLCV close stored in $/oz directly, as SI.\n"Contract Size" 1000; "Tick Size" 0.005 $/oz; "Minimum Price Fluctuation" 0.005 x 1000 = 5.00.\n'
    'INVARIANT 1 - Notional: notional_USD = quantity x ohlcv_close x "Contract Size".\n'
    'Margins: SI''s divided by 5 at the load (not confirmed against CME''s or IBKR''s page, which refused a scripted read).\n'
-   'Fee: IBKR 0.25 commission + 0.60 exchange (CME SER-8425; IBKR''s COMEX page lists no SIL row) + 0.01 regulatory.\n'
+   'Fee: IBKR 0.25 commission + 1.10 exchange (NYMEX Submission 26-196, CME SER 9676, effective 2026-04-01; IBKR''s COMEX page lists no SIL row) + 0.01 regulatory.\n'
    'Rolls: SI''s cycle H K N U Z (every month lists); before 2013-06-17 the book trades SI.\n'
    'CONSUMERS: position sizing, daily P&L, notional, transaction cost.')
 ) AS m(sym, twin, ratio, name, size, mpf, tick, months, fee, notes)
