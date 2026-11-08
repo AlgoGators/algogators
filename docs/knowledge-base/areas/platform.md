@@ -85,8 +85,10 @@ migration twice to a throwaway Postgres and runs the checks in `tests/sql/`. The
 | `check_workflow_paths.py` | fails when a member has no quality workflow, a workflow has no member, a path filter misses a required input or names a path that does not exist, the gate job is missing, or a workspace lib would not ship with its consumer. Run by `just check-paths` and `meta-workflow-paths.yml` on every PR |
 | `new_service.py` | writes a member's quality and publish workflows (no publish for `platform/`) |
 | `quality_needed.py` | lets a Python member skip its matrix when only `uv.lock` changed and its own dependency closure did not; runs when unsure (#17, `5746599d`) |
+| `check_attribution.py` | fails a PR whose description or commit messages carry AI attribution; run by `meta-attribution.yml` on every PR (#179) |
 | `tests/test_ci_path_filters.py` | checks that filters give the right runs for a set of changed files; run by `meta-workflow-paths.yml` |
 | `tests/test_quality_needed.py` | tests `quality_needed.py`; no workflow runs it, so run `uv run pytest tests` yourself |
+| `tests/test_ci_attribution.py` | tests `check_attribution.py` on the attribution forms found in this repository and in trade-ngin, and on the PR template's own wording; run by `meta-workflow-paths.yml` and `just check-paths` |
 
 Members are found under `libs/`, `apps/`, `services/` and `platform/` by their manifest;
 `CMakeLists.txt` wins over `pyproject.toml`, because trade-ngin's `pyproject.toml` only builds its

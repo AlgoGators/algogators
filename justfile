@@ -107,10 +107,11 @@ contracts:
 migrate-idempotent path:
     @just _dispatch "{{ path }}" migrate-idempotent
 
-# Verify every service's workflow path filters still match reality.
+# Verify every service's workflow path filters still match reality; test the attribution check.
 check-paths:
     uv run python platform/ci/check_workflow_paths.py
     uv run pytest tests/test_ci_path_filters.py -q --no-cov
+    uv run pytest tests/test_ci_attribution.py -q --no-cov
 
 # Generate the quality + publish workflow pair for a new service.
 new-service kind name:
