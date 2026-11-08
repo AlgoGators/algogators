@@ -45,6 +45,7 @@ The machinery that keeps per-service pipelines honest.
 |---|---|
 | `check_workflow_paths.py` | enforces that every service's workflow path filters match reality (see [CONTRIBUTING.md](../CONTRIBUTING.md)) |
 | `new_service.py` | generates the quality / skip / publish workflow triple for a new service |
+| `check_attribution.py` | fails a pull request whose description or commit messages carry AI attribution (#179); run by `meta-attribution.yml` |
 | `templates/` | the templates it renders |
 
 Anything under `platform/` must be listed in the `paths:` filter of every service

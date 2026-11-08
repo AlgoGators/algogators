@@ -24,9 +24,10 @@ named `<slug> quality` (for example `app-website quality`).
 A member's `quality` workflow runs only when its own files change. Its `paths:` list is the only
 declaration of what the member owns (`platform/ci/_common.py`), so it must stay true.
 
-- **`meta-workflow-paths.yml`** runs `platform/ci/check_workflow_paths.py` and
-  `tests/test_ci_path_filters.py` on every PR and push to `main`. It is not path-filtered on
-  purpose: a new member directory with no workflow is invisible to a path filter.
+- **`meta-workflow-paths.yml`** runs `platform/ci/check_workflow_paths.py`,
+  `tests/test_ci_path_filters.py` and `tests/test_ci_attribution.py` on every PR and push to
+  `main`. It is not path-filtered on purpose: a new member directory with no workflow is invisible
+  to a path filter.
 - The checker fails when: a member has no caller, or a caller has no member; `pull_request.paths`
   and `push.paths` differ; a required path is missing (the member's own directory, its toolchain
   files, `platform/contracts/**` if it uses the contracts); a pattern matches nothing; the gate job
@@ -35,10 +36,14 @@ declaration of what the member owns (`platform/ci/_common.py`), so it must stay 
 - Toolchain files always required: Python `uv.lock`, `pyproject.toml`, `_quality-python.yml`; Node
   `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `_quality-node.yml`; C++ `vcpkg.json`,
   `CMakePresets.json`, `_quality-cpp.yml`.
-- Locally: `just check-paths` runs both. `just new-service <kind> <name>` writes a new member's
+- Locally: `just check-paths` runs the same three. `just new-service <kind> <name>` writes a new member's
   quality and publish workflows (quality only for `platform/`); the member needs its manifest
   first (`CONTRIBUTING.md`).
 - **`meta-actionlint.yml`** lints workflow syntax, filtered on `.github/workflows/**`.
+- **`meta-attribution.yml`** fails a PR whose description or commit messages carry AI attribution
+  (#179), with `platform/ci/check_attribution.py`. It runs on every PR and again when the
+  description is edited, with no path filter: the text it checks is not in the diff. Like every
+  check here it is not required ([decision 0016](../decisions/0016-no-required-status-checks-on-main.md)).
 - A `uv.lock` change fans out to every Python member, so `_quality-python.yml` first runs
   `platform/ci/quality_needed.py`: the matrix runs only if the member's resolved dependencies
   changed. It fails open (#17).

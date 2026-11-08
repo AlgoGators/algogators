@@ -1,0 +1,51 @@
+name: meta · attribution
+
+# No AI attribution in a pull request's text (#179, decision 0001). Fails the PR
+# when its description or any of its commit messages carries an AI
+# Co-authored-by line, a Claude-Session line, a claude.ai/code link or a
+# "Generated with" footer naming an AI tool. Human co-authors pass.
+#
+# The matching lives in platform/ci/check_attribution.py, tested by
+# tests/test_ci_attribution.py; this file only feeds it the description and the
+# commit messages.
+#
+# Deliberately NOT path-filtered: the text it checks is not in the diff. The
+# `edited` type re-runs it when the description changes.
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: meta-attribution-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: no AI attribution
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          # Only the script: the description comes from the event payload and
+          # the commit messages from the API.
+          sparse-checkout: platform/ci/check_attribution.py
+          sparse-checkout-cone-mode: false
+      - name: Check the description and every commit message
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # One JSON object per commit. GitHub lists at most 250 commits of a
+          # pull request; the script fails when the event counts more.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/commits" \
+            --jq '.[] | {sha, message: .commit.message} | tojson' > "$RUNNER_TEMP/commits.jsonl"
+          python3 platform/ci/check_attribution.py \
+            --event "$GITHUB_EVENT_PATH" --commits "$RUNNER_TEMP/commits.jsonl"

@@ -33,7 +33,8 @@ Each member has `<kind>-<name>.<purpose>.yml`; reusable ones start with `_`.
 | `svc-trade-ngin.deploy.yml` | deploy engine-rpc from `prod` |
 | `svc-trade-ngin.python.yml` | `tradengin` wheels; publish on tag `tradengin/vX.Y.Z` |
 | `svc-trade-ngin.watchdog.yml` | scheduled live-run checks |
-| `meta-workflow-paths.yml` | fails when a quality workflow's path filters stop matching the tree |
+| `meta-workflow-paths.yml` | fails when a quality workflow's path filters stop matching the tree, or the attribution check's tests fail |
+| `meta-attribution.yml` | fails a PR whose description or commit messages carry AI attribution (#179) |
 | `meta-graphify.yml` | Mondays: rebuilds the code graph and pushes `chore/graph-refresh` for a PR |
 
 ## GitHub

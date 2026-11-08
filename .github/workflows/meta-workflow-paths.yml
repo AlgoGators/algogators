@@ -45,3 +45,8 @@ jobs:
         # The checker proves the filters are self-consistent; these prove they
         # produce the right runs for a given changed-file set.
         run: uv run pytest tests/test_ci_path_filters.py -q --no-cov
+      - name: Test the attribution check
+        # meta-attribution.yml runs the check on every PR, but not its tests.
+        # They run here, unfiltered and in an environment already synced, so a
+        # change that breaks the matching fails the PR that makes it.
+        run: uv run pytest tests/test_ci_attribution.py -q --no-cov
