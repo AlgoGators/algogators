@@ -95,16 +95,28 @@ class CSVLoader(Loader):
                 f"Missing columns: {missing_columns}"
             )
 
-        # Ensure no duplicates or null values in 'dataSymbol'
-        if contracts_df["dataSymbol"].duplicated().any():
-            logging.error("Duplicate symbols found in 'dataSymbol' column.")
-            raise ValueError("Duplicate symbols found in 'dataSymbol' column.")
+        # Reject missing symbols before trimming
         if contracts_df["dataSymbol"].isnull().any():
             logging.error("Null values found in 'dataSymbol' column.")
             raise ValueError("Null values found in 'dataSymbol' column.")
 
-        # Normalize data: Strip whitespace and ensure consistent casing
+        # Trim symbols so the checks below compare cleaned values
         contracts_df["dataSymbol"] = contracts_df["dataSymbol"].str.strip()
+
+        # Reject symbols that are empty once trimmed
+        if (contracts_df["dataSymbol"] == "").any():
+            logging.error("Blank symbols found in 'dataSymbol' column.")
+            raise ValueError("Blank symbols found in 'dataSymbol' column.")
+
+        # Reject symbols that repeat once trimmed
+        symbols = contracts_df["dataSymbol"]
+        duplicates = sorted(symbols[symbols.duplicated()].unique())
+        if duplicates:
+            message = f"Duplicate symbols found in 'dataSymbol' column: {duplicates}."
+            logging.error(message)
+            raise ValueError(message)
+
+        # Normalize data: ensure consistent casing
         contracts_df["instrumentType"] = contracts_df["instrumentType"].str.upper()
 
         # Create a dictionary mapping symbols to their asset types
