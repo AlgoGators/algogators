@@ -206,6 +206,8 @@ Every script says at its top what it changes, what it reads, how long it takes a
 | `config_reference/` | the frozen run config every seed run is written from |
 | `lib.zsh`, `scratch_guard.zsh` | what the scripts share |
 | `pull_micro_metals.sh`, `PULL_REQUEST.md` | the Databento pull |
+| `HANDOFF.md` | where the release stands, what the rehearsal measured, and what is still open |
+| `rehearsal/` | the Vault login helper and the local scratch rehearsal (WSL or Linux); see `HANDOFF.md` |
 
 ## Dates after 2026-10-23
 
