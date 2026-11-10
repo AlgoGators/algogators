@@ -62,7 +62,7 @@ days() { python3 -c "import datetime as t,sys;s=t.date.fromisoformat(sys.argv[1]
 addd() { python3 -c "import datetime as t,sys;print((t.date.fromisoformat(sys.argv[1])+t.timedelta(int(sys.argv[2]))).isoformat())" "$1" "$2" }
 
 # The rehearsal's chain, to the cut: rows, then the md5 of date, book value, daily P&L and total costs, each to the cent.
-LIVE_REFERENCE="384 519541.86 1524f1a6a50a38b17d06f49fdbd6f7d1"
+LIVE_REFERENCE="384 519535.86 e2bb49dee5e2a06fc3473c7c4ec8d003"
 live_reference() {
   qr "select count(*)||' '||coalesce(round(max(current_portfolio_value) filter (where date='2026-10-23'),2)::text,'none')||' '||md5(string_agg(concat_ws(',',date,round(current_portfolio_value,2),round(daily_pnl,2),round(total_transaction_costs,2)), E'\n' order by date)) from trading.live_results where portfolio_id='$PID' and date<='2026-10-23'"
 }

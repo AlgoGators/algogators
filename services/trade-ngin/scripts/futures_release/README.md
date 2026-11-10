@@ -26,11 +26,16 @@ Run `zsh scripts/futures_release/00_prerequisites.sh` first. It checks everythin
 
 ## Before the seed: the fees
 
-SIL's exchange fee is still to confirm (0.60, so 0.86 per contract, is a value from an older notice; MGC's 0.96 is confirmed).
-Confirm it from CME's fee schedule or the charge on a SIL fill **before step 13**. The search reads the fee, so a different
-fee makes a different whole-contract book from the first traded day. It also sits in the metadata row, so it changes the
-metadata fingerprint. If the fee changes, the reference anchors must be remeasured first, and `EXPECTED.md`,
-`sql/expected_fingerprint.txt` and the live reference in `11_live_chain.sh` rewritten from the new runs. Do not pass
+SIL's fee is 1.36 per contract: 0.25 commission, 1.10 exchange (NYMEX Submission 26-196, CME SER 9676, effective 2026-04-01)
+and 0.01 regulatory. MGC's 0.96 is confirmed by the same notice. Production's row was loaded at 0.860 on 2026-10-30, so step 8a
+corrects it. The fee is applied to every date of the chain, also those before 2026-04-01.
+
+The anchors were remeasured at 1.36 on a copy of production, after the same copy reproduced the 0.86 reference to the cent. To
+2026-10-23 no fill's quantity or price changed: the book is 6.00 lower, 12 SIL contracts at 0.50. The run dated 2026-10-24
+differs: at 0.86 it sold one SIL, at 1.36 it does not. The backtests were not rerun at 1.36.
+
+The search reads the fee, so another change means remeasuring first, and rewriting `EXPECTED.md`,
+`sql/expected_fingerprint.txt` and the live reference in `11_live_chain.sh` from the new runs. Do not pass
 `ACCEPT_METADATA_MD5` for a fee: it is for a display column only. The margins change no book row.
 
 ## The order
@@ -50,6 +55,7 @@ takes MGC and SIL in beside GC and SI.
 | 6 | **Stop the QT runs** (below), then read the QT lines | QT desk's owner, then operator | `zsh $S/01_readonly_checks.sh production before_07` |
 | 7 | Part B: MGC.v.0 and SIL.v.0, once, with every day | operator | `ROWS="<folder>/rows" BACKFILL="<folder>" zsh $S/07_micros_part_B.sh production` |
 | 8 | The micros' 8 holes | operator | `zsh $S/08_fill_micros.sh production` (type 8, or more if the list shows holes after 2026-10-23) |
+| 8a | SIL's fee, 0.860 to 1.360 | operator | `zsh $S/07b_sil_fee.sh production` (type the database name) |
 | 9 | AlgoGators/algogators#85 merges (daily MGC.v.0 and SIL.v.0) | data owner | only after part B: part B refuses once #85 has stored those rows |
 | 10 | The listing pairs in every production futures config, QT's included | QT desk's owner, operator | below |
 | 11 | The merged build on production; `per_contract_rolls` on; **the QT runs restart** | deployment owner, QT desk's owner | below |
@@ -200,6 +206,8 @@ Every script says at its top what it changes, what it reads, how long it takes a
 | `config_reference/` | the frozen run config every seed run is written from |
 | `lib.zsh`, `scratch_guard.zsh` | what the scripts share |
 | `pull_micro_metals.sh`, `PULL_REQUEST.md` | the Databento pull |
+| `HANDOFF.md` | where the release stands, what the rehearsal measured, and what is still open |
+| `rehearsal/` | the Vault login helper and the local scratch rehearsal (WSL or Linux); see `HANDOFF.md` |
 
 ## Dates after 2026-10-23
 
@@ -212,7 +220,7 @@ from a right one by comparison.
 | Holes after 2026-10-23 | no tested ledger; the rule's checks only, and the list for the operator to read |
 | Bars after 2026-10-23 | no fingerprint; each load step's own counts only |
 | The backtests (09) | they end at the last bar, so their windows start later than the reference runs: no number can be compared |
-| The live chain to 2026-10-23 | `11 check` compares it with the rehearsal: 384 rows, book value 519,541.86 on 2026-10-23, an md5 of each day's value, P&L and costs |
+| The live chain to 2026-10-23 | `11 check` compares it with the rehearsal: 384 rows, book value 519,535.86 on 2026-10-23, an md5 of each day's value, P&L and costs |
 | The live chain after 2026-10-23 | the nine identities and the other-books compare only. The rehearsal's chain stopped at 2026-10-24, so new contracts and any roll after it have run on nothing |
 
 ## Tested, and not tested

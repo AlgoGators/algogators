@@ -43,19 +43,19 @@ These are the fingerprints of the data every reference run read. `sql/expected_f
 `09_backtests.sh run` and `11_live_chain.sh run` refuse (exit 3) unless they equal it. `01_readonly_checks.sh` cuts its lines at
 200 characters, so its `v0 symbols` line reads short; the file holds the whole line.
 
-| Line | Must read after 08 |
+| Line | Must read after 08 and 07b |
 |---|---|
 | futures_data.ohlcv_1d | 176,199 rows to 2026-10-23, md5 dc462978180f96821ecf01a8a6a82953 |
 | futures_data.ohlcv_1d_raw | 176,199 rows, md5 17bd9bc870c2cf03df935c1eb42224d1 |
 | contract_ohlcv_1d_less_loaded_at | 1,280,034 rows, md5 6104c856dcb47ec71e30a63d43b3dd66 |
-| metadata.contract_metadata | 42 rows, md5 37211534a7c7f9d5e5428406f674783e |
+| metadata.contract_metadata | 42 rows, md5 d642918b61587e61f9554b7732a76088 |
 | micros ohlcv_1d / ohlcv_1d_raw | 9,112 rows each, md5 3a6e41d348e7aa2c076a54161b0268c2 / 5874a752339469177e5c1e9c9039b143 |
 | v0 symbols | 38 (the 36 and MGC.v.0, SIL.v.0) |
 
 The two lines with loaded_at (the contract table whole and the micros' contract rows) differ by the insert clock only.
 If the metadata line differs, read what changed. A display column edited since is harmless: pass that md5 as
-`ACCEPT_METADATA_MD5=<md5>` to 09 and 11. A changed fee is not: the SIL row's fee (0.86, still to confirm) is read by the search,
-so a different fee moves the book and this md5 together. Confirm it before the seed; if it changes, the anchors are remeasured
+`ACCEPT_METADATA_MD5=<md5>` to 09 and 11. A changed fee is not: the SIL row's fee (1.36, set by `07b_sil_fee.sh`) is read by the search,
+so a different fee moves the book and this md5 together. A further change means the anchors are remeasured
 and this file, `sql/expected_fingerprint.txt` and the live reference are rewritten from the new runs (README, "Before the seed:
 the fees"). Any other difference stops the seed before the backtests: production would not be the data the reference runs read.
 
@@ -67,6 +67,7 @@ Per step (each script checks its own change and prints PASS or FAIL):
 | 04 hole fill | both continuous tables +476 rows to the cut, 167,087 each (and the listed holes after it, when the second number took them); the contract table less loaded_at, metadata and micros unchanged |
 | 07 part B | both continuous tables grown by the micros' rows only; contract table and metadata unchanged |
 | 08 micros fill | both continuous tables +8 rows to the cut (4 MGC.v.0, 4 SIL.v.0), equal to `fill/LEDGER_fill_micros.csv`, plus any listed hole after it; `second dry run: 0 holes left` |
+| 07b SIL fee | SIL's fee 1.360; the metadata md5 above: `PASS` |
 
 ## After the backtests (09)
 
@@ -78,7 +79,7 @@ Per step (each script checks its own change and prints PASS or FAIL):
 |---|---|
 | CONSERVATIVE live_results after 10 | 0 rows; live_start_date 2025-10-05 |
 | CONSERVATIVE live_results after 11 | one row per calendar date 2025-10-05 .. END, every identity PASS (`11_live_chain.sh check`) |
-| live reference to 2026-10-23 | PASS: 384 rows to 2026-10-23, book value 519,541.86, md5 1524f1a6a50a38b17d06f49fdbd6f7d1. The rehearsal's chain, to the cent (`11_live_chain.sh check`); no date after it has a reference |
+| live reference to 2026-10-23 | PASS: 384 rows to 2026-10-23, book value 519,535.86, md5 e2bb49dee5e2a06fc3473c7c4ec8d003. The rehearsal's chain, to the cent (`11_live_chain.sh check`); no date after it has a reference |
 | QT books | every row dated before the chain's cutoff unchanged (11's check compares count and md5 per table and book) |
 | no CONSERVATIVE row outside the scripts | the book's rows equal the chain's own: dates 2025-10-05 .. END, each run in `checks/progress.txt` |
 
