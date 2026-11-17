@@ -24,6 +24,7 @@ set(TEST_SOURCES
     core/test_backtest_window.cpp
     core/test_static_destruction_order_db.cpp
     core/test_to_json_temporary_hazard.cpp
+    core/test_source_nul_byte_guard.cpp
     data/test_db_utils.cpp
     data/test_utc_date_contract.cpp
     data/test_postgres_param_safety.cpp
