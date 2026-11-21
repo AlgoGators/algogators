@@ -13,6 +13,7 @@ Run locally with ``just check-paths``; runs in CI on every PR.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -25,12 +26,14 @@ except ModuleNotFoundError:  # pragma: no cover - only on 3.9/3.10
 from _common import (
     ALWAYS_REQUIRED,
     CONTRACTS_GLOB,
+    PRUNE_DIRS,
     REPO_ROOT,
     WORKFLOW_DIR,
     Member,
     QualityWorkflow,
     discover_members,
     load_quality_workflows,
+    path_matches,
     required_paths,
     uses_contracts,
 )
@@ -171,18 +174,22 @@ def rule_patterns_resolve(report: Report, wf: QualityWorkflow, root: Path) -> No
     renamed to `data-ngin` matches nothing, so the workflow never fires again --
     and looks completely normal in review.
     """
+    # Every file under root, pruning ignored directories in place.
+    files: list[str] = []
+    for directory, dirs, names in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in PRUNE_DIRS]
+        base = Path(directory).relative_to(root)
+        files.extend((base / name).as_posix() for name in names)
+
     for pattern in wf.pr_paths:
         if pattern.startswith("!"):
             continue  # negations legitimately match nothing
-        literal = pattern.split("*", 1)[0].rstrip("/")
-        if not literal:
-            continue
-        target = root / literal
-        if not target.exists():
+        # The complete pattern must match a file, using the same matcher as the rest of CI.
+        if not any(path_matches(f, [pattern]) for f in files):
             report.fail(
                 wf.rel,
-                f"path `{pattern}` matches nothing on disk (`{literal}` does not exist)",
-                "fix the glob, or remove it if the directory is gone",
+                f"path `{pattern}` matches nothing on disk",
+                "fix the glob, or remove it if the files are gone",
             )
 
 
