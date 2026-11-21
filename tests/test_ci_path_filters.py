@@ -29,11 +29,13 @@ sys.path.insert(0, str(REPO_ROOT / "platform" / "ci"))
 
 from _common import (  # noqa: E402
     MEMBER_ROOTS,
+    QualityWorkflow,
     any_match,
     discover_members,
     load_quality_workflows,
     path_matches,
 )
+from check_workflow_paths import Report, rule_patterns_resolve  # noqa: E402
 
 MEMBERS = discover_members(REPO_ROOT)
 QUALITY = {wf.slug: wf for wf in load_quality_workflows(WORKFLOWS)}
@@ -235,3 +237,50 @@ def test_member_roots_are_covered() -> None:
             for found in directory.glob(f"*/{manifest}"):
                 rel = found.parent.relative_to(REPO_ROOT).as_posix()
                 assert any(m.path == rel for m in MEMBERS), f"{rel} is not a discovered member"
+
+
+# ---------------------------------------------------------------------------
+# Pattern resolution
+# ---------------------------------------------------------------------------
+
+
+def resolve_problems(root: Path, pattern: str) -> list[tuple[str, str, str]]:
+    # A tree with one real file; the workflow only has to sit under REPO_ROOT.
+    (root / "services" / "data-ngin").mkdir(parents=True)
+    (root / "services" / "data-ngin" / "real.py").write_text("")
+    wf = QualityWorkflow(file=WORKFLOWS / "x.quality.yml", slug="x", pr_paths=[pattern])
+    report = Report()
+    rule_patterns_resolve(report, wf, root)
+    return report.problems
+
+
+def test_pattern_with_existing_prefix_but_missing_suffix_is_reported(tmp_path: Path) -> None:
+    """`services/data-ngin` exists, but nothing under it is named ghost.py."""
+    pattern = "services/data-ngin/**/ghost.py"
+    assert resolve_problems(tmp_path, pattern) == [
+        (
+            ".github/workflows/x.quality.yml",
+            f"path `{pattern}` matches nothing on disk",
+            "fix the glob, or remove it if the files are gone",
+        )
+    ]
+
+
+def test_leading_wildcard_pattern_matching_nothing_is_reported(tmp_path: Path) -> None:
+    """A pattern with no literal prefix used to be skipped, so it was never checked."""
+    pattern = "**/ghost.py"
+    assert resolve_problems(tmp_path, pattern) == [
+        (
+            ".github/workflows/x.quality.yml",
+            f"path `{pattern}` matches nothing on disk",
+            "fix the glob, or remove it if the files are gone",
+        )
+    ]
+
+
+def test_pattern_matching_a_file_after_a_wildcard_resolves(tmp_path: Path) -> None:
+    assert resolve_problems(tmp_path, "services/data-ngin/**/real.py") == []
+
+
+def test_negated_pattern_may_match_nothing(tmp_path: Path) -> None:
+    assert resolve_problems(tmp_path, "!services/data-ngin/**/ghost.py") == []
